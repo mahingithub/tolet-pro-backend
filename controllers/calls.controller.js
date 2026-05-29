@@ -9,6 +9,7 @@
  *   • Querying call history.
  *   • Getting the current call state (used as a fallback if the socket
  *     disconnects and the user needs to reconnect to an active call).
+ *   • Issuing short-lived ZegoCloud tokens for the media layer (Phase Call-3).
  *
  * Socket.IO handlers in socket.js will reference the Call model directly
  * for real-time state transitions (accept, reject, end, missed).
@@ -16,6 +17,8 @@
 
 const Call = require('../models/Call');
 const ApiError = require('../utils/ApiError');
+const env = require('../config/env');
+const { generateZegoToken } = require('../utils/zegoToken');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -110,4 +113,65 @@ exports.getActiveCall = asyncH(async (req, res) => {
     .populate('receiverId', 'name profilePicture phone');
 
   res.json({ call: call || null });
+});
+
+/**
+ * Issue a short-lived ZegoCloud token for the media layer. (Phase Call-3)
+ *
+ * POST /api/calls/zego-token   body: { roomId }
+ *
+ * Security model:
+ *   • Server Secret stays server-side; the client only ever gets this token.
+ *   • The token is ROOM-SCOPED: we look up a Call with this roomId where the
+ *     requester is the caller or receiver. No matching call → 403. This stops
+ *     a logged-in user from minting tokens for rooms they're not part of.
+ *   • The token's userID is the requester's Mongo _id. The frontend MUST call
+ *     loginRoom with this exact userID (returned below), or auth fails.
+ */
+exports.zegoToken = asyncH(async (req, res) => {
+  const { roomId } = req.body;
+  if (!roomId) throw ApiError.badRequest('Missing roomId.');
+
+  if (!env.zegoAppId || !env.zegoServerSecret) {
+    // Server simply isn't configured for calling yet. Respond directly so we
+    // don't depend on a specific ApiError constructor signature.
+    return res.status(503).json({
+      message: 'Calling is not configured on the server.',
+      code: 'calls_not_configured',
+    });
+  }
+
+  // Authorize: requester must be a participant of a call using this room.
+  const call = await Call.findOne({
+    roomId,
+    $or: [{ callerId: req.user._id }, { receiverId: req.user._id }],
+  });
+  if (!call) throw ApiError.forbidden('Not a participant of this room.');
+
+  const userId = String(req.user._id);
+  const userName = req.user.name || 'User';
+  const effectiveTimeInSeconds = 3600; // 1 hour; frontend refreshes as needed.
+
+  let token;
+  try {
+    token = generateZegoToken({
+      appId: env.zegoAppId,
+      userId,
+      serverSecret: env.zegoServerSecret,
+      effectiveTimeInSeconds,
+      roomId,
+    });
+  } catch (err) {
+    const msg = (err && (err.errorMessage || err.message)) || 'token generation failed';
+    return res.status(500).json({ message: `Zego token error: ${msg}`, code: 'zego_token_error' });
+  }
+
+  res.json({
+    token,
+    appId: env.zegoAppId,
+    userId,    // frontend must pass this exact value to loginRoom
+    userName,
+    roomId,
+    expiresIn: effectiveTimeInSeconds,
+  });
 });

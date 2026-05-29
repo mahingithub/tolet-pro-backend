@@ -8,9 +8,10 @@ const router = express.Router();
 
 router.use(requireAuth);
 
-router.post('/',          ctl.createCall);      // Initiate a call
-router.get('/history',    ctl.getCallHistory);   // Call history
-router.get('/active',     ctl.getActiveCall);    // Current active call (reconnect)
-router.get('/:id',        ctl.getCall);          // Get specific call state
+router.post('/',           ctl.createCall);      // Initiate a call
+router.post('/zego-token', ctl.zegoToken);       // Phase Call-3: media token
+router.get('/history',     ctl.getCallHistory);  // Call history
+router.get('/active',      ctl.getActiveCall);    // Current active call (reconnect)
+router.get('/:id',         ctl.getCall);          // Get specific call state (keep last)
 
 module.exports = router;
