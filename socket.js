@@ -28,27 +28,39 @@ const jwt = require('jsonwebtoken');
 const env = require('./config/env');
 const Call = require('./models/Call');
 
-// userId → Set<socketId>
-const userSockets = new Map();
-
 // callId → TimeoutHandle (for missed-call detection)
 const ringTimers = new Map();
 
 /**
- * Look up all socket IDs for a given user.
+ * Room naming: every socket for a given user joins the room `user:<userId>`.
+ *
+ * Why rooms instead of tracking socket.id in a Map?
+ *   On platforms like Render's free tier the WebSocket/long-poll connection
+ *   drops and reconnects constantly, so a socket.id captured at call-start is
+ *   stale seconds later — emitting to it silently goes nowhere (which is why
+ *   "accept" and "hang up" never reached the other side). A room is keyed by
+ *   userId, so no matter how many times the underlying socket reconnects with
+ *   a new id, the NEW socket re-joins the same room and routing keeps working.
+ *   Socket.IO also cleans membership up automatically on disconnect.
  */
-function getSocketsForUser(userId) {
-  return userSockets.get(String(userId)) || new Set();
+function roomFor(userId) {
+  return `user:${String(userId)}`;
 }
 
 /**
- * Emit an event to ALL sockets belonging to a user.
+ * Emit an event to ALL of a user's sockets via their room. Reconnect-safe.
  */
 function emitToUser(io, userId, event, payload) {
-  const sockets = getSocketsForUser(userId);
-  for (const sid of sockets) {
-    io.to(sid).emit(event, payload);
-  }
+  io.to(roomFor(userId)).emit(event, payload);
+}
+
+/**
+ * Back-compat helper: report whether a user currently has any live socket.
+ * Uses the adapter's room membership rather than a hand-maintained Map.
+ */
+function getSocketsForUser(io, userId) {
+  const room = io.sockets.adapter.rooms.get(roomFor(userId));
+  return room || new Set();
 }
 
 /**
@@ -64,10 +76,22 @@ function initSocket(httpServer) {
     // Optimize for Bangladesh mobile networks:
     // • Aggressive ping to detect drops quickly on 3G/4G.
     // • Reasonable timeout before declaring a disconnect.
-    pingInterval: 10_000,   // 10s
-    pingTimeout:  15_000,   // 15s
-    // Allow polling as a fallback for restrictive networks.
-    transports: ['websocket', 'polling'],
+    pingInterval: 25_000,   // 25s — too-frequent pings on a sleepy free dyno
+    pingTimeout:  60_000,   // 60s — give flaky mobile + free-tier room to breathe
+    // IMPORTANT (Render free tier): list polling FIRST. Render's proxy does not
+    // hold a raw WebSocket reliably, so "websocket-first" makes every client
+    // open WS → fail → fall back → retry WS → fail, in a loop. That loop is
+    // exactly the connect/disconnect churn seen in the logs, and it's why call
+    // signaling never completes. Start on polling (which always works through
+    // the proxy); Socket.IO then quietly upgrades to WS only if it actually holds.
+    transports: ['polling', 'websocket'],
+    // If a socket blips out and reconnects within this window, Socket.IO
+    // restores its session + missed packets instead of treating it as brand
+    // new. Smooths over the brief drops common on free hosting + mobile.
+    connectionStateRecovery: {
+      maxDisconnectionDuration: 2 * 60 * 1000, // 2 min
+      skipMiddlewares: false, // re-run auth on recovery
+    },
   });
 
   // ─── Authentication middleware ──────────────────────────────────────────
@@ -93,13 +117,16 @@ function initSocket(httpServer) {
   io.on('connection', (socket) => {
     const userId = socket.userId;
 
-    // Register socket in presence map.
-    if (!userSockets.has(userId)) {
-      userSockets.set(userId, new Set());
-    }
-    userSockets.get(userId).add(socket.id);
+    // Join this user's room. Reconnect-safe: a new socket for the same user
+    // re-joins the same room automatically, so call routing never breaks even
+    // when the underlying connection churns (Render free tier / mobile).
+    socket.join(roomFor(userId));
 
-    console.log(`[socket] user ${userId} connected (${socket.id})`);
+    if (socket.recovered) {
+      console.log(`[socket] user ${userId} RECONNECTED+recovered (${socket.id})`);
+    } else {
+      console.log(`[socket] user ${userId} connected (${socket.id})`);
+    }
 
     // ── CALL_INITIATED ────────────────────────────────────────────────────
     // Payload: { callId, receiverId, type, roomId, callerName, callerAvatar }
@@ -266,15 +293,10 @@ function initSocket(httpServer) {
     });
 
     // ── Disconnect ────────────────────────────────────────────────────────
-    socket.on('disconnect', () => {
-      const sockets = userSockets.get(userId);
-      if (sockets) {
-        sockets.delete(socket.id);
-        if (sockets.size === 0) {
-          userSockets.delete(userId);
-        }
-      }
-      console.log(`[socket] user ${userId} disconnected (${socket.id})`);
+    socket.on('disconnect', (reason) => {
+      // No manual cleanup needed: Socket.IO removes the socket from its rooms
+      // automatically. We keep this purely for observability.
+      console.log(`[socket] user ${userId} disconnected (${socket.id}) — ${reason}`);
     });
   });
 
