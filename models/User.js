@@ -246,6 +246,9 @@ const UserSchema = new mongoose.Schema(
       aiLearningOptIn: { type: Boolean, default: false },
       marketingEmails: { type: Boolean, default: true },
       smsAlerts:       { type: Boolean, default: true },
+      // Phase Call-6: master switch for incoming-call push notifications.
+      // When false, the backend skips sending FCM on CALL_INITIATED.
+      callNotifications: { type: Boolean, default: true },
       theme:           { type: String, enum: ['system', 'light', 'dark'], default: 'system' },
       language:        { type: String, enum: ['en', 'bn'], default: 'en' },
     },
@@ -256,6 +259,17 @@ const UserSchema = new mongoose.Schema(
         ipAddress:  { type: String, default: '0.0.0.0' },
         lastSeenAt: { type: Date, default: Date.now },
         createdAt:  { type: Date, default: Date.now },
+      }
+    ],
+    // ─── Phase Call-6: FCM device tokens for push notifications ──────────
+    // One entry per browser/device the user has granted notification
+    // permission on. POST /api/notifications/register-device upserts here;
+    // dead tokens are pruned automatically when FCM reports them invalid.
+    deviceTokens: [
+      {
+        token:    { type: String, required: true },
+        platform: { type: String, default: 'web', maxlength: 20 },
+        addedAt:  { type: Date, default: Date.now },
       }
     ],
     pendingDeletion: {

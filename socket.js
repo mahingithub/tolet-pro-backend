@@ -27,6 +27,9 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const env = require('./config/env');
 const Call = require('./models/Call');
+// Phase Call-6: push notifications when the receiver's app is closed.
+const User = require('./models/User');
+const fcm = require('./services/fcm.service');
 
 // callId → TimeoutHandle (for missed-call detection)
 const ringTimers = new Map();
@@ -143,6 +146,36 @@ function initSocket(httpServer) {
           type,
           roomId,
         });
+
+        // Phase Call-6: ALSO send a push notification so the receiver is
+        // alerted even if their PWA is closed/backgrounded (socket only
+        // reaches a live tab). Fire-and-forget — never blocks the ring, and
+        // failures are swallowed inside the service. Dead tokens get pruned.
+        (async () => {
+          try {
+            const receiver = await User.findById(receiverId)
+              .select('deviceTokens preferences')
+              .lean();
+            if (!receiver) return;
+            // Respect the user's toggle (defaults on).
+            if (receiver.preferences && receiver.preferences.callNotifications === false) return;
+            const tokens = (receiver.deviceTokens || []).map((d) => d.token).filter(Boolean);
+            if (tokens.length === 0) return;
+
+            const { invalidTokens } = await fcm.sendIncomingCall(tokens, {
+              callId, callerId: userId, callerName, callerAvatar, type, roomId,
+            });
+            // Prune any tokens FCM rejected as dead.
+            if (invalidTokens && invalidTokens.length) {
+              await User.updateOne(
+                { _id: receiverId },
+                { $pull: { deviceTokens: { token: { $in: invalidTokens } } } },
+              );
+            }
+          } catch (err) {
+            console.warn('[socket] FCM push on CALL_INITIATED failed:', err.message);
+          }
+        })();
 
         // Set a 30-second timeout for missed call detection.
         const timer = setTimeout(async () => {
