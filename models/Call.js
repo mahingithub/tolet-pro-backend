@@ -58,6 +58,24 @@ const CallSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Phase Call-4: users who have "seen" this call in their Calls tab.
+    // The missed-call badge counts incoming missed calls where the current
+    // user's id is NOT in this array. POST /api/calls/mark-seen adds them.
+    seenBy: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+      },
+    ],
+    // Phase Call-4: per-user soft delete. DELETE /api/calls/:id adds the
+    // requester here; getCallHistory hides calls where the current user is
+    // listed, so deleting only removes it from THAT user's history.
+    deletedBy: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+      },
+    ],
   },
   { timestamps: true }
 );

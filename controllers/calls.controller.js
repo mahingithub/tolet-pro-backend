@@ -64,8 +64,8 @@ exports.createCall = asyncH(async (req, res) => {
  */
 exports.getCall = asyncH(async (req, res) => {
   const call = await Call.findById(req.params.id)
-    .populate('callerId', 'name profilePicture phone')
-    .populate('receiverId', 'name profilePicture phone');
+    .populate('callerId', 'name profilePicture phone role')
+    .populate('receiverId', 'name profilePicture phone role');
 
   if (!call) throw ApiError.notFound('Call not found');
 
@@ -88,11 +88,13 @@ exports.getCallHistory = asyncH(async (req, res) => {
 
   const calls = await Call.find({
     $or: [{ callerId: userId }, { receiverId: userId }],
+    // Phase Call-4: hide calls this user has soft-deleted from their history.
+    deletedBy: { $ne: userId },
   })
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate('callerId', 'name profilePicture')
-    .populate('receiverId', 'name profilePicture')
+    .populate('callerId', 'name profilePicture role')
+    .populate('receiverId', 'name profilePicture role')
     .lean();
 
   res.json({ calls });
@@ -174,4 +176,57 @@ exports.zegoToken = asyncH(async (req, res) => {
     roomId,
     expiresIn: effectiveTimeInSeconds,
   });
+});
+
+/**
+ * Mark the current user's missed incoming calls as "seen". (Phase Call-4)
+ *
+ * POST /api/calls/mark-seen
+ *
+ * Called when the user opens the Calls tab so the red missed-call badge
+ * clears. Only touches calls where the user is the RECEIVER and the status
+ * is 'missed' — those are the ones that drive the badge. Idempotent.
+ */
+exports.markSeen = asyncH(async (req, res) => {
+  const userId = req.user._id;
+
+  const result = await Call.updateMany(
+    {
+      receiverId: userId,
+      status: 'missed',
+      seenBy: { $ne: userId },
+    },
+    { $addToSet: { seenBy: userId } },
+  );
+
+  // mongoose returns modifiedCount (v6+) — fall back gracefully for older.
+  const updated = result.modifiedCount ?? result.nModified ?? 0;
+  res.json({ updated });
+});
+
+/**
+ * Soft-delete a call from the current user's history. (Phase Call-4)
+ *
+ * DELETE /api/calls/:id
+ *
+ * This is a PER-USER delete: we add the requester to `deletedBy` rather than
+ * removing the document, so the other participant still sees the call in their
+ * own history. getCallHistory filters out calls where the user is in deletedBy.
+ */
+exports.deleteCall = asyncH(async (req, res) => {
+  const call = await Call.findById(req.params.id);
+  if (!call) throw ApiError.notFound('Call not found');
+
+  const userId = req.user._id.toString();
+  if (call.callerId.toString() !== userId &&
+      call.receiverId.toString() !== userId) {
+    throw ApiError.forbidden('Not authorized to delete this call');
+  }
+
+  await Call.updateOne(
+    { _id: call._id },
+    { $addToSet: { deletedBy: req.user._id } },
+  );
+
+  res.json({ deleted: true, id: String(call._id) });
 });
