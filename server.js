@@ -1,5 +1,9 @@
 'use strict';
 
+// Sentry MUST be initialised before anything else (Phase 7).
+// This require runs instrument.js, which calls Sentry.init().
+require('./instrument');
+
 const env = require('./config/env');
 const express = require('express');
 const cors = require('cors');
@@ -86,6 +90,11 @@ app.use('/api/admin/support',  require('./routes/admin.support.routes'));
 app.use((req, res) => {
   res.status(404).json({ message: 'পথ পাওয়া যায়নি।', code: 'not_found', path: req.originalUrl });
 });
+
+// Phase 7: Sentry must capture errors BEFORE our own handler formats them.
+// (No-op if SENTRY_DSN isn't set — safe either way.)
+const Sentry = require('@sentry/node');
+Sentry.setupExpressErrorHandler(app);
 
 app.use(errorHandler);
 
