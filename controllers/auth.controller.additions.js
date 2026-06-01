@@ -300,6 +300,14 @@ async function uploadAvatar(req, res, next) {
     // "delete avatar" flow can call cloudinary.destroy() cleanly.
     me.avatar         = result.secureUrl;
     me.avatarPublicId = result.publicId;
+
+    // Fix: Mark verification photo as done so timeline ticks off
+    me.tenantProfile = me.tenantProfile || {};
+    me.tenantProfile.verification = me.tenantProfile.verification || {};
+    me.tenantProfile.verification.photo = true;
+    me.tenantProfile.verification.photoUrl = result.secureUrl;
+    me.tenantProfile.verification.photoPublicId = result.publicId;
+
     await me.save();
 
     return res.json({ user: me.toJSON() });

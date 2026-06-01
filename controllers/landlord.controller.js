@@ -144,6 +144,10 @@ async function getLandlord(req, res, next) {
         createdAt,
         isNew,
         totalProperties,
+        preferredTenants: user.landlordProfile?.preferredTenants || [],
+        communication:   user.landlordProfile?.communication || [],
+        houseRules:      user.landlordProfile?.houseRules || [],
+        serviceCharge:   user.landlordProfile?.serviceCharge ?? null,
         badges:          [],
         verification,
         // Headline = landlord trust. Falls back to tenant trust when the

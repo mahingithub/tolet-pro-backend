@@ -104,11 +104,15 @@ async function getTenant(req, res, next) {
     //   • the tenant themselves
     //   • a landlord with an active inquiry / booking link
     if (unlocked) {
+      trustCard.unlocked     = true;
       trustCard.phone        = user.phone || '';
       trustCard.email        = user.email || '';
       trustCard.dateOfBirth  = user.dateOfBirth || null;
+      trustCard.professionDetails = tp.professionDetails || {};
+      trustCard.emergencyContact  = tp.emergencyContact || {};
       trustCard.unlockReason = isSelf ? 'self' : 'inquiry-or-booking';
     } else {
+      trustCard.unlocked     = false;
       trustCard.unlockReason = 'public-card-only';
     }
 
