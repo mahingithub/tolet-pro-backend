@@ -22,7 +22,7 @@ const tenantRoutes   = require('./routes/tenant.routes');
 const errorHandler   = require('./middleware/errorHandler');
 const firebaseAdmin  = require('./services/firebaseAdmin');
 // Phase Call-7: request rate limiting (brute-force + spam protection)
-const { authLimiter, writeLimiter, apiLimiter } = require('./middleware/rateLimiters');
+const { authLimiter, writeLimiter, chatLimiter, apiLimiter } = require('./middleware/rateLimiters');
 
 const app = express();
 
@@ -74,7 +74,7 @@ app.use('/api/landlords',  landlordRoutes);
 app.use('/api/tenants',    tenantRoutes);
 app.use('/api/admin',      require('./routes/admin.routes'));
 // MEDIUM limiter on messaging (spam-prone).
-app.use('/api/conversations',  writeLimiter, require('./routes/chat.routes'));
+app.use('/api/conversations',  chatLimiter, require('./routes/chat.routes'));
 app.use('/api/notifications',  require('./routes/notification.routes'));
 // MEDIUM limiter on bookings (spam-prone).
 app.use('/api/bookings',       writeLimiter, require('./routes/booking.routes'));

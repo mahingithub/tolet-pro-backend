@@ -66,6 +66,23 @@ const writeLimiter = rateLimit({
 });
 
 /**
+ * CHAT — polling-based chat surface (/api/conversations).
+ * The frontend polls messages every ~5s and the conversation list every ~15s,
+ * so a single idle user generates ~80 requests / 5 min just sitting on the
+ * chat page. writeLimiter (60/5min) would wrongly block that, so chat gets its
+ * own generous limiter: still protects against true flooding, but never trips
+ * during normal polling + sending. Keyed per IP.
+ *
+ * 400 requests / 5 min ≈ comfortably above the ~80 from polling plus active
+ * sending of text + the occasional image / voice upload.
+ */
+const chatLimiter = rateLimit({
+  ...base,
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 400,
+});
+
+/**
  * LIGHT — global backstop across the whole API. Catches anything not covered
  * above and protects the free-tier server from a flood.
  * 300 requests per minute per IP — very high; a real session (loading
@@ -77,4 +94,4 @@ const apiLimiter = rateLimit({
   max: 300,
 });
 
-module.exports = { authLimiter, writeLimiter, apiLimiter };
+module.exports = { authLimiter, writeLimiter, chatLimiter, apiLimiter };
