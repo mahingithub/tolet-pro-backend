@@ -122,6 +122,9 @@ app.use('/api', apiLimiter);
 // STRICT limiter on auth — stops login/OTP brute-force.
 app.use('/api/auth',       authLimiter, authRoutes);
 app.use('/api/properties', propertyRoutes);
+// Server-side Overpass (OpenStreetMap) proxy for property "Nearby places" —
+// browser can't call Overpass directly (CORS + 406). Global apiLimiter covers it.
+app.use('/api/geo',        require('./routes/geo.routes'));
 // MEDIUM limiter on inquiry creation (spam-prone).
 app.use('/api/inquiries',  writeLimiter, inquiryRoutes);
 app.use('/api/host',       hostRoutes);
