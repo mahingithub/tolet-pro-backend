@@ -32,6 +32,22 @@ function trimForListCard(p) {
   return p;
 }
 
+function formatLeanProperty(p) {
+  if (typeof p.toJSON === 'function') return p.toJSON();
+  const ret = { ...p };
+  ret.id              = String(ret._id);
+  ret.landlordId      = ret.ownerUserId ? String(ret.ownerUserId) : null;
+  ret.landlordName    = ret.ownerName  || '';
+  ret.landlordPhone   = ret.ownerPhone || '';
+  ret.gpsLat          = ret.gps && ret.gps.lat ? ret.gps.lat : null;
+  ret.gpsLng          = ret.gps && ret.gps.lng ? ret.gps.lng : null;
+  ret.gpsAddress      = ret.gps && ret.gps.address ? ret.gps.address : '';
+  ret.rentalCategory  = ret.category;
+  delete ret.searchHaystack;
+  delete ret._id;
+  return ret;
+}
+
 exports.createProperty = asyncH(async (req, res) => {
   const doc = await propertyService.createProperty({ body: req.body, user: req.user });
   res.status(201).json({ property: doc.toJSON() });
@@ -49,7 +65,7 @@ exports.getProperties = asyncH(async (req, res) => {
   }
   const out = await propertyService.listProperties(parsed.data);
   res.json({
-    properties: out.items.map((d) => trimForListCard(d.toJSON())),
+    properties: out.items.map((d) => trimForListCard(formatLeanProperty(d))),
     total: out.total,
     page:  out.page,
     limit: out.limit,
