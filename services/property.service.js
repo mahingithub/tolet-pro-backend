@@ -105,11 +105,15 @@ async function listProperties(query) {
 
   const [items, total] = await Promise.all([
     // Never load the walkthrough video for a LIST. `videoUrl` can be a ~25MB
-    // base64 data: URL; pulling it for every row blows past Render's 512MB RAM
-    // and crashes the request (500). trimForListCard() drops it anyway, so the
-    // response is identical — this just keeps it out of memory. The detail
-    // endpoint (getPropertyById) still returns the full document with video.
-    Property.find(filter).select('-videoUrl').sort(sort).skip(skip).limit(limit),
+    // base64 data: URL. We also exclude description and searchHaystack.
+    // We use .lean() to skip Mongoose hydration overhead which prevents OOM
+    // on Render's 512MB RAM limit when loading many properties with base64 images.
+    Property.find(filter)
+      .select('-videoUrl -description -searchHaystack')
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     Property.countDocuments(filter),
   ]);
 
