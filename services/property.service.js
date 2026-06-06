@@ -108,12 +108,26 @@ async function listProperties(query) {
     // base64 data: URL. We also exclude description and searchHaystack.
     // We use .lean() to skip Mongoose hydration overhead which prevents OOM
     // on Render's 512MB RAM limit when loading many properties with base64 images.
-    Property.find(filter)
-      .select('-videoUrl -description -searchHaystack')
-      .sort(sort)
-      .skip(skip)
-      .limit(limit)
-      .lean(),
+    Property.aggregate([
+      { $match: filter },
+      // Project out the massive base64 strings BEFORE sorting. This prevents the
+      // 32MB in-memory sort limit (OOM) on MongoDB Free Tier (M0) which doesn't
+      // support allowDiskUse: true.
+      { $project: { coverPhoto: 0, roomPhotos: 0, videoUrl: 0, description: 0, searchHaystack: 0 } },
+      { $sort: sort },
+      { $skip: skip },
+      { $limit: limit }
+    ])
+    .then(async (idDocs) => {
+      const ids = idDocs.map(d => d._id);
+      if (ids.length === 0) return [];
+      const unsortedItems = await Property.find({ _id: { $in: ids } })
+        .select('-videoUrl -description -searchHaystack')
+        .lean();
+      const map = {};
+      unsortedItems.forEach(item => map[item._id.toString()] = item);
+      return ids.map(id => map[id.toString()]).filter(Boolean);
+    }),
     Property.countDocuments(filter),
   ]);
 
