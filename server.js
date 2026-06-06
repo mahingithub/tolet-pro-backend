@@ -128,6 +128,7 @@ app.use('/api/geo',        require('./routes/geo.routes'));
 // MEDIUM limiter on inquiry creation (spam-prone).
 app.use('/api/inquiries',  writeLimiter, inquiryRoutes);
 app.use('/api/host',       hostRoutes);
+app.use('/api/host-stats', require('./routes/hostStats.routes')); // real host performance metrics
 app.use('/api/landlords',  landlordRoutes);
 app.use('/api/tenants',    tenantRoutes);
 app.use('/api/admin',      require('./routes/admin.routes'));
