@@ -18,4 +18,7 @@ router.get('/mine', requireAuth, ctl.getMyInquiries);
 // Host updates inquiry status: new → seen → replied → closed.
 router.patch('/:id/status', requireAuth, validate(v.updateInquiry), ctl.updateInquiryStatus);
 
+// Host deletes inquiry entirely
+router.delete('/:id', requireAuth, ctl.deleteInquiry);
+
 module.exports = router;

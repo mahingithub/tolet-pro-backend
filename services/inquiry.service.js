@@ -108,9 +108,26 @@ async function updateInquiryStatus({ id, body, user }) {
   return doc;
 }
 
+async function deleteInquiry({ id, user }) {
+  const doc = await Inquiry.findById(id);
+  if (!doc) throw ApiError.notFound('Inquiry পাওয়া যায়নি।', { code: 'inquiry_not_found' });
+  if (String(doc.propertyOwnerId) !== String(user._id)) {
+    throw ApiError.forbidden('শুধু মালিকই inquiry ডিলেট করতে পারবেন।', { code: 'not_owner' });
+  }
+  
+  await Inquiry.deleteOne({ _id: id });
+  
+  // Optionally decrement property inquiries counter
+  Property.updateOne({ _id: doc.propertyId }, { $inc: { inquiries: -1 } })
+    .catch((err) => console.warn('[inquiry] counter decrement failed:', err.message));
+    
+  return { success: true };
+}
+
 module.exports = {
   createInquiry,
   listHostInquiries,
   listMyInquiries,
   updateInquiryStatus,
+  deleteInquiry,
 };

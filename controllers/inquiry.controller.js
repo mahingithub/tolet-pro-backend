@@ -30,3 +30,11 @@ exports.updateInquiryStatus = asyncH(async (req, res) => {
   });
   res.json({ inquiry: doc.toJSON() });
 });
+
+exports.deleteInquiry = asyncH(async (req, res) => {
+  await inquiryService.deleteInquiry({
+    id: req.params.id,
+    user: req.user,
+  });
+  res.json({ success: true });
+});
