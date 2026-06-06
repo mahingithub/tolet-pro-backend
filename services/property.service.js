@@ -36,6 +36,9 @@ function findIdOrSlug(idOrSlug) {
 
 // ─── Service ───────────────────────────────────────────────────────────────
 async function createProperty({ body, user }) {
+  // Wizard now collects both `floor` (legacy) and `floorNumber` (the new
+  // "On which floor is this property located?" input). Either side wins,
+  // and the model's pre('validate') hook keeps them in lockstep.
   const wizardFloor =
     Number.isFinite(Number(body.floorNumber)) && Number(body.floorNumber) !== 0
       ? Number(body.floorNumber)
@@ -45,6 +48,8 @@ async function createProperty({ body, user }) {
     title:       body.title,
     description: body.description || '',
     intent:      body.intent      || 'rent',
+    // 'flat' is the new default — if a legacy caller still sends
+    // 'apartment' the model's pre('validate') hook normalises it.
     type:        body.type        || 'flat',
     category:    body.category    || 'family',
     division:    body.division,
@@ -83,39 +88,23 @@ async function getPropertyById(idOrSlug) {
 async function listProperties(query) {
   const filter = searchService.buildSearchFilter(query);
 
-  // Public listing endpoint: only surface active listings.
-  // Internal endpoints like /api/host/properties bypass this — they
-  // call listMyProperties below.
+  // Public listing endpoint: only surface listings that are actively
+  // available to rent. A landlord pausing or renting a listing should
+  // remove it from search immediately. (Internal endpoints like
+  // /api/host/properties continue to bypass this filter — they call
+  // listMyProperties below.) If the caller explicitly passed a status
+  // we respect it (used by the admin moderation queue).
   if (!filter.status) {
     filter.status = 'active';
   }
 
-  const sort  = searchService.buildSortOptions(query.sort);
-  const page  = query.page  || 1;
-  const limit = query.limit || 50;
-  const skip  = (page - 1) * limit;
+  const sort   = searchService.buildSortOptions(query.sort);
+  const page   = query.page  || 1;
+  const limit  = query.limit || 50;
+  const skip   = (page - 1) * limit;
 
-  // ── FIX: MongoDB sort memory limit (32 MB) ────────────────────────────
-  // Properties store large base64 blobs (coverPhoto, roomPhotos, videoUrl).
-  // Sorting the full documents blew past Mongo's in-memory sort limit:
-  //   "Sort exceeded memory limit of 33554432 bytes"
-  //
-  // Two-part fix:
-  //   1. .select() — strip the heavy base64 fields BEFORE sort so Mongo
-  //      only ranks lightweight scalar fields (price, createdAt, etc.).
-  //      The controller's trimForListCard() already drops videoUrl on the
-  //      way out; we drop it + the photo blobs here so they never enter
-  //      the sort pipeline at all.
-  //   2. .allowDiskUse(true) — safety net for edge cases where even the
-  //      trimmed documents exceed 32 MB (very large collections).
-  // ─────────────────────────────────────────────────────────────────────
   const [items, total] = await Promise.all([
-    Property.find(filter)
-      .select('-videoUrl -searchHaystack')
-      .sort(sort)
-      .skip(skip)
-      .limit(limit)
-      .allowDiskUse(true),
+    Property.find(filter).sort(sort).skip(skip).limit(limit),
     Property.countDocuments(filter),
   ]);
 
@@ -135,6 +124,8 @@ async function updateProperty({ idOrSlug, body, user }) {
     });
   }
 
+  // Apply only the fields the caller actually sent. Re-running the model's
+  // pre('validate') hook on .save() rebuilds the slug-and-haystack pair.
   const scalarFields = [
     'title', 'description', 'intent', 'type', 'category',
     'division', 'district', 'area', 'location',
@@ -146,6 +137,9 @@ async function updateProperty({ idOrSlug, body, user }) {
       doc[f] = body[f];
     }
   }
+  // Keep `floor` and `floorNumber` in lockstep on partial updates: if the
+  // caller patched only one side, mirror it to the other so older
+  // readers don't go stale.
   if (Object.prototype.hasOwnProperty.call(body, 'floorNumber') &&
       !Object.prototype.hasOwnProperty.call(body, 'floor')) {
     doc.floor = body.floorNumber;
