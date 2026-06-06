@@ -104,7 +104,12 @@ async function listProperties(query) {
   const skip   = (page - 1) * limit;
 
   const [items, total] = await Promise.all([
-    Property.find(filter).sort(sort).skip(skip).limit(limit),
+    // Never load the walkthrough video for a LIST. `videoUrl` can be a ~25MB
+    // base64 data: URL; pulling it for every row blows past Render's 512MB RAM
+    // and crashes the request (500). trimForListCard() drops it anyway, so the
+    // response is identical — this just keeps it out of memory. The detail
+    // endpoint (getPropertyById) still returns the full document with video.
+    Property.find(filter).select('-videoUrl').sort(sort).skip(skip).limit(limit),
     Property.countDocuments(filter),
   ]);
 
