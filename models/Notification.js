@@ -11,6 +11,9 @@
  *   - 'inquiry_new'      → landlord receives a new inquiry
  *   - 'inquiry_status'   → tenant's inquiry was updated (active / archived / rejected / converted)
  *   - 'message_new'      → counterpart sent a new chat message
+ *   - 'rent_receipt'     → tenant receives a new rent receipt
+ *   - 'rent_invoice'     → tenant receives a new rent invoice
+ *   - 'rent_overdue'     → tenant receives a notification about an overdue rent payment
  *
  * `data` is a free-form payload that lets the frontend deep-link without a
  * second round-trip — e.g. inquiryId, conversationId, propertyTitle.
@@ -23,7 +26,7 @@ const NotificationSchema = new mongoose.Schema(
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     type:   {
       type: String,
-      enum: ['inquiry_new', 'inquiry_status', 'message_new', 'system', 'rent_receipt'],
+      enum: ['inquiry_new', 'inquiry_status', 'message_new', 'system', 'rent_receipt', 'rent_invoice', 'rent_overdue'],
       required: true,
     },
     title:  { type: String, trim: true, default: '', maxlength: 160 },
