@@ -140,4 +140,61 @@ async function sendIncomingCall(tokens, call) {
   }
 }
 
-module.exports = { sendIncomingCall, getMessaging };
+async function sendMissedCall(tokens, call) {
+  const messaging = getMessaging();
+  const list = (tokens || []).filter(Boolean);
+  if (!messaging || list.length === 0) {
+    return { sent: 0, failed: 0, invalidTokens: [] };
+  }
+
+  const { callId, callerId, callerName, callerAvatar, type, roomId, receiverId } = call;
+  const title = `Missed call from ${callerName || 'Someone'}`;
+  const body = type === 'video' ? 'You missed a video call' : 'You missed a voice call';
+  const apiBaseUrl = publicApiBaseUrl();
+
+  const message = {
+    tokens: list,
+    data: {
+      kind: 'missed_call',
+      callId: String(callId || ''),
+      callerId: String(callerId || ''),
+      callerName: String(callerName || ''),
+      callerAvatar: String(callerAvatar || ''),
+      receiverId: String(receiverId || ''),
+      type: String(type || 'voice'),
+      roomId: String(roomId || ''),
+      title,
+      body,
+      click_action: 'MISSED_CALL',
+      apiBaseUrl,
+      sentAt: String(Date.now()),
+    },
+    android: { priority: 'high' },
+    webpush: {
+      headers: { Urgency: 'high', TTL: '300' },
+    },
+  };
+
+  try {
+    const resp = await messaging.sendEachForMulticast(message);
+    const invalidTokens = [];
+    resp.responses.forEach((r, i) => {
+      if (!r.success) {
+        const code = r.error?.code || '';
+        if (
+          code === 'messaging/registration-token-not-registered' ||
+          code === 'messaging/invalid-registration-token' ||
+          code === 'messaging/invalid-argument'
+        ) {
+          invalidTokens.push(list[i]);
+        }
+      }
+    });
+    return { sent: resp.successCount, failed: resp.failureCount, invalidTokens };
+  } catch (err) {
+    console.warn('[fcm] sendMissedCall failed:', err.message);
+    return { sent: 0, failed: list.length, invalidTokens: [] };
+  }
+}
+
+module.exports = { sendIncomingCall, sendMissedCall, getMessaging };

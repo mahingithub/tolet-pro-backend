@@ -210,6 +210,37 @@ function initSocket(httpServer) {
               // Notify both parties.
               emitToUser(io, userId, 'CALL_MISSED', { callId });
               emitToUser(io, receiverId, 'CALL_MISSED', { callId });
+
+              // Also notify closed/backgrounded PWAs. The socket event above
+              // only reaches live tabs, so a user with their phone locked would
+              // otherwise never see the missed-call notice until opening the app.
+              try {
+                const receiver = await User.findById(receiverId)
+                  .select('deviceTokens preferences')
+                  .lean();
+                if (receiver && !(receiver.preferences && receiver.preferences.callNotifications === false)) {
+                  const tokens = (receiver.deviceTokens || []).map((d) => d.token).filter(Boolean);
+                  if (tokens.length) {
+                    const { invalidTokens } = await fcm.sendMissedCall(tokens, {
+                      callId,
+                      callerId: userId,
+                      receiverId,
+                      callerName,
+                      callerAvatar,
+                      type,
+                      roomId,
+                    });
+                    if (invalidTokens && invalidTokens.length) {
+                      await User.updateOne(
+                        { _id: receiverId },
+                        { $pull: { deviceTokens: { token: { $in: invalidTokens } } } },
+                      );
+                    }
+                  }
+                }
+              } catch (err) {
+                console.warn('[socket] FCM push on CALL_MISSED failed:', err.message);
+              }
             }
           } catch (err) {
             console.error('[socket] missed-call timer error:', err.message);
