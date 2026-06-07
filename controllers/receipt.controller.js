@@ -22,8 +22,12 @@ function isObjectId(v) {
 async function listTenantReceipts(req, res, next) {
   try {
     const conditions = [{ tenantId: req.user._id }];
-    if (req.user.phone) {
-      conditions.push({ tenantPhone: req.user.phone });
+    // Only match by phone if it's a real, non-trivial number (10+ digits).
+    // Empty strings, placeholders like '1234567890', and nulls are excluded
+    // to prevent receipts leaking to unrelated accounts.
+    const phone = (req.user.phone || '').trim();
+    if (phone.length >= 10 && !/^(\+?0+|1234567890|0000000000)$/.test(phone)) {
+      conditions.push({ tenantPhone: phone });
     }
     const receipts = await Receipt.find({ $or: conditions })
       .sort({ issuedAt: -1 })
@@ -62,7 +66,7 @@ async function markReceiptRead(req, res, next) {
     // Only the tenant (or phone-matched user) may mark as read.
     const isTenant = (
       (receipt.tenantId && String(receipt.tenantId) === String(req.user._id)) ||
-      (receipt.tenantPhone && receipt.tenantPhone === req.user.phone)
+      (receipt.tenantPhone && receipt.tenantPhone.length >= 10 && receipt.tenantPhone === req.user.phone)
     );
     if (!isTenant) throw ApiError.forbidden('এই রিসিট আপনার নয়।');
 

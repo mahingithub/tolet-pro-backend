@@ -64,7 +64,7 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
           tenantId:      booking.tenantId,
           propertyId:    booking.propertyId,
           propertyTitle: booking.property || '',
-          tenantPhone:   booking.tenantPhone || '',
+          tenantPhone:   booking.tenantPhone || null,
           monthLabel:    payment.monthLabel || monthKey,
           status,
           totalDue:      Number(payment.totalDue) || Number(booking.monthlyRent) || 0,

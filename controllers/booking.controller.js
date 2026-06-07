@@ -48,7 +48,7 @@ async function createBooking(req, res, next) {
       inquiryId:        inquiryId && isObjectId(inquiryId) ? inquiryId : null,
       property:         property || '',
       tenant:           tenant || '',
-      tenantPhone:      tenantPhone || '',
+      tenantPhone:      (tenantPhone && tenantPhone.trim().length >= 10) ? tenantPhone.trim() : null,
       leaseStart:       new Date(leaseStart),
       leaseEnd:         new Date(leaseEnd),
       monthlyRent:      rent,
