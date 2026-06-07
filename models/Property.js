@@ -128,6 +128,8 @@ const RoomPhotoSchema = new mongoose.Schema(
     // so an oversized upload can't blow up the document past Mongo's 16MB
     // doc limit on its own.
     url:  { type: String, trim: true, required: true, maxlength: 4_000_000 },
+    // Optional compressed/card-sized version. Detail pages still read `url`.
+    thumbUrl: { type: String, trim: true, default: '', maxlength: 1_000_000 },
   },
   { _id: false }
 );
@@ -170,6 +172,8 @@ const PropertySchema = new mongoose.Schema(
     // shape the wizard already builds (`form.coverPhoto.preview`) so the
     // frontend doesn't need to change to talk to the API.
     coverPhoto:  { type: String, trim: true, default: '', maxlength: 4_000_000 },
+    // Optional card-sized cover image used only by listing/dashboard payloads.
+    coverPhotoThumb: { type: String, trim: true, default: '', maxlength: 1_000_000 },
     roomPhotos:  { type: [RoomPhotoSchema], default: [] },
     // YouTube ID (e.g. 'O-P_J_gvALE'). Optional second video source.
     videoId:     { type: String, trim: true, default: '', maxlength: 200 },

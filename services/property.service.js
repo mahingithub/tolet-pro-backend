@@ -7,15 +7,73 @@ const ApiError = require('../utils/ApiError');
 const searchService = require('./searchService');
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
+const MAX_THUMBNAIL_CHARS = 1_000_000;
+
+function normaliseThumbnail(value) {
+  const s = value ? String(value) : '';
+  return s.length <= MAX_THUMBNAIL_CHARS ? s : '';
+}
+
 function normaliseRoomPhotos(input) {
   if (!Array.isArray(input)) return [];
   return input
     .map((p) => ({
       room: (p && p.room) ? String(p.room).trim().slice(0, 40) : 'other',
       url:  (p && (p.url || p.preview)) ? String(p.url || p.preview) : '',
+      thumbUrl: normaliseThumbnail(p && p.thumbUrl),
     }))
     .filter((p) => p.url);
 }
+
+const LIST_ROOM_PHOTO_PROJECT = {
+  $filter: {
+    input: { $ifNull: ['$roomPhotos', []] },
+    as: 'photo',
+    cond: {
+      $regexMatch: {
+        input: { $toLower: { $ifNull: ['$$photo.room', ''] } },
+        regex: /bed|bath|toilet|wash|kitchen|cook/,
+      },
+    },
+  },
+};
+
+const LIST_CARD_PROJECT = {
+  title: 1,
+  intent: 1,
+  type: 1,
+  category: 1,
+  division: 1,
+  district: 1,
+  area: 1,
+  location: 1,
+  gps: 1,
+  beds: 1,
+  baths: 1,
+  sqft: 1,
+  floor: 1,
+  floorNumber: 1,
+  furnishing: 1,
+  amenities: 1,
+  coverPhoto: 1,
+  coverPhotoThumb: 1,
+  roomPhotos: LIST_ROOM_PHOTO_PROJECT,
+  videoId: 1,
+  price: 1,
+  originalPrice: 1,
+  status: 1,
+  ownerUserId: 1,
+  ownerName: 1,
+  ownerPhone: 1,
+  rating: 1,
+  reviews: 1,
+  popularity: 1,
+  inquiries: 1,
+  verified: 1,
+  slug: 1,
+  createdAt: 1,
+  updatedAt: 1,
+};
 
 function gpsFromBody(body) {
   const lat = body.gpsLat === '' || body.gpsLat == null ? null : Number(body.gpsLat);
@@ -66,6 +124,7 @@ async function createProperty({ body, user }) {
     amenities:   Array.isArray(body.amenities) ? body.amenities : [],
     coverPhoto:  body.coverPhoto  || '',
     roomPhotos:  normaliseRoomPhotos(body.roomPhotos),
+    coverPhotoThumb: normaliseThumbnail(body.coverPhotoThumb),
     videoId:     body.videoId     || '',
     videoUrl:    body.videoUrl    || '',
     price:       body.price,
@@ -113,7 +172,7 @@ async function listProperties(query) {
       // Project out the massive base64 strings BEFORE sorting. This prevents the
       // 32MB in-memory sort limit (OOM) on MongoDB Free Tier (M0) which doesn't
       // support allowDiskUse: true.
-      { $project: { coverPhoto: 0, roomPhotos: 0, videoUrl: 0, description: 0, searchHaystack: 0 } },
+      { $project: { coverPhoto: 0, coverPhotoThumb: 0, roomPhotos: 0, videoUrl: 0, description: 0, searchHaystack: 0 } },
       { $sort: sort },
       { $skip: skip },
       { $limit: limit }
@@ -121,9 +180,10 @@ async function listProperties(query) {
     .then(async (idDocs) => {
       const ids = idDocs.map(d => d._id);
       if (ids.length === 0) return [];
-      const unsortedItems = await Property.find({ _id: { $in: ids } })
-        .select('-videoUrl -description -searchHaystack')
-        .lean();
+      const unsortedItems = await Property.aggregate([
+        { $match: { _id: { $in: ids } } },
+        { $project: LIST_CARD_PROJECT },
+      ]);
       const map = {};
       unsortedItems.forEach(item => map[item._id.toString()] = item);
       return ids.map(id => map[id.toString()]).filter(Boolean);
@@ -159,11 +219,11 @@ async function updateProperty({ idOrSlug, body, user }) {
     'title', 'description', 'intent', 'type', 'category',
     'division', 'district', 'area', 'location',
     'beds', 'baths', 'sqft', 'floor', 'floorNumber', 'furnishing',
-    'amenities', 'price', 'status', 'coverPhoto', 'videoId', 'videoUrl',
+    'amenities', 'price', 'status', 'coverPhoto', 'coverPhotoThumb', 'videoId', 'videoUrl',
   ];
   for (const f of scalarFields) {
     if (Object.prototype.hasOwnProperty.call(body, f)) {
-      doc[f] = body[f];
+      doc[f] = f === 'coverPhotoThumb' ? normaliseThumbnail(body[f]) : body[f];
     }
   }
   // Keep `floor` and `floorNumber` in lockstep on partial updates: if the

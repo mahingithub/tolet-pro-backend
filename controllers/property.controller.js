@@ -9,26 +9,52 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 // ── Listing-card payload trimming ───────────────────────────────────────────
 // The public listing/search response must stay light on mobile. Per property
 // we ship ONLY: coverPhoto + at most one photo each for bedroom / bathroom /
-// living (or kitchen) — i.e. max 4 images for the card. The heavy walkthrough
-// video (`videoUrl`, up to ~25 MB base64) is dropped entirely; it loads on the
-// detail page instead, along with the full room gallery.
+// kitchen — i.e. max 4 images for the card. The heavy walkthrough video
+// (`videoUrl`, up to ~25 MB base64) is dropped entirely; it loads on the detail
+// page instead, along with the full room gallery.
 const LIST_ROOM_BUCKETS = [
-  (r) => r.includes('bed'),
-  (r) => r.includes('bath'),
-  (r) => r.includes('living') || r.includes('kitchen') || r.includes('drawing'),
+  { room: 'bedroom', matches: (r) => r.includes('bed') },
+  { room: 'bathroom', matches: (r) => r.includes('bath') || r.includes('toilet') || r.includes('wash') },
+  { room: 'kitchen', matches: (r) => r.includes('kitchen') || r.includes('cook') },
 ];
+
+function toCloudinaryCardImage(url) {
+  const s = String(url || '').trim();
+  if (!/^https?:\/\/res\.cloudinary\.com\//i.test(s)) return s;
+  const marker = '/image/upload/';
+  const markerIndex = s.indexOf(marker);
+  if (markerIndex === -1) return s;
+  const after = s.slice(markerIndex + marker.length);
+  const firstSegment = after.split('/')[0] || '';
+  if (/^(?:a_|ar_|b_|c_|co_|dpr_|e_|f_|fl_|g_|h_|l_|o_|q_|r_|t_|w_|x_|y_|z_)/.test(firstSegment)) {
+    return s;
+  }
+  return `${s.slice(0, markerIndex + marker.length)}f_auto,q_auto:eco,w_640,c_fill/${after}`;
+}
 
 function trimForListCard(p) {
   delete p.videoUrl;
+  const coverThumb = p.coverPhotoThumb || '';
+  p.coverPhoto = toCloudinaryCardImage(coverThumb || p.coverPhoto);
+  delete p.coverPhotoThumb;
   const photos = Array.isArray(p.roomPhotos) ? p.roomPhotos : [];
   const picked = [];
-  for (const matches of LIST_ROOM_BUCKETS) {
+  for (const bucket of LIST_ROOM_BUCKETS) {
     const hit = photos.find(
-      (ph) => !picked.includes(ph) && matches(String((ph && ph.room) || '').toLowerCase()),
+      (ph) => !picked.some((pickedPhoto) => pickedPhoto.source === ph) &&
+        bucket.matches(String((ph && ph.room) || '').toLowerCase()),
     );
-    if (hit) picked.push(hit);
+    if (hit) {
+      picked.push({
+        source: hit,
+        room: bucket.room,
+        url: toCloudinaryCardImage(hit.thumbUrl || hit.thumbnailUrl || hit.url || hit.preview || ''),
+      });
+    }
   }
-  p.roomPhotos = picked; // ≤ 3 room photos; the cover stays in coverPhoto
+  p.roomPhotos = picked
+    .filter((ph) => ph.url)
+    .map(({ room, url }) => ({ room, url })); // ≤ 3 room photos; cover stays in coverPhoto
   return p;
 }
 
