@@ -32,6 +32,30 @@ function publicApiBaseUrl() {
   ).replace(/\/$/, '');
 }
 
+function publicAppBaseUrl() {
+  return (
+    process.env.PUBLIC_APP_URL ||
+    process.env.APP_URL ||
+    process.env.FRONTEND_URL ||
+    'https://tolet-pro.vercel.app'
+  ).replace(/\/$/, '');
+}
+
+function callLaunchUrl(action, call = {}) {
+  const params = new URLSearchParams({
+    incomingCall: '1',
+    callAction: action || 'open',
+    action: action || 'open',
+    callId: String(call.callId || ''),
+    callerId: String(call.callerId || ''),
+    callerName: String(call.callerName || ''),
+    callerAvatar: String(call.callerAvatar || ''),
+    type: String(call.type || 'voice'),
+    roomId: String(call.roomId || ''),
+  });
+  return `${publicAppBaseUrl()}/messages?${params.toString()}`;
+}
+
 // Lazy-init the Admin SDK. Reuses an existing initialised app if another part
 // of the backend (e.g. phone auth) already called initializeApp.
 function getMessaging() {
@@ -88,32 +112,52 @@ async function sendIncomingCall(tokens, call) {
     ? createCallActionToken({ callId, receiverId, ttlSeconds: 90 })
     : '';
 
-  // NOTE: all `data` values MUST be strings (FCM requirement). This is
-  // intentionally DATA-ONLY for web. If we include a `notification` payload,
-  // the browser/FCM may auto-display a generic notification and bypass our
-  // service worker action handling.
+  const notificationData = {
+    kind: 'incoming_call',
+    callId: String(callId || ''),
+    callerId: String(callerId || ''),
+    callerName: String(callerName || ''),
+    callerAvatar: String(callerAvatar || ''),
+    type: String(type || 'voice'),
+    roomId: String(roomId || ''),
+    title,
+    body,
+    click_action: 'INCOMING_CALL',
+    callActionToken: String(callActionToken || ''),
+    callActionUrl: `${apiBaseUrl}/calls/push-action`,
+    apiBaseUrl,
+    sentAt: String(Date.now()),
+  };
+
+  // NOTE: all `data` values MUST be strings (FCM requirement). We keep the
+  // data payload for our custom service worker and also include webpush
+  // notification metadata so browser-rendered push notifications can show
+  // Receive/Reject actions when the platform supports them.
   const message = {
     tokens: list,
-    data: {
-      kind: 'incoming_call',
-      callId: String(callId || ''),
-      callerId: String(callerId || ''),
-      callerName: String(callerName || ''),
-      callerAvatar: String(callerAvatar || ''),
-      type: String(type || 'voice'),
-      roomId: String(roomId || ''),
-      title,
-      body,
-      click_action: 'INCOMING_CALL',
-      callActionToken: String(callActionToken || ''),
-      callActionUrl: `${apiBaseUrl}/calls/push-action`,
-      apiBaseUrl,
-      sentAt: String(Date.now()),
-    },
+    data: notificationData,
     android: { priority: 'high' },
     // Web push: high urgency + short TTL because ringing calls expire quickly.
     webpush: {
       headers: { Urgency: 'high', TTL: '60' },
+      notification: {
+        title,
+        body,
+        icon: '/icons/icon-192.png',
+        badge: '/icons/icon-192.png',
+        tag: `incoming-call-${callId || receiverId || Date.now()}`,
+        requireInteraction: true,
+        renotify: true,
+        vibrate: [250, 100, 250, 100, 250],
+        actions: [
+          { action: 'accept', title: 'Receive' },
+          { action: 'decline', title: 'Reject' },
+        ],
+        data: notificationData,
+      },
+      fcmOptions: {
+        link: callLaunchUrl('open', call),
+      },
     },
   };
 
@@ -151,27 +195,42 @@ async function sendMissedCall(tokens, call) {
   const title = `Missed call from ${callerName || 'Someone'}`;
   const body = type === 'video' ? 'You missed a video call' : 'You missed a voice call';
   const apiBaseUrl = publicApiBaseUrl();
+  const notificationData = {
+    kind: 'missed_call',
+    callId: String(callId || ''),
+    callerId: String(callerId || ''),
+    callerName: String(callerName || ''),
+    callerAvatar: String(callerAvatar || ''),
+    receiverId: String(receiverId || ''),
+    type: String(type || 'voice'),
+    roomId: String(roomId || ''),
+    title,
+    body,
+    click_action: 'MISSED_CALL',
+    apiBaseUrl,
+    sentAt: String(Date.now()),
+  };
 
   const message = {
     tokens: list,
-    data: {
-      kind: 'missed_call',
-      callId: String(callId || ''),
-      callerId: String(callerId || ''),
-      callerName: String(callerName || ''),
-      callerAvatar: String(callerAvatar || ''),
-      receiverId: String(receiverId || ''),
-      type: String(type || 'voice'),
-      roomId: String(roomId || ''),
-      title,
-      body,
-      click_action: 'MISSED_CALL',
-      apiBaseUrl,
-      sentAt: String(Date.now()),
-    },
+    data: notificationData,
     android: { priority: 'high' },
     webpush: {
       headers: { Urgency: 'high', TTL: '300' },
+      notification: {
+        title,
+        body,
+        icon: '/icons/icon-192.png',
+        badge: '/icons/icon-192.png',
+        tag: `incoming-call-${callId || receiverId || Date.now()}`,
+        requireInteraction: false,
+        renotify: true,
+        vibrate: [160, 80, 160],
+        data: notificationData,
+      },
+      fcmOptions: {
+        link: callLaunchUrl('missed', call),
+      },
     },
   };
 
