@@ -21,6 +21,17 @@ let admin = null;
 let messagingReady = false;
 let warnedOnce = false;
 
+const { createCallActionToken } = require('../utils/callActionToken');
+
+function publicApiBaseUrl() {
+  return (
+    process.env.PUBLIC_API_BASE_URL ||
+    process.env.API_BASE_URL ||
+    process.env.VITE_API_BASE_URL ||
+    'https://tolet-pro-backend.onrender.com/api'
+  ).replace(/\/$/, '');
+}
+
 // Lazy-init the Admin SDK. Reuses an existing initialised app if another part
 // of the backend (e.g. phone auth) already called initializeApp.
 function getMessaging() {
@@ -56,7 +67,7 @@ function getMessaging() {
  * Send an incoming-call push to a set of device tokens.
  *
  * @param {string[]} tokens   FCM device tokens (a user's registered devices)
- * @param {object}   call     { callId, callerId, callerName, callerAvatar, type, roomId }
+ * @param {object}   call     { callId, callerId, callerName, callerAvatar, type, roomId, receiverId }
  * @returns {Promise<{ sent:number, failed:number, invalidTokens:string[] }>}
  *
  * `invalidTokens` lists tokens FCM rejected as unregistered/invalid so the
@@ -69,43 +80,40 @@ async function sendIncomingCall(tokens, call) {
     return { sent: 0, failed: 0, invalidTokens: [] };
   }
 
-  const { callId, callerId, callerName, callerAvatar, type, roomId } = call;
+  const { callId, callerId, callerName, callerAvatar, type, roomId, receiverId } = call;
+  const title = `${callerName || 'Someone'} is calling`;
+  const body = type === 'video' ? 'Incoming video call' : 'Incoming voice call';
+  const apiBaseUrl = publicApiBaseUrl();
+  const callActionToken = callId && receiverId
+    ? createCallActionToken({ callId, receiverId, ttlSeconds: 90 })
+    : '';
 
-  // NOTE: all `data` values MUST be strings (FCM requirement).
+  // NOTE: all `data` values MUST be strings (FCM requirement). This is
+  // intentionally DATA-ONLY for web. If we include a `notification` payload,
+  // the browser/FCM may auto-display a generic notification and bypass our
+  // service worker action handling.
   const message = {
     tokens: list,
-    notification: {
-      title: `${callerName || 'Someone'} is calling`,
-      body: type === 'video' ? 'Incoming video call' : 'Incoming voice call',
-    },
     data: {
+      kind: 'incoming_call',
       callId: String(callId || ''),
       callerId: String(callerId || ''),
       callerName: String(callerName || ''),
       callerAvatar: String(callerAvatar || ''),
       type: String(type || 'voice'),
       roomId: String(roomId || ''),
+      title,
+      body,
       click_action: 'INCOMING_CALL',
+      callActionToken: String(callActionToken || ''),
+      callActionUrl: `${apiBaseUrl}/calls/push-action`,
+      apiBaseUrl,
+      sentAt: String(Date.now()),
     },
-    // Android: high priority so it wakes the device; tag collapses dupes.
-    android: {
-      priority: 'high',
-      notification: { sound: 'default', tag: String(callId || 'call'), channelId: 'calls' },
-    },
-    // Web push: give it a high-urgency header + the app icon.
+    android: { priority: 'high' },
+    // Web push: high urgency + short TTL because ringing calls expire quickly.
     webpush: {
       headers: { Urgency: 'high', TTL: '60' },
-      notification: {
-        icon: '/icons/icon-192.png',
-        badge: '/icons/icon-192.png',
-        vibrate: [200, 100, 200],
-        requireInteraction: true,
-      },
-      fcmOptions: { link: '/messages' },
-    },
-    apns: {
-      headers: { 'apns-priority': '10' },
-      payload: { aps: { sound: 'default' } },
     },
   };
 

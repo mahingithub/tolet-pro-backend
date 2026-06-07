@@ -19,8 +19,59 @@ const Call = require('../models/Call');
 const ApiError = require('../utils/ApiError');
 const env = require('../config/env');
 const { generateZegoToken } = require('../utils/zegoToken');
+const { verifyCallActionToken } = require('../utils/callActionToken');
+const { notifyCallRejected } = require('../socket');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+/**
+ * Handle a signed service-worker notification action.
+ *
+ * This route is intentionally unauthenticated because a service worker cannot
+ * read the app's localStorage auth token while the PWA is closed. The token is
+ * short-lived, HMAC-signed, scoped to one call + receiver, and currently only
+ * permits declining a ringing call.
+ */
+exports.pushAction = asyncH(async (req, res) => {
+  const action = String(req.body.action || '').toLowerCase();
+  if (!['decline', 'reject'].includes(action)) {
+    throw ApiError.badRequest('Unsupported call action.', { code: 'unsupported_call_action' });
+  }
+
+  let claims;
+  try {
+    claims = verifyCallActionToken(req.body.token);
+  } catch (err) {
+    throw ApiError.unauthorized('Invalid or expired call action token.', {
+      code: err.code || 'invalid_call_action_token',
+    });
+  }
+
+  if (req.body.callId && String(req.body.callId) !== String(claims.callId)) {
+    throw ApiError.badRequest('Call token mismatch.', { code: 'call_token_mismatch' });
+  }
+
+  const call = await Call.findById(claims.callId);
+  if (!call) throw ApiError.notFound('Call not found');
+
+  if (String(call.receiverId) !== String(claims.receiverId)) {
+    throw ApiError.forbidden('Token is not valid for this receiver.', {
+      code: 'call_token_receiver_mismatch',
+    });
+  }
+
+  if (call.status !== 'ringing') {
+    return res.json({ ok: true, callId: String(call._id), status: call.status });
+  }
+
+  call.status = 'rejected';
+  call.endedAt = new Date();
+  await call.save();
+
+  notifyCallRejected(call);
+
+  res.json({ ok: true, callId: String(call._id), status: 'rejected' });
+});
 
 /**
  * Initiate a new call.

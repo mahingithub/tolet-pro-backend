@@ -6,6 +6,8 @@ const requireAuth = require('../middleware/requireAuth');
 
 const router = express.Router();
 
+router.post('/push-action', ctl.pushAction); // Signed service-worker notification action
+
 router.use(requireAuth);
 
 router.post('/',           ctl.createCall);      // Initiate a call

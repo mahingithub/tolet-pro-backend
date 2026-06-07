@@ -33,6 +33,7 @@ const fcm = require('./services/fcm.service');
 
 // callId → TimeoutHandle (for missed-call detection)
 const ringTimers = new Map();
+let ioInstance = null;
 
 /**
  * Room naming: every socket for a given user joins the room `user:<userId>`.
@@ -55,6 +56,24 @@ function roomFor(userId) {
  */
 function emitToUser(io, userId, event, payload) {
   io.to(roomFor(userId)).emit(event, payload);
+}
+
+function clearRingTimer(callId) {
+  const timer = ringTimers.get(String(callId));
+  if (!timer) return;
+  clearTimeout(timer);
+  ringTimers.delete(String(callId));
+}
+
+function notifyCallRejected(call) {
+  if (!call) return;
+  clearRingTimer(call._id || call.id);
+  if (!ioInstance) return;
+  const payload = {
+    callId: String(call._id || call.id),
+  };
+  emitToUser(ioInstance, call.callerId.toString(), 'CALL_REJECTED', payload);
+  emitToUser(ioInstance, call.receiverId.toString(), 'CALL_REJECTED', payload);
 }
 
 /**
@@ -96,6 +115,7 @@ function initSocket(httpServer) {
       skipMiddlewares: false, // re-run auth on recovery
     },
   });
+  ioInstance = io;
 
   // ─── Authentication middleware ──────────────────────────────────────────
   io.use((socket, next) => {
@@ -163,7 +183,7 @@ function initSocket(httpServer) {
             if (tokens.length === 0) return;
 
             const { invalidTokens } = await fcm.sendIncomingCall(tokens, {
-              callId, callerId: userId, callerName, callerAvatar, type, roomId,
+              callId, callerId: userId, receiverId, callerName, callerAvatar, type, roomId,
             });
             // Prune any tokens FCM rejected as dead.
             if (invalidTokens && invalidTokens.length) {
@@ -196,7 +216,7 @@ function initSocket(httpServer) {
           }
         }, 30_000);
 
-        ringTimers.set(callId, timer);
+        ringTimers.set(String(callId), timer);
       } catch (err) {
         console.error('[socket] CALL_INITIATED error:', err.message);
       }
@@ -215,11 +235,7 @@ function initSocket(httpServer) {
         await call.save();
 
         // Clear the missed-call timer.
-        const timer = ringTimers.get(callId);
-        if (timer) {
-          clearTimeout(timer);
-          ringTimers.delete(callId);
-        }
+        clearRingTimer(callId);
 
         // Notify the caller that the receiver picked up.
         emitToUser(io, call.callerId.toString(), 'CALL_ACCEPTED', {
@@ -250,14 +266,8 @@ function initSocket(httpServer) {
         await call.save();
 
         // Clear the missed-call timer.
-        const timer = ringTimers.get(callId);
-        if (timer) {
-          clearTimeout(timer);
-          ringTimers.delete(callId);
-        }
-
         // Notify the caller.
-        emitToUser(io, call.callerId.toString(), 'CALL_REJECTED', { callId });
+        notifyCallRejected(call);
       } catch (err) {
         console.error('[socket] CALL_REJECTED error:', err.message);
       }
@@ -276,11 +286,7 @@ function initSocket(httpServer) {
         await call.save();
 
         // Clear any lingering ring timer.
-        const timer = ringTimers.get(callId);
-        if (timer) {
-          clearTimeout(timer);
-          ringTimers.delete(callId);
-        }
+        clearRingTimer(callId);
 
         // Notify the other party.
         const peerId = call.callerId.toString() === userId
@@ -336,4 +342,4 @@ function initSocket(httpServer) {
   return io;
 }
 
-module.exports = { initSocket, getSocketsForUser, emitToUser };
+module.exports = { initSocket, getSocketsForUser, emitToUser, notifyCallRejected, clearRingTimer };
