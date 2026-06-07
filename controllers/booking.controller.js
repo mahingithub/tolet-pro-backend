@@ -80,6 +80,7 @@ async function listHostBookings(req, res, next) {
     const bookings = await Booking.find({ landlordId: req.user._id })
       .sort({ createdAt: -1 })
       .lean();
+    bookings.forEach(b => { b.id = String(b._id); delete b._id; });
     return res.json({ bookings });
   } catch (err) {
     return next(err);
@@ -98,6 +99,7 @@ async function listTenantBookings(req, res, next) {
     const bookings = await Booking.find({ $or: conditions })
       .sort({ createdAt: -1 })
       .lean();
+    bookings.forEach(b => { b.id = String(b._id); delete b._id; });
     return res.json({ bookings });
   } catch (err) {
     return next(err);
@@ -170,6 +172,7 @@ async function undoLedger(req, res, next) {
     await Receipt.deleteOne({ bookingId: booking._id, monthKey }).catch(() => {});
 
     const updated = await Booking.findById(id).lean();
+    if (updated) { updated.id = String(updated._id); delete updated._id; }
     return res.json({ booking: updated });
   } catch (err) {
     return next(err);

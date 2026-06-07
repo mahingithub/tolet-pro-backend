@@ -95,7 +95,9 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
     await Receipt.deleteOne({ bookingId: booking._id, monthKey }).catch(() => {});
   }
 
-  return Booking.findById(booking._id).lean();
+  const updated = await Booking.findById(booking._id).lean();
+  if (updated) { updated.id = String(updated._id); delete updated._id; }
+  return updated;
 }
 
 module.exports = { applyPayment, PAID_STATUSES };
