@@ -32,7 +32,7 @@ const LIST_ROOM_PHOTO_PROJECT = {
     cond: {
       $regexMatch: {
         input: { $toLower: { $ifNull: ['$$photo.room', ''] } },
-        regex: /bed|bath|toilet|wash|kitchen|cook/,
+        regex: /bed|bath|toilet|wash|living|drawing|hall|kitchen|cook|other/,
       },
     },
   },

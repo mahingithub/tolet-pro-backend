@@ -8,15 +8,18 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
 // ── Listing-card payload trimming ───────────────────────────────────────────
 // The public listing/search response must stay light on mobile. Per property
-// we ship ONLY: coverPhoto + at most one photo each for bedroom / bathroom /
-// kitchen — i.e. max 4 images for the card. The heavy walkthrough video
-// (`videoUrl`, up to ~25 MB base64) is dropped entirely; it loads on the detail
-// page instead, along with the full room gallery.
+// we ship ONLY: coverPhoto + the best three room-category photos in priority
+// order (bedroom / bathroom / living room / kitchen / other). The heavy
+// walkthrough video (`videoUrl`, up to ~25 MB base64) is dropped entirely; it
+// loads on the detail page instead, along with the full room gallery.
 const LIST_ROOM_BUCKETS = [
   { room: 'bedroom', matches: (r) => r.includes('bed') },
   { room: 'bathroom', matches: (r) => r.includes('bath') || r.includes('toilet') || r.includes('wash') },
+  { room: 'living', matches: (r) => r.includes('living') || r.includes('drawing') || r.includes('hall') },
   { room: 'kitchen', matches: (r) => r.includes('kitchen') || r.includes('cook') },
+  { room: 'other', matches: (r) => r.includes('other') },
 ];
+const LIST_ROOM_PHOTO_LIMIT = 3;
 
 function toCloudinaryCardImage(url) {
   const s = String(url || '').trim();
@@ -40,6 +43,7 @@ function trimForListCard(p) {
   const photos = Array.isArray(p.roomPhotos) ? p.roomPhotos : [];
   const picked = [];
   for (const bucket of LIST_ROOM_BUCKETS) {
+    if (picked.length >= LIST_ROOM_PHOTO_LIMIT) break;
     const hit = photos.find(
       (ph) => !picked.some((pickedPhoto) => pickedPhoto.source === ph) &&
         bucket.matches(String((ph && ph.room) || '').toLowerCase()),
