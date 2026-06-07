@@ -135,7 +135,13 @@ async function listProperties(query) {
 }
 
 async function listMyProperties(user) {
-  return Property.find({ ownerUserId: user._id }).sort({ createdAt: -1, _id: -1 });
+  return Property.find({ ownerUserId: user._id })
+    // Host dashboard cards need editable metadata and photos, but not the
+    // giant video blob or search text. Excluding them keeps /api/host/properties
+    // responsive even when a host uploaded walkthrough videos.
+    .select('-videoUrl -searchHaystack')
+    .sort({ createdAt: -1, _id: -1 })
+    .lean();
 }
 
 async function updateProperty({ idOrSlug, body, user }) {

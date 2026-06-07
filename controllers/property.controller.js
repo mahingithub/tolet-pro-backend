@@ -96,5 +96,5 @@ exports.deleteProperty = asyncH(async (req, res) => {
 
 exports.getHostProperties = asyncH(async (req, res) => {
   const items = await propertyService.listMyProperties(req.user);
-  res.json({ properties: items.map((d) => d.toJSON()) });
+  res.json({ properties: items.map((d) => trimForListCard(formatLeanProperty(d))) });
 });
