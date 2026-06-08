@@ -4,6 +4,9 @@ const mongoose = require('mongoose');
 
 const Property = require('../models/Property');
 const ApiError = require('../utils/ApiError');
+const Booking = require('../models/Booking');
+const Inquiry = require('../models/Inquiry');
+const Receipt  = require('../models/Receipt');
 const searchService = require('./searchService');
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -262,8 +265,38 @@ async function deleteProperty({ idOrSlug, user }) {
       code: 'not_owner',
     });
   }
+
+  // ── Cascade guard: refuse if any active lease is in progress ───────────
+  const activeBookings = await Booking.countDocuments({
+    propertyId: doc._id,
+    status: 'active',
+  });
+  if (activeBookings > 0) {
+    throw ApiError.conflict(
+      `এই প্রপার্টিতে ${activeBookings}টি চলমান বুকিং আছে। মুছতে হলে আগে লিজ শেষ করুন।`,
+      { code: 'active_bookings_exist', activeBookings },
+    );
+  }
+
+  // ── Cascade-delete related documents ───────────────────────────────────
+  const relatedBookings = await Booking.find({ propertyId: doc._id }).select('_id');
+  const bookingIds = relatedBookings.map((b) => b._id);
+
+  const [delBookings, delInquiries, delReceipts] = await Promise.all([
+    Booking.deleteMany({ propertyId: doc._id }),
+    Inquiry.deleteMany({ propertyId: doc._id }),
+    bookingIds.length > 0
+      ? Receipt.deleteMany({ bookingId: { $in: bookingIds } })
+      : Promise.resolve({ deletedCount: 0 }),
+  ]);
+
   await doc.deleteOne();
-  return { id: String(doc._id) };
+  return {
+    id: String(doc._id),
+    deletedBookings:  delBookings.deletedCount,
+    deletedInquiries: delInquiries.deletedCount,
+    deletedReceipts:  delReceipts.deletedCount,
+  };
 }
 
 module.exports = {
