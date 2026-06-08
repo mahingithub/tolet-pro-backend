@@ -266,17 +266,6 @@ async function deleteProperty({ idOrSlug, user }) {
     });
   }
 
-  // ── Cascade guard: refuse if any active lease is in progress ───────────
-  const activeBookings = await Booking.countDocuments({
-    propertyId: doc._id,
-    status: 'active',
-  });
-  if (activeBookings > 0) {
-    throw ApiError.conflict(
-      `এই প্রপার্টিতে ${activeBookings}টি চলমান বুকিং আছে। মুছতে হলে আগে লিজ শেষ করুন।`,
-      { code: 'active_bookings_exist', activeBookings },
-    );
-  }
 
   // ── Cascade-delete related documents ───────────────────────────────────
   const relatedBookings = await Booking.find({ propertyId: doc._id }).select('_id');
