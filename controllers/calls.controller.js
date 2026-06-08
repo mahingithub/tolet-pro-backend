@@ -87,12 +87,20 @@ exports.createCall = asyncH(async (req, res) => {
   if (!['voice', 'video'].includes(type)) {
     throw ApiError.badRequest('Type must be "voice" or "video".');
   }
+  // You can't call yourself.
+  if (String(receiverId) === String(req.user._id)) {
+    throw ApiError.badRequest('You cannot call yourself.', { code: 'self_call' });
+  }
 
-  // Prevent duplicate active calls between the same two users.
+  // Prevent duplicate active calls between the same two users — in EITHER
+  // direction. Without the second clause, A→B and B→A could both go active at
+  // the same moment and create two conflicting calls.
   const existingActive = await Call.findOne({
-    callerId: req.user._id,
-    receiverId,
     status: { $in: ['ringing', 'accepted'] },
+    $or: [
+      { callerId: req.user._id, receiverId },
+      { callerId: receiverId, receiverId: req.user._id },
+    ],
   });
   if (existingActive) {
     return res.json({ call: existingActive });
