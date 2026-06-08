@@ -86,6 +86,49 @@ function getSocketsForUser(io, userId) {
 }
 
 /**
+ * Load a call and authorize the acting user against it. This is the security
+ * gate for every call lifecycle + signaling event: handlers must NOT trust
+ * client-supplied caller / receiver / target ids.
+ *
+ *   role 'caller'      → user must be the call's caller (initiate).
+ *   role 'receiver'    → user must be the call's receiver (accept / reject).
+ *   role 'participant' → user must be caller OR receiver (end / signaling).
+ *
+ * Returns { call, callerId, receiverId, peerId } on success, or null if the
+ * call is missing or the user isn't allowed to act on it (logged as a security
+ * warning). A null return means the handler should silently ignore the event.
+ */
+async function authorizeCallEvent(userId, callId, role, eventName) {
+  if (!callId) return null;
+  let call;
+  try {
+    call = await Call.findById(callId);
+  } catch {
+    return null; // malformed id / cast error
+  }
+  if (!call) return null;
+
+  const uid        = String(userId);
+  const callerId   = String(call.callerId);
+  const receiverId = String(call.receiverId);
+  const isCaller   = uid === callerId;
+  const isReceiver = uid === receiverId;
+
+  const ok = role === 'caller'   ? isCaller
+           : role === 'receiver' ? isReceiver
+           : isCaller || isReceiver; // 'participant'
+
+  if (!ok) {
+    console.warn(
+      `[socket][security] user ${uid} not authorized for ${eventName} on call ${callId}`,
+    );
+    return null;
+  }
+
+  return { call, callerId, receiverId, peerId: isCaller ? receiverId : callerId };
+}
+
+/**
  * Attach Socket.IO to an existing HTTP server.
  * Called once from server.js during boot.
  */
@@ -155,7 +198,18 @@ function initSocket(httpServer) {
     // Payload: { callId, receiverId, type, roomId, callerName, callerAvatar }
     socket.on('CALL_INITIATED', async (data) => {
       try {
-        const { callId, receiverId, type, roomId, callerName, callerAvatar } = data;
+        const { callId, callerName, callerAvatar } = data;
+
+        // Authorize: only the real caller of THIS call may initiate it. The
+        // receiver / type / roomId come from the DB record, never the client,
+        // so a user can't ring arbitrary people or spoof someone else's call.
+        const auth = await authorizeCallEvent(userId, callId, 'caller', 'CALL_INITIATED');
+        if (!auth) return;
+        const { call } = auth;
+        if (call.status !== 'ringing') return;
+        const receiverId = auth.receiverId;
+        const type       = call.type;
+        const roomId     = call.roomId;
 
         // Notify the receiver on all their devices.
         emitToUser(io, receiverId, 'CALL_RINGING', {
@@ -258,8 +312,11 @@ function initSocket(httpServer) {
     socket.on('CALL_ACCEPTED', async (data) => {
       try {
         const { callId } = data;
-        const call = await Call.findById(callId);
-        if (!call || call.status !== 'ringing') return;
+        // Only the receiver of this call may accept it.
+        const auth = await authorizeCallEvent(userId, callId, 'receiver', 'CALL_ACCEPTED');
+        if (!auth) return;
+        const { call } = auth;
+        if (call.status !== 'ringing') return;
 
         call.status = 'accepted';
         call.startedAt = new Date();
@@ -289,8 +346,13 @@ function initSocket(httpServer) {
     socket.on('CALL_REJECTED', async (data) => {
       try {
         const { callId } = data;
-        const call = await Call.findById(callId);
-        if (!call || !['ringing'].includes(call.status)) return;
+        // A participant may reject/cancel a RINGING call: the receiver
+        // declining, or the caller cancelling their own outgoing call. A
+        // third party can never touch it. (Mid-call teardown uses CALL_ENDED.)
+        const auth = await authorizeCallEvent(userId, callId, 'participant', 'CALL_REJECTED');
+        if (!auth) return;
+        const { call } = auth;
+        if (call.status !== 'ringing') return;
 
         call.status = 'rejected';
         call.endedAt = new Date();
@@ -309,8 +371,11 @@ function initSocket(httpServer) {
     socket.on('CALL_ENDED', async (data) => {
       try {
         const { callId } = data;
-        const call = await Call.findById(callId);
-        if (!call || ['ended', 'missed', 'rejected'].includes(call.status)) return;
+        // Either participant (caller or receiver) may end the call.
+        const auth = await authorizeCallEvent(userId, callId, 'participant', 'CALL_ENDED');
+        if (!auth) return;
+        const { call, peerId } = auth;
+        if (['ended', 'missed', 'rejected'].includes(call.status)) return;
 
         call.status = 'ended';
         call.endedAt = new Date();
@@ -320,9 +385,6 @@ function initSocket(httpServer) {
         clearRingTimer(callId);
 
         // Notify the other party.
-        const peerId = call.callerId.toString() === userId
-          ? call.receiverId.toString()
-          : call.callerId.toString();
         emitToUser(io, peerId, 'CALL_ENDED', {
           callId,
           duration: call.duration,
@@ -335,28 +397,35 @@ function initSocket(httpServer) {
     // ── WebRTC Signaling Relay ────────────────────────────────────────────
     // These events just relay payloads between peers. No DB writes needed.
 
-    socket.on('OFFER', (data) => {
-      // data: { callId, targetUserId, sdp }
-      emitToUser(io, data.targetUserId, 'OFFER', {
-        callId: data.callId,
+    socket.on('OFFER', async (data) => {
+      // data: { callId, sdp } — the target is derived from the call record,
+      // NOT from the client, so signaling can't be injected into other calls.
+      const auth = await authorizeCallEvent(userId, data?.callId, 'participant', 'OFFER');
+      if (!auth) return;
+      emitToUser(io, auth.peerId, 'OFFER', {
+        callId: String(auth.call._id),
         sdp: data.sdp,
         fromUserId: userId,
       });
     });
 
-    socket.on('ANSWER', (data) => {
-      // data: { callId, targetUserId, sdp }
-      emitToUser(io, data.targetUserId, 'ANSWER', {
-        callId: data.callId,
+    socket.on('ANSWER', async (data) => {
+      // data: { callId, sdp } — target derived from the call, not the client.
+      const auth = await authorizeCallEvent(userId, data?.callId, 'participant', 'ANSWER');
+      if (!auth) return;
+      emitToUser(io, auth.peerId, 'ANSWER', {
+        callId: String(auth.call._id),
         sdp: data.sdp,
         fromUserId: userId,
       });
     });
 
-    socket.on('ICE_CANDIDATE', (data) => {
-      // data: { callId, targetUserId, candidate }
-      emitToUser(io, data.targetUserId, 'ICE_CANDIDATE', {
-        callId: data.callId,
+    socket.on('ICE_CANDIDATE', async (data) => {
+      // data: { callId, candidate } — target derived from the call, not client.
+      const auth = await authorizeCallEvent(userId, data?.callId, 'participant', 'ICE_CANDIDATE');
+      if (!auth) return;
+      emitToUser(io, auth.peerId, 'ICE_CANDIDATE', {
+        callId: String(auth.call._id),
         candidate: data.candidate,
         fromUserId: userId,
       });
