@@ -60,61 +60,6 @@ app.get('/healthz', (_req, res) => {
   });
 });
 
-// ─── TEMPORARY Cloudinary diagnostic — REMOVE after debugging ────────────────
-// Visit https://tolet-pro-backend.onrender.com/__cloudinary-diag?key=toletdiag2026
-// It tries a tiny real upload and returns Cloudinary's FULL error so we can see
-// the actual reason chat uploads 403. Protected by a simple query token.
-app.get('/__cloudinary-diag', async (req, res) => {
-  if (req.query.key !== 'toletdiag2026') {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  const cloudinary = require('cloudinary').v2;
-  const out = {
-    config: {
-      cloud_name: process.env.CLOUDINARY_CLOUD_NAME || null,
-      api_key_len: (process.env.CLOUDINARY_API_KEY || '').length,
-      api_secret_len: (process.env.CLOUDINARY_API_SECRET || '').length,
-    },
-  };
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
-    secure: true,
-  });
-  // TEST 1 — ping (credential check)
-  try {
-    out.ping = await cloudinary.api.ping();
-  } catch (e) {
-    out.ping_error = { message: e?.message, http_code: e?.http_code };
-  }
-  // TEST 2 — real tiny image upload (same path as chat)
-  const png = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-    'base64',
-  );
-  try {
-    const result = await new Promise((resolve, reject) => {
-      const s = cloudinary.uploader.upload_stream(
-        { folder: 'tolet-pro/chat/_diag', resource_type: 'image' },
-        (err, r) => (err ? reject(err) : resolve(r)),
-      );
-      s.end(png);
-    });
-    out.upload = { ok: true, url: result.secure_url };
-  } catch (e) {
-    out.upload_error = {
-      message: e?.message,
-      http_code: e?.http_code,
-      name: e?.name,
-      full: JSON.parse(JSON.stringify(e, Object.getOwnPropertyNames(e))),
-    };
-  }
-  res.json(out);
-});
-// ─── END temporary diagnostic ────────────────────────────────────────────────
-
-
 // ─── Routes ─────────────────────────────────────────────────────────────────
 // Phase Call-7: light global limiter as a backstop on ALL api traffic.
 app.use('/api', apiLimiter);
