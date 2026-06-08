@@ -216,15 +216,10 @@ async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = ''
 
   let up;
   try {
-    // transformation:null → upload the raw file with NO transformation.
-    // A transformed upload (quality/fetch_format) gets rejected with 403 on
-    // this account for chat media, so we send the original bytes untouched.
+    // Upload the raw bytes untouched (no server-side transformation).
     up = await cloudinary.uploadBuffer(buffer, { folder, resourceType, transformation: null });
   } catch (e) {
     if (e?.code === 'cloudinary_not_configured') throw e;
-    // Log the REAL Cloudinary error so we can see WHY upload failed
-    // (invalid signature, bad api_key, etc.) instead of a silent 400.
-    console.error('[chat-media] Cloudinary upload failed:', e?.message || e, e?.http_code || '');
     throw ApiError.badRequest('আপলোড ব্যর্থ হয়েছে।', { code: 'upload_failed' });
   }
 
