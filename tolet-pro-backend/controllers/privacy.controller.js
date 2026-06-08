@@ -98,11 +98,14 @@ exports.setPreferences = asyncH(async (req, res) => {
   const patch = req.body;
   if (!req.user.preferences) req.user.preferences = {};
   
+  // Existing fields
   if (patch.aiLearningOptIn !== undefined) req.user.preferences.aiLearningOptIn = patch.aiLearningOptIn;
   if (patch.marketingEmails !== undefined) req.user.preferences.marketingEmails = patch.marketingEmails;
   if (patch.smsAlerts !== undefined) req.user.preferences.smsAlerts = patch.smsAlerts;
   if (patch.theme !== undefined) req.user.preferences.theme = patch.theme;
   if (patch.language !== undefined) req.user.preferences.language = patch.language;
+  // SharedSettings notification fields
+  if (patch.callNotifications !== undefined) req.user.preferences.callNotifications = patch.callNotifications;
   
   await req.user.save();
   res.json({ preferences: req.user.preferences });

@@ -48,27 +48,34 @@ const isConfigured = configure();
  * @param {string} [opts.resourceType='image']
  * @returns {Promise<{secureUrl:string, publicId:string, bytes:number, format:string}>}
  */
-function uploadBuffer(buffer, { folder, publicId, resourceType = 'image' } = {}) {
+function uploadBuffer(buffer, { folder, publicId, resourceType = 'image', transformation } = {}) {
   if (!isConfigured) {
     const err = new Error('Cloudinary is not configured on this server.');
     err.status = 503;
     err.code = 'cloudinary_not_configured';
     throw err;
   }
+  // Default transformation (used by avatar/property/verification uploads).
+  // Callers can pass `transformation: null` to upload the raw file with NO
+  // transformation — needed for chat media, where strict-transform / video
+  // resources reject a transformed upload with a 403.
+  const tx = transformation === undefined
+    ? [{ quality: 'auto:good', fetch_format: 'auto' }]
+    : transformation;
   return new Promise((resolve, reject) => {
     // upload_stream lets us pipe a Buffer straight into Cloudinary
     // without first writing to /tmp — important on serverless hosts.
+    const uploadOpts = {
+      folder,
+      public_id: publicId,
+      overwrite: true,        // a replace = same public_id = new version, old bytes garbage-collected
+      resource_type: resourceType,
+    };
+    // Only attach transformation when we actually have one (skip for chat).
+    if (tx) uploadOpts.transformation = tx;
+
     const stream = cloudinary.uploader.upload_stream(
-      {
-        folder,
-        public_id: publicId,
-        overwrite: true,        // a replace = same public_id = new version, old bytes garbage-collected
-        resource_type: resourceType,
-        // NID + selfies should not be transformed by default — admins
-        // need to see exactly what the user uploaded. We *do* normalise
-        // huge files down so a 12 MB phone shot doesn't waste quota.
-        transformation: [{ quality: 'auto:good', fetch_format: 'auto' }],
-      },
+      uploadOpts,
       (err, result) => {
         if (err) return reject(err);
         resolve({

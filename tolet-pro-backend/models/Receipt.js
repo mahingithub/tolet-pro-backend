@@ -39,6 +39,10 @@ const ReceiptSchema = new mongoose.Schema(
     txnId:  { type: String, trim: true, default: '' },
     paidOn: { type: String, default: '' },
 
+    // 'manual' (host marked cash/manual) vs 'gateway' (auto online payment) —
+    // HostDashboard renders a badge from this; written by bookingPayment.applyPayment.
+    paymentSource: { type: String, enum: ['manual', 'gateway'], default: 'manual' },
+
     issuedAt: { type: Date, default: Date.now },
     read:     { type: Boolean, default: false },
   },

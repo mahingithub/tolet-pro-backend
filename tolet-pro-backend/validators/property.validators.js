@@ -56,6 +56,7 @@ const roomPhotoSchema = z
     room:    z.string().trim().max(40).default('other'),
     url:     photoUrlSchema.optional(),
     preview: photoUrlSchema.optional(),
+    thumbUrl: photoUrlSchema.optional(),
   })
   .passthrough()
   .refine(
@@ -87,6 +88,7 @@ module.exports = {
     price:       numField(0, 1_000_000_000),
     status:      statusSchema.optional(),
     coverPhoto:  z.union([photoUrlSchema, z.literal('')]).optional().default(''),
+    coverPhotoThumb: z.union([photoUrlSchema, z.literal('')]).optional().default(''),
     roomPhotos:  z.array(roomPhotoSchema).max(20).optional().default([]),
     videoId:     z.string().trim().max(200).optional().default(''),
     // Locally-uploaded property walkthrough (data: URL OR https URL).
@@ -118,6 +120,7 @@ module.exports = {
     price:       numField(0, 1_000_000_000).optional(),
     status:      statusSchema.optional(),
     coverPhoto:  z.union([photoUrlSchema, z.literal('')]).optional(),
+    coverPhotoThumb: z.union([photoUrlSchema, z.literal('')]).optional(),
     roomPhotos:  z.array(roomPhotoSchema).max(20).optional(),
     videoId:     z.string().trim().max(200).optional(),
     videoUrl:    z.union([videoUrlSchema, z.literal('')]).optional(),

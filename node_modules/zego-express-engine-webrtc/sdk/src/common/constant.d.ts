@@ -1,0 +1,14 @@
+export declare const publish_video_codec = "publish_video_codec";
+export declare const visibilitychange = "visibilitychange";
+export declare const roomNotExistStr = "room not exist";
+export declare const deviceIsNotFoundStr = "device is not found";
+export declare const streamNotFromZegoStr = "stream is not from zego";
+export declare const inputParamErrorStr = "input param error";
+export declare const localStreamWrongStr = "local stream wrong";
+export declare const noPreviewStr = "no preview";
+export declare const publishStreamNoFoundStr = "publish stream no found";
+export declare const networkIsBrokenStr = "network is broken";
+export declare const stopRetryStr = "stop retry";
+export declare const integerErr = " must be integer number";
+export declare const stringErr = " must be string";
+export declare const booleanErr = " must be boolean";

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence, useScroll, useMotionValueEvent } from "framer-motion";
-import { Search, MapPin, BedDouble, Bath, Square, Heart, Star, X, ChevronRight, ShieldCheck, ChevronDown, ChevronUp, Filter, Ruler, Navigation, CheckCircle2, Flame, Building, Wifi, Map, List, LayoutGrid, Home, Users, User, BookOpen, Share2, MessageCircle, ArrowLeft, SlidersHorizontal, ArrowUpDown, Camera } from "lucide-react";
+import { Search, MapPin, BedDouble, Bath, Square, Heart, Star, X, ChevronRight, ShieldCheck, ChevronDown, ChevronUp, Filter, Ruler, Navigation, CheckCircle2, Flame, Building, Wifi, Map, List, LayoutGrid, Home, Users, User, BookOpen, Share2, MessageCircle, ArrowLeft, SlidersHorizontal, ArrowUpDown, Camera, Layers } from "lucide-react";
 import { useLanguage } from "../context/LanguageContext";
 // ─── SHARED INQUIRY MODAL (single source of truth for the inquiry flow) ───────
 import InquiryModal from "./InquiryModal";
@@ -33,10 +33,6 @@ const GOOGLE_MAPS_API_KEY =
 	(typeof import.meta !== "undefined" && import.meta?.env?.VITE_GOOGLE_MAPS_API_KEY) ||
 	(typeof process !== "undefined" && process?.env?.REACT_APP_GOOGLE_MAPS_API_KEY) ||
 	"AIzaSyC9xWNjjSPhxy2aUWLubPqHR7N6KZWmKlg";
-
-// Loaded libraries (kept as a stable reference for useJsApiLoader).
-// Add 'places' / 'geometry' here if you wire up auto-complete or distance calcs.
-const GOOGLE_MAPS_LIBRARIES = [];
 
 // Default centre — middle of Dhaka. Override via the prop on <MapView />.
 const DEFAULT_MAP_CENTER = { lat: 23.7652, lng: 90.3893 };
@@ -77,10 +73,16 @@ const validDivisions = ["dhaka", "chittagong", "sylhet", "rajshahi", "khulna", "
 
 // ─── ROOM COLLAGE HELPER ──────────────────────────────────────────────────────
 // Builds the listing-card collage: one photo per room category so a card with
-// 4 bedroom photos doesn't fill all four tiles with bedrooms. Order respects
-// the buyer's mental model (bedroom → bathroom → living → kitchen → other) and
-// the cover photo always claims the big tile.
+// 4 bedroom photos doesn't fill all four tiles with bedrooms. Order is fixed:
+// cover photo first, then bedroom, bathroom, living room, kitchen, and other.
 const ROOM_COLLAGE_ORDER = ["bedroom", "bathroom", "living", "kitchen", "other"];
+const ROOM_MATCHERS = {
+	bedroom:  (room) => room.includes("bed"),
+	bathroom: (room) => room.includes("bath") || room.includes("toilet") || room.includes("wash"),
+	living:   (room) => room.includes("living") || room.includes("drawing") || room.includes("hall"),
+	kitchen:  (room) => room.includes("kitchen") || room.includes("cook"),
+	other:    (room) => room.includes("other"),
+};
 const ROOM_LABEL_FALLBACK = {
 	bedroom:  "Bedroom",
 	bathroom: "Bathroom",
@@ -89,23 +91,16 @@ const ROOM_LABEL_FALLBACK = {
 	other:    "Other",
 };
 function buildRoomCollage(property) {
-	const seen = new Set();
 	const uniqueRoomShots = [];
-	if (Array.isArray(property.roomPhotos)) {
+	const usedPhotos = new Set();
+	const hasRoomPhotos = Array.isArray(property.roomPhotos) && property.roomPhotos.some(p => p?.url || p?.preview);
+	if (hasRoomPhotos) {
 		for (const roomId of ROOM_COLLAGE_ORDER) {
-			const hit = property.roomPhotos.find(p => (p.room || "other") === roomId && (p.url || p.preview));
+			const matches = ROOM_MATCHERS[roomId];
+			const hit = property.roomPhotos.find(p => !usedPhotos.has(p) && matches(String(p.room || "").toLowerCase()) && (p.url || p.preview));
 			if (hit) {
 				uniqueRoomShots.push({ url: hit.url || hit.preview, room: roomId });
-				seen.add(roomId);
-			}
-		}
-		// Pick up any remaining room categories that weren't in the curated order
-		// (defensive — shouldn't normally happen, but keeps the collage non-empty).
-		for (const p of property.roomPhotos) {
-			const room = p.room || "other";
-			if (!seen.has(room) && (p.url || p.preview)) {
-				uniqueRoomShots.push({ url: p.url || p.preview, room });
-				seen.add(room);
+				usedPhotos.add(hit);
 			}
 		}
 	}
@@ -115,7 +110,7 @@ function buildRoomCollage(property) {
 
 	// If we have no real per-room photos at all, fall back to the flat `images`
 	// array so older API records still render something.
-	if (!thumbs.length && Array.isArray(property.images)) {
+	if (!thumbs.length && !hasRoomPhotos && Array.isArray(property.images)) {
 		const extras = property.images
 			.filter(u => u && u !== cover)
 			.slice(0, 3)
@@ -165,12 +160,12 @@ const PropertyCard = ({ property, navigate, t, showToast, isHighlighted, onHover
 	const extraRoomCount = Math.max(0, totalRoomCategories - 1 - collageThumbs.length);
 
 	return (
-		<div onMouseEnter={() => onHover && onHover(property.id)} onMouseLeave={() => onHoverEnd && onHoverEnd()} className={`bg-white rounded-[2rem] border overflow-hidden flex flex-col md:flex-row hover:shadow-[0_20px_40px_rgba(0,0,0,0.06)] transition-all duration-500 group ${isHighlighted ? "border-brandRed shadow-[0_0_0_2px_rgba(186,0,54,0.3)]" : "border-gray-100"}`}>
-			<div className="w-full md:w-[380px] lg:w-[400px] h-[260px] md:h-auto p-3 shrink-0">
-				<div className="relative w-full h-full rounded-[1.5rem] overflow-hidden flex gap-1.5 bg-gray-100">
+		<div onMouseEnter={() => onHover && onHover(property.id)} onMouseLeave={() => onHoverEnd && onHoverEnd()} className={`bg-white rounded-3xl border overflow-hidden flex flex-col md:flex-row hover:shadow-[0_20px_40px_rgba(0,0,0,0.06)] transition-all duration-500 group ${isHighlighted ? "border-brandRed shadow-[0_0_0_2px_rgba(186,0,54,0.3)]" : "border-gray-100"}`}>
+			<div className="w-full md:w-[280px] lg:w-[300px] h-[190px] md:h-auto p-2.5 shrink-0">
+				<div className="relative w-full h-full rounded-2xl overflow-hidden flex gap-1.5 bg-gray-100">
 					<div className="relative w-[75%] h-full overflow-hidden cursor-pointer" onClick={() => navigate(`/property/${property.id}`)}>
 						{coverImg ? (
-							<img src={coverImg} alt={property.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700 ease-in-out" />
+							<img src={coverImg} alt={property.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700 ease-in-out" loading="lazy" decoding="async" />
 						) : (
 							<div className="w-full h-full flex items-center justify-center text-gray-300 bg-gray-100">
 								<Camera size={42} />
@@ -189,14 +184,14 @@ const PropertyCard = ({ property, navigate, t, showToast, isHighlighted, onHover
 						</button>
 					</div>
 					{/* ── ROOM COLLAGE STRIP ──────────────────────────────────────────
-					    Renders ONE thumbnail per room category (bedroom / bathroom /
-					    living / kitchen / other) instead of dumping multiple bedrooms
-					    into the strip. Falls back to the flat images list for older
-					    records that didn't tag photos by room. */}
+					    Renders ONE thumbnail per requested room category (bedroom /
+					    bathroom / living / kitchen / other) instead of downloading the whole gallery.
+					    Falls back to the flat images list only for older records that
+					    did not tag photos by room. */}
 					<div className="w-[25%] flex flex-col gap-1.5 h-full">
 						{collageThumbs.map((shot, idx) => (
 							<div key={`${shot.room || "x"}-${idx}`} className="relative flex-1 overflow-hidden cursor-pointer bg-gray-200" onClick={() => navigate(`/property/${property.id}`)}>
-								<img src={shot.url} className="w-full h-full object-cover hover:opacity-80 transition-opacity duration-300" alt={shot.room ? (ROOM_LABEL_FALLBACK[shot.room] || shot.room) : ""} />
+								<img src={shot.url} className="w-full h-full object-cover hover:opacity-80 transition-opacity duration-300" alt={shot.room ? (ROOM_LABEL_FALLBACK[shot.room] || shot.room) : ""} loading="lazy" decoding="async" />
 								{shot.room && (
 									<span className="absolute bottom-1 left-1 px-1.5 py-[2px] rounded-md bg-black/55 text-white text-[8px] font-black uppercase tracking-wider">
 										{ROOM_LABEL_FALLBACK[shot.room] || shot.room}
@@ -211,9 +206,9 @@ const PropertyCard = ({ property, navigate, t, showToast, isHighlighted, onHover
 				</div>
 			</div>
 
-			<div className="p-5 md:p-6 flex-1 flex flex-col justify-between">
+			<div className="p-3.5 md:p-4 flex-1 flex flex-col justify-between">
 				<div>
-					<div className="flex justify-between items-start gap-4 mb-3">
+					<div className="flex justify-between items-start gap-4 mb-2">
 						<div className="flex items-center gap-2 cursor-pointer" onClick={() => navigate(`/property/${property.id}`)}>
 							<div className="bg-gray-900 text-white text-[11px] font-black px-2 py-1 rounded-lg flex items-center gap-1 shadow-sm">
 								<Star size={10} className="fill-yellow-400 text-yellow-400" /> {property.rating}
@@ -229,13 +224,13 @@ const PropertyCard = ({ property, navigate, t, showToast, isHighlighted, onHover
 							</span>
 						</div>
 					</div>
-					<h3 className="text-xl md:text-2xl font-black text-gray-900 leading-tight group-hover:text-brandRed transition-colors cursor-pointer mb-2" onClick={() => navigate(`/property/${property.id}`)}>
+					<h3 className="text-base md:text-lg font-black text-gray-900 leading-tight group-hover:text-brandRed transition-colors cursor-pointer mb-1" onClick={() => navigate(`/property/${property.id}`)}>
 						{property.title}
 					</h3>
-					<p className="text-xs font-bold text-gray-500 flex items-center gap-1.5 mb-5">
+					<p className="text-xs font-bold text-gray-500 flex items-center gap-1.5 mb-2.5">
 						<MapPin size={14} className="text-gray-400" /> {property.location}
 					</p>
-					<div className="flex flex-wrap items-center gap-4 text-xs font-bold text-gray-600 bg-gray-50 p-3 rounded-2xl">
+					<div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] font-bold text-gray-600 bg-gray-50 p-2.5 rounded-xl">
 						<span className="flex items-center gap-1.5">
 							<BedDouble size={14} className="text-gray-400" /> {property.beds} {t.beds || "Beds"}
 						</span>
@@ -245,16 +240,19 @@ const PropertyCard = ({ property, navigate, t, showToast, isHighlighted, onHover
 						<span className="flex items-center gap-1.5">
 							<Square size={14} className="text-gray-400" /> {property.sqft} {t.sqft || "sqft"}
 						</span>
+						<span className="flex items-center gap-1.5">
+							<Layers size={14} className="text-gray-400" /> {(property.floor || property.floorNumber) ? `${t.floorLabel || "Floor"} ${property.floor || property.floorNumber}` : (t.groundFloor || "Ground")}
+						</span>
 						<span className="hidden sm:flex items-center gap-1.5">
 							<Building size={14} className="text-gray-400" />
 							{property.furnishing === "Furnished" ? t.furnished || "Furnished" : property.furnishing === "Semi-Furnished" ? t.semiFurnished || "Semi-Furnished" : t.unfurnished || "Unfurnished"}
 						</span>
 					</div>
 				</div>
-				<div className="flex flex-col sm:flex-row justify-between items-end gap-4 pt-5 mt-5 border-t border-gray-100">
+				<div className="flex flex-col sm:flex-row justify-between items-center gap-2.5 pt-3 mt-3 border-t border-gray-100">
 					<div className="w-full sm:w-auto flex flex-col cursor-pointer" onClick={() => navigate(`/property/${property.id}`)}>
 						<div className="flex items-baseline gap-2">
-							<span className="text-2xl md:text-3xl font-black text-gray-900 tracking-tighter">৳ {property.price.toLocaleString("en-IN")}</span>
+							<span className="text-lg md:text-xl font-black text-gray-900 tracking-tighter">৳ {property.price.toLocaleString("en-IN")}</span>
 							{property.originalPrice > property.price && (
 								<div className="flex items-center gap-2">
 									<span className="text-xs text-gray-400 line-through font-bold">৳ {property.originalPrice.toLocaleString("en-IN")}</span>
@@ -264,10 +262,10 @@ const PropertyCard = ({ property, navigate, t, showToast, isHighlighted, onHover
 								</div>
 							)}
 						</div>
-						<p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">{t.perMonthExcluding || "Per Month • Excluding Utilities"}</p>
+						<p className="text-[9px] text-gray-400 font-bold uppercase tracking-widest mt-0.5">{t.perMonth || "Per Month"}</p>
 					</div>
 					<div className="flex items-center gap-3 w-full sm:w-auto">
-						<button onClick={() => navigate(`/property/${property.id}`)} className="flex-1 sm:flex-none px-6 py-3 rounded-xl text-xs font-black text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 transition-all">
+						<button onClick={() => navigate(`/property/${property.id}`)} className="flex-1 sm:flex-none px-4 py-2 rounded-lg text-[11px] font-black text-gray-700 bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 transition-all">
 							{t.detailsBtn || "Details"}
 						</button>
 						{/* ── INQUIRY BUTTON: opens modal inline, no page navigation ── */}
@@ -276,7 +274,7 @@ const PropertyCard = ({ property, navigate, t, showToast, isHighlighted, onHover
 								e.stopPropagation();
 								onInquire(property);
 							}}
-							className="flex-1 sm:flex-none px-8 py-3 rounded-xl bg-brandRed hover:bg-[#a0002e] text-white text-xs font-black shadow-[0_10px_20px_rgba(186,0,54,0.2)] hover:shadow-[0_15px_30px_rgba(186,0,54,0.3)] hover:-translate-y-0.5 active:scale-95 transition-all flex items-center justify-center gap-1.5">
+							className="flex-1 sm:flex-none px-5 py-2 rounded-lg bg-brandRed hover:bg-[#a0002e] text-white text-[11px] font-black shadow-[0_8px_16px_rgba(186,0,54,0.18)] hover:shadow-[0_12px_24px_rgba(186,0,54,0.28)] hover:-translate-y-0.5 active:scale-95 transition-all flex items-center justify-center gap-1.5">
 							<MessageCircle size={13} />
 							{t.inquireBtn || "Inquire"}
 						</button>
@@ -286,6 +284,47 @@ const PropertyCard = ({ property, navigate, t, showToast, isHighlighted, onHover
 		</div>
 	);
 };
+
+const PropertyCardSkeleton = () => (
+	<div className="bg-white rounded-3xl border border-gray-100 overflow-hidden flex flex-col md:flex-row shadow-sm animate-pulse">
+		<div className="w-full md:w-[280px] lg:w-[300px] h-[190px] md:h-auto p-2.5 shrink-0">
+			<div className="relative w-full h-full rounded-2xl overflow-hidden flex gap-1.5 bg-gray-100">
+				<div className="w-[75%] h-full bg-gray-200" />
+				<div className="w-[25%] flex flex-col gap-1.5 h-full">
+					<div className="flex-1 bg-gray-200" />
+					<div className="flex-1 bg-gray-200" />
+					<div className="flex-1 bg-gray-200" />
+				</div>
+			</div>
+		</div>
+		<div className="p-3.5 md:p-4 flex-1 flex flex-col justify-between">
+			<div>
+				<div className="flex justify-between items-start gap-4 mb-3">
+					<div className="h-6 w-28 rounded-lg bg-gray-200" />
+					<div className="hidden md:block h-6 w-32 rounded-lg bg-gray-100" />
+				</div>
+				<div className="h-5 w-3/4 rounded bg-gray-200 mb-2" />
+				<div className="h-4 w-1/2 rounded bg-gray-100 mb-3" />
+				<div className="flex flex-wrap items-center gap-2 bg-gray-50 p-2.5 rounded-xl">
+					<div className="h-4 w-16 rounded bg-gray-200" />
+					<div className="h-4 w-16 rounded bg-gray-200" />
+					<div className="h-4 w-20 rounded bg-gray-200" />
+					<div className="h-4 w-20 rounded bg-gray-200" />
+				</div>
+			</div>
+			<div className="flex flex-col sm:flex-row justify-between items-center gap-2.5 pt-3 mt-3 border-t border-gray-100">
+				<div className="w-full sm:w-auto">
+					<div className="h-6 w-28 rounded bg-gray-200" />
+					<div className="h-3 w-20 rounded bg-gray-100 mt-2" />
+				</div>
+				<div className="flex items-center gap-3 w-full sm:w-auto">
+					<div className="h-9 flex-1 sm:w-20 rounded-lg bg-gray-100" />
+					<div className="h-9 flex-1 sm:w-24 rounded-lg bg-gray-200" />
+				</div>
+			</div>
+		</div>
+	</div>
+);
 
 // ─── FILTER SECTION ──────────────────────────────────────────────────────────
 const FilterSection = ({ title, children }) => (
@@ -321,10 +360,11 @@ const MapView = ({ properties, highlightedId, onMarkerHover, onMarkerHoverEnd, o
 	);
 
 	// Load the Maps JS SDK once per page (the loader de-duplicates internally).
+	// NOTE: `libraries` prop is intentionally omitted — passing an empty array
+	// causes an internal constructor crash in some versions of @react-google-maps/api.
 	const { isLoaded, loadError } = useJsApiLoader({
 		id: "tlp-google-map-script",
 		googleMapsApiKey: GOOGLE_MAPS_API_KEY,
-		libraries: GOOGLE_MAPS_LIBRARIES,
 	});
 
 	// TODO (backend): when the user pans/zooms the map, refetch properties
@@ -344,10 +384,9 @@ const MapView = ({ properties, highlightedId, onMarkerHover, onMarkerHoverEnd, o
 	// When the search area or property set changes, fit the map to the matches.
 	useEffect(() => {
 		if (!mapInstance || !window.google) return;
-		const points = (searchArea
-			? properties.filter((p) => p.location?.toLowerCase().includes(searchArea.toLowerCase()))
-			: properties
-		).filter((p) => p.lat && p.lng);
+		// `properties` is already the (server-side) search-filtered set — fit the
+		// map to all of them instead of re-filtering by the raw search text.
+		const points = properties.filter((p) => p.lat && p.lng);
 		if (points.length === 0) return;
 		if (points.length === 1) {
 			mapInstance.panTo({ lat: points[0].lat, lng: points[0].lng });
@@ -357,7 +396,7 @@ const MapView = ({ properties, highlightedId, onMarkerHover, onMarkerHoverEnd, o
 		const bounds = new window.google.maps.LatLngBounds();
 		points.forEach((p) => bounds.extend({ lat: p.lat, lng: p.lng }));
 		mapInstance.fitBounds(bounds, 64);
-	}, [searchArea, properties, mapInstance]);
+	}, [properties, mapInstance]);
 
 	const onLoad = useCallback((map) => setMapInstance(map), []);
 	const onUnmount = useCallback(() => setMapInstance(null), []);
@@ -522,9 +561,11 @@ const MapMiniCard = ({ property, navigate, onClose, onInquire, t }) => {
 					{/* Photo */}
 					<div className="relative w-[130px] sm:w-[150px] h-[130px] sm:h-[140px] shrink-0 bg-gray-100">
 						<img
-							src={property.images[0]}
+							src={property.images[0] || property.img || property.coverPhoto || ""}
 							alt={property.title}
 							className="absolute inset-0 w-full h-full object-cover"
+							loading="lazy"
+							decoding="async"
 						/>
 						<div className="absolute bottom-2 left-2 bg-white/95 backdrop-blur px-1.5 py-0.5 rounded-md flex items-center gap-1 text-[10px] font-black">
 							<Star size={10} className="fill-yellow-400 text-yellow-400" />
@@ -608,9 +649,11 @@ const PropertyListing = () => {
 	// substring matching against every location-ish field on the property,
 	// so this also matches a property where area="Dhanmondi" and the address
 	// line has "Dhanmondi 12".
-	const initialSearchAreaFromURL = (!isKnownDivision && routeParam !== "all")
-		? routeParam.replace(/-/g, ' ')
-		: "";
+	const initialSearchAreaFromURL = searchParams.get("q") 
+		? searchParams.get("q") 
+		: (!isKnownDivision && routeParam !== "all")
+			? routeParam.replace(/-/g, ' ')
+			: "";
 
 	const formattedDivision = (t.cities && t.cities[activeDivision]) || (t.districtNames && t.districtNames[activeDivision]) || (activeDivision === 'all' ? (t.allCities || "All") : activeDivision.charAt(0).toUpperCase() + activeDivision.slice(1));
 
@@ -627,6 +670,9 @@ const PropertyListing = () => {
 	// Pulled from propertyService — backend first, localStorage fallback. No
 	// demo data is merged in anywhere; an empty list is a legitimate state.
 	const [properties, setProperties] = useState([]);
+	const [isPropertiesLoading, setIsPropertiesLoading] = useState(true);
+	const [propertyLoadError, setPropertyLoadError] = useState("");
+	const [propertyRefreshTick, setPropertyRefreshTick] = useState(0);
 
 	// ── UI STATES ───────────────────────────────────────────────────────────────
 	const [isMobileFilterOpen, setIsMobileFilterOpen] = useState(false);
@@ -636,9 +682,20 @@ const PropertyListing = () => {
 	const [viewMode, setViewMode] = useState("list");
 	const [highlightedId, setHighlightedId] = useState(null);
 	const [selectedMapProperty, setSelectedMapProperty] = useState(null);
+	const [openSections, setOpenSections] = useState([]);
 
 	// ── FILTER STATES ───────────────────────────────────────────────────────────
 	const [searchArea, setSearchArea] = useState(initialSearchAreaFromURL);
+	// Debounced mirror of the search box → drives the server-side `q` fetch so
+	// we don't hit the API on every keystroke. The header/input use `searchArea`
+	// directly so typing still feels instant.
+	const [debouncedSearch, setDebouncedSearch] = useState(initialSearchAreaFromURL);
+	useEffect(() => {
+		const id = setTimeout(() => setDebouncedSearch(searchArea), 300);
+		return () => clearTimeout(id);
+	}, [searchArea]);
+	// Visibility of the location autocomplete dropdown.
+	const [showSuggest, setShowSuggest] = useState(false);
 	// Default to 0 so freshly-uploaded test listings priced below 5000 BDT
 	// (very common in dev/QA — placeholder rents of 2000–3000) still show
 	// up out of the box. Users can drag the slider up if they want a real
@@ -668,17 +725,29 @@ const PropertyListing = () => {
 	useEffect(() => {
 		let cancelled = false;
 		const load = async () => {
+			if (!cancelled) {
+				setIsPropertiesLoading(true);
+				setPropertyLoadError("");
+			}
 			try {
-				const list = await propertyService.getProperties({ activeDivision }, "Newest Listings");
+				const list = await propertyService.getProperties(
+					{ activeDivision, searchArea: debouncedSearch, nearMeLabel: t.nearMe || "Nearby Location" },
+					sortBy,
+				);
 				if (!cancelled) setProperties(Array.isArray(list) ? list : []);
-			} catch {
-				if (!cancelled) setProperties([]);
+			} catch (err) {
+				if (!cancelled) {
+					setProperties([]);
+					setPropertyLoadError(err?.message || "Could not load properties. Please try again.");
+				}
+			} finally {
+				if (!cancelled) setIsPropertiesLoading(false);
 			}
 		};
 		load();
 		const unsub = subscribeUserProperties(load);
 		return () => { cancelled = true; unsub && unsub(); };
-	}, [activeDivision]);
+	}, [activeDivision, debouncedSearch, propertyRefreshTick]);
 
 	// ── LANDLORD LOOKUP FOR INQUIRY ─────────────────────────────────────────────
 	// Look up the landlord lazily when the inquiry modal opens so we don't issue
@@ -798,16 +867,12 @@ const PropertyListing = () => {
 	// Same shape as the propertyService.applyFilters helper, just inlined so it
 	// can read directly from the sidebar state without a serialisation step.
 	const filteredProperties = useMemo(() => {
-		const nearMeLabel = t.nearMe || "Nearby Location";
-		const needle = (searchArea || "").trim().toLowerCase();
+		// Text search is handled server-side now (the `q` param → $text + regex
+		// over the rich haystack). We deliberately do NOT re-filter by the
+		// search term here — that would undo the server's alias / multi-word
+		// matches. Everything else (price/beds/sqft/floor/…) stays client-side.
 		const list = (properties || []).filter((prop) => {
 			if (activeDivision !== "all" && prop.division !== activeDivision) return false;
-			// Match the search term against ANY location-ish field on the
-			// property (location, area, district, division, gpsAddress, title)
-			// so a property picked from the cascading dropdowns shows up even
-			// if the host didn't repeat the area name in the address line.
-			if (needle && needle !== nearMeLabel.toLowerCase() &&
-				!propertyLocationHaystack(prop).includes(needle)) return false;
 			if (prop.price < minPrice || prop.price > maxPrice) return false;
 			if (selectedTypes.length > 0 && !selectedTypes.includes(prop.type)) return false;
 			if (selectedCategories.length > 0 && !selectedCategories.includes(prop.rentalCategory)) return false;
@@ -818,6 +883,11 @@ const PropertyListing = () => {
 			if ((prop.sqft || 0) > maxSqft) return false;
 			if (selectedFurnish && prop.furnishing !== selectedFurnish) return false;
 			if (minRating > 0 && (prop.rating || 0) < minRating) return false;
+			if (selectedFloor && selectedFloor !== (t.anyFloor || "Any Floor")) {
+				const fl = Number(prop.floor) || 0;
+				if (selectedFloor === (t.groundFloor || "Ground Floor")) { if (fl !== 0) return false; }
+				else if (selectedFloor === (t.floor1to3 || "1st to 3rd Floor")) { if (fl < 1 || fl > 3) return false; }
+			}
 			return true;
 		});
 		list.sort((a, b) => {
@@ -827,9 +897,48 @@ const PropertyListing = () => {
 			return new Date(b.date || b.createdAt || 0) - new Date(a.date || a.createdAt || 0);
 		});
 		return list;
-	}, [properties, activeDivision, searchArea, minPrice, maxPrice, selectedTypes, selectedCategories, selectedBeds, maxSqft, selectedFurnish, minRating, sortBy, t.nearMe]);
+	}, [properties, activeDivision, minPrice, maxPrice, selectedTypes, selectedCategories, selectedBeds, maxSqft, selectedFurnish, minRating, selectedFloor, sortBy]);
+
+	// ── LOCATION AUTOCOMPLETE ────────────────────────────────────────────────
+	// Distinct, human-readable place labels pulled from the loaded listings'
+	// own `area` / `location` fields (the granular names hosts entered), each
+	// tagged with its district for context. Lets a tenant jump straight to e.g.
+	// "Lalmohan" instead of browsing the whole district.
+	//
+	// NOTE: We use a plain object instead of `new Map()` here because the
+	// lucide-react `Map` icon is imported in this file and shadows the built-in
+	// JavaScript Map class — causing a "Map is not a constructor" crash when
+	// bundled/minified by Vite.
+	const locationSuggestions = useMemo(() => {
+		const seen = {};
+		for (const p of properties || []) {
+			for (const cand of [{ label: p.thana, sub: p.district || p.division }, { label: p.area, sub: p.district || p.division }, { label: p.location, sub: p.district || p.division }]) {
+				const label = String(cand.label || "").trim();
+				if (!label) continue;
+				const key = label.toLowerCase();
+				if (!seen[key]) seen[key] = { label, sub: String(cand.sub || "").trim() };
+			}
+		}
+		return Object.values(seen);
+	}, [properties]);
+
+	const matchingSuggestions = useMemo(() => {
+		const q = (searchArea || "").trim().toLowerCase();
+		if (q.length < 1) return [];
+		const out = locationSuggestions.filter((s) => {
+			const l = s.label.toLowerCase();
+			return l.includes(q) && l !== q;
+		});
+		out.sort((a, b) => {
+			const aS = a.label.toLowerCase().startsWith(q) ? 0 : 1;
+			const bS = b.label.toLowerCase().startsWith(q) ? 0 : 1;
+			return aS - bS || a.label.localeCompare(b.label);
+		});
+		return out.slice(0, 6);
+	}, [locationSuggestions, searchArea]);
 
 	const isMapMode = viewMode === "map";
+	const resultCountLabel = isPropertiesLoading ? "..." : filteredProperties.length;
 
 	return (
 		<div className="w-full bg-[#f8f9fa] min-h-screen font-sans pb-20 relative">
@@ -850,7 +959,7 @@ const PropertyListing = () => {
                             {searchArea ? searchArea.charAt(0).toUpperCase() + searchArea.slice(1) : formattedDivision}
                         </span>
 						<span className="text-gray-500 font-bold text-sm">
-							{t.showing || "Showing"} <strong className="text-gray-900">{filteredProperties.length}</strong> {t.properties || "properties"}
+							{t.showing || "Showing"} <strong className="text-gray-900">{resultCountLabel}</strong> {t.properties || "properties"}
 						</span>
 					</div>
 					<button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="text-sm font-black text-gray-900 hover:text-[#ba0036] transition-colors flex items-center gap-2 uppercase tracking-wide border-b-2 border-gray-900 hover:border-[#ba0036] pb-0.5">
@@ -859,20 +968,110 @@ const PropertyListing = () => {
 				</div>
 			</motion.div>
 
-			{/* MOBILE TOP BAR */}
-			<div className={`bg-white border-b border-gray-100 sticky top-0 md:top-[72px] z-30 shadow-sm transition-opacity duration-300 ${isStickyFilter ? "opacity-0 pointer-events-none" : "opacity-100"}`}>
-				<div className="lg:hidden max-w-[1400px] mx-auto px-4 h-16 flex items-center justify-between gap-3">
-					<span className="text-sm font-bold text-gray-900 truncate">
-						{searchArea ? searchArea.charAt(0).toUpperCase() + searchArea.slice(1) : formattedDivision} {t.properties || "Properties"}
-					</span>
+			{/* ═══════════════════════════════════════════════════════════════
+			    MOBILE: Daraz-style immersive header — replaces global Navbar
+			    ─────────────────────────────────────────────────────────────── */}
+			<div className="md:hidden sticky top-0 z-40 bg-white shadow-sm">
+				{/* Row 1: Back arrow · Search bar · Sort icon */}
+				<div className="flex items-center gap-2 px-3 pt-3 pb-2">
+					<button
+						onClick={() => window.history.length > 2 ? navigate(-1) : navigate("/")}
+						className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0 active:scale-90 transition-transform"
+						aria-label="Go back">
+						<ArrowLeft size={18} className="text-gray-800" />
+					</button>
+					<div className="flex-1 relative">
+						<input
+							type="text"
+							value={searchArea}
+							onChange={(e) => setSearchArea(e.target.value)}
+							placeholder={t.searchAreaPlaceholder || "Search area, location..."}
+							className="w-full bg-gray-100 rounded-full py-2.5 pl-9 pr-8 text-[13px] font-bold text-gray-900 placeholder:text-gray-400 outline-none focus:ring-2 focus:ring-brandRed/30 transition-all"
+						/>
+						<Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+						{searchArea && (
+							<button
+								onClick={() => setSearchArea("")}
+								className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded-full bg-gray-300 text-white active:scale-90 transition-transform"
+								aria-label="Clear search">
+								<X size={12} />
+							</button>
+						)}
+					</div>
+				</div>
+
+				{/* Row 2: Sort Dropdown, Filter, Map */}
+				<div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 bg-white">
+					{/* Sort Dropdown */}
+					<div className="flex items-center gap-2 flex-1">
+						<select 
+							value={sortBy} 
+							onChange={(e) => setSortBy(e.target.value)} 
+							className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-[12px] font-bold text-gray-900 outline-none focus:border-brandRed cursor-pointer"
+						>
+							<option value="Newest Listings">{t.sortNewest || "Newest Listings"}</option>
+							<option value="Price: Low to High">{t.sortPriceLowHigh || "Price: Low to High"}</option>
+							<option value="Price: High to Low">{t.sortPriceHighLow || "Price: High to Low"}</option>
+							<option value="Popular">{t.sortPopular || "Popular"}</option>
+						</select>
+					</div>
+					
 					<div className="flex items-center gap-2 shrink-0">
-						<button onClick={() => setViewMode((v) => (v === "map" ? "list" : "map"))} className={`flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-black transition-all active:scale-95 ${isMapMode ? "bg-brandRed text-white shadow-md" : "bg-gray-100 text-gray-700 hover:bg-red-50 hover:text-brandRed"}`}>
+						{/* Filter button */}
+						<button
+							onClick={() => setIsMobileFilterOpen(true)}
+							className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-black border transition-all active:scale-95 ${
+								(selectedCategories.length > 0 || selectedFurnish || selectedBeds !== "any" || minRating > 0)
+									? "bg-brandRed text-white border-brandRed shadow-sm"
+									: "bg-white text-gray-700 border-gray-200"
+							}`}>
+							<Filter size={14} />
+							{t.filtersBtn || "Filters"}
+						</button>
+
+						{/* Map button */}
+						<button
+							onClick={() => setViewMode((v) => (v === "map" ? "list" : "map"))}
+							className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-black border transition-all active:scale-95 ${
+								isMapMode
+									? "bg-brandRed text-white border-brandRed shadow-sm"
+									: "bg-white text-gray-700 border-gray-200"
+							}`}>
 							{isMapMode ? <List size={14} /> : <Map size={14} />}
 							{isMapMode ? "List" : "Map"}
 						</button>
-						<button onClick={() => setIsMobileFilterOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-gray-100 rounded-full text-sm font-bold text-gray-700 active:scale-95 transition-transform">
-							<Filter size={16} /> {t.filtersBtn || "Filters"}
+					</div>
+				</div>
+
+				{/* Row 3: Results count + location context */}
+				<div className="flex items-center justify-between px-3 py-1.5 bg-gray-50/80">
+					<span className="text-[11px] font-bold text-gray-500">
+						<strong className="text-gray-900">{resultCountLabel}</strong> {t.properties || "প্রপার্টি"} · {searchArea ? searchArea.charAt(0).toUpperCase() + searchArea.slice(1) : formattedDivision}
+					</span>
+					{searchArea && (
+						<button onClick={() => setSearchArea("")} className="text-[10px] font-black text-brandRed active:scale-95 transition-transform">
+							{t.clearAll || "Clear"}
 						</button>
+					)}
+				</div>
+			</div>
+
+			{/* Old desktop-only top bar — hidden on mobile since the new header above replaces it */}
+			<div className="hidden md:block">
+				<div className={`bg-white border-b border-gray-100 sticky top-[72px] z-30 shadow-sm`}>
+					<div className="max-w-[1400px] mx-auto px-4 h-16 flex items-center justify-between gap-3">
+						<span className="text-sm font-bold text-gray-900 truncate">
+							{searchArea ? searchArea.charAt(0).toUpperCase() + searchArea.slice(1) : formattedDivision} {t.properties || "Properties"}
+						</span>
+						<div className="flex items-center gap-2 shrink-0">
+							<button onClick={() => setViewMode((v) => (v === "map" ? "list" : "map"))} className={`flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-black transition-all active:scale-95 ${isMapMode ? "bg-brandRed text-white shadow-md" : "bg-gray-100 text-gray-700 hover:bg-red-50 hover:text-brandRed"}`}>
+								{isMapMode ? <List size={14} /> : <Map size={14} />}
+								{isMapMode ? "List" : "Map"}
+							</button>
+							<button onClick={() => setIsMobileFilterOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-gray-100 rounded-full text-sm font-bold text-gray-700 active:scale-95 transition-transform">
+								<Filter size={16} /> {t.filtersBtn || "Filters"}
+							</button>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -925,12 +1124,28 @@ const PropertyListing = () => {
 						</div>
 
 						<FilterSection title={t.filterLocation || "Location"}>
-							<div className="relative mb-4">
-								<input type="text" value={searchArea} onChange={(e) => setSearchArea(e.target.value)} placeholder={t.searchAreaPlaceholder || "Search area..."} className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 pl-10 pr-24 text-xs font-bold focus:border-brandRed outline-none" />
+							{/* Search input — desktop sidebar only.
+							    On mobile the top bar search already handles this. */}
+							<div className="hidden lg:block relative mb-4">
+								<input type="text" value={searchArea} onChange={(e) => { setSearchArea(e.target.value); setShowSuggest(true); }} onFocus={() => setShowSuggest(true)} onBlur={() => setTimeout(() => setShowSuggest(false), 120)} placeholder={t.searchAreaPlaceholder || "Search area..."} className="w-full bg-gray-50 border border-gray-100 rounded-xl py-3 pl-10 pr-24 text-xs font-bold focus:border-brandRed outline-none" />
 								<Search size={14} className="absolute left-3.5 top-3.5 text-gray-400" />
 								<button onClick={handleNearestMe} disabled={isLocating} className="absolute right-2 top-2 bg-white border border-gray-200 shadow-sm text-[9px] font-black uppercase text-brandRed px-2 py-1 rounded-lg flex items-center gap-1 hover:bg-red-50 transition-colors">
 									<Navigation size={10} className={isLocating ? "animate-spin" : ""} /> {isLocating ? t.locating || "Locating" : t.nearMe || "Near Me"}
 								</button>
+								{showSuggest && matchingSuggestions.length > 0 && (
+									<div className="absolute left-0 right-0 top-full mt-1.5 bg-white border border-gray-100 rounded-xl shadow-[0_12px_30px_rgba(0,0,0,0.10)] z-40 overflow-hidden">
+										{matchingSuggestions.map((s, i) => (
+											<button
+												key={`${s.label}-${i}`}
+												onMouseDown={(e) => { e.preventDefault(); setSearchArea(s.label); setShowSuggest(false); }}
+												className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-gray-50 transition-colors border-b border-gray-50 last:border-0">
+												<MapPin size={13} className="text-brandRed shrink-0" />
+												<span className="text-xs font-bold text-gray-900 truncate">{s.label}</span>
+												{s.sub && <span className="text-[10px] font-bold text-gray-400 ml-auto uppercase tracking-wide shrink-0 capitalize">{s.sub}</span>}
+											</button>
+										))}
+									</div>
+								)}
 							</div>
 							<div className="flex flex-wrap gap-2">
 								{[t.districtNames?.gulshan || "Gulshan", t.districtNames?.banani || "Banani", t.districtNames?.dhanmondi || "Dhanmondi", t.districtNames?.bashundhara || "Bashundhara"].map((area) => (
@@ -1200,12 +1415,18 @@ const PropertyListing = () => {
 					<AnimatePresence mode="wait">
 						{isMapMode ? null : (
 							<motion.div key="list-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} className="w-full">
-								{filteredProperties.length > 0 ? (
+								{isPropertiesLoading ? (
+									Array.from({ length: 6 }, (_, idx) => (
+										<div key={`property-skeleton-${idx}`} className="mb-4 md:mb-6">
+											<PropertyCardSkeleton />
+										</div>
+									))
+								) : filteredProperties.length > 0 ? (
 									filteredProperties.map((property) => {
 										return (
 											<React.Fragment key={property.id}>
-												{/* DESKTOP: full PropertyCard */}
-												<div className="hidden md:block mb-6">
+												{/* Unified PropertyCard for both Desktop and Mobile */}
+												<div className="mb-4 md:mb-6">
 													<PropertyCard property={property} navigate={navigate} t={t} showToast={showToast} isHighlighted={highlightedId === property.id} onHover={setHighlightedId} onHoverEnd={() => setHighlightedId(null)} onInquire={openInquiry} />
 												</div>
 											</React.Fragment>
@@ -1216,100 +1437,11 @@ const PropertyListing = () => {
 										<div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mb-4">
 											<Search className="text-brandRed" size={24} />
 										</div>
-										<h3 className="text-xl font-black text-gray-900 mb-2">{t.noPropsFound || "No Properties Found"}</h3>
-										<p className="text-sm font-bold text-gray-500 mb-6">{t.noPropsDesc || "Try adjusting your filters or search criteria."}</p>
-										<button onClick={handleClearAll} className="bg-gray-900 text-white px-8 py-3 rounded-xl text-sm font-bold active:scale-95 transition-transform shadow-md hover:shadow-lg">
-											{t.clearFilters || "Clear Filters"}
+										<h3 className="text-xl font-black text-gray-900 mb-2">{propertyLoadError ? "Could not load properties" : (t.noPropsFound || "No Properties Found")}</h3>
+										<p className="text-sm font-bold text-gray-500 mb-6">{propertyLoadError || t.noPropsDesc || "Try adjusting your filters or search criteria."}</p>
+										<button onClick={propertyLoadError ? () => setPropertyRefreshTick((tick) => tick + 1) : handleClearAll} className="bg-gray-900 text-white px-8 py-3 rounded-xl text-sm font-bold active:scale-95 transition-transform shadow-md hover:shadow-lg">
+											{propertyLoadError ? "Retry" : (t.clearFilters || "Clear Filters")}
 										</button>
-									</div>
-								)}
-
-								{/* MOBILE: single-column horizontal cards (image left, info right).
-								    Easier to read than the previous cramped 2-col grid and matches
-								    the OYO/airbnb list-view pattern. */}
-								{filteredProperties.length > 0 && (
-									<div className="flex flex-col gap-3 pb-10 md:hidden">
-										{filteredProperties.map((property) => {
-											const catLabel = RENTAL_CATEGORIES.find((c) => c.id === property.rentalCategory);
-											const catText = (catLabel?.tKey && t[catLabel.tKey]) || catLabel?.label || "Property";
-											const discountPercent = Math.round(((property.originalPrice - property.price) / property.originalPrice) * 100);
-											return (
-												<div
-													key={property.id}
-													onClick={() => navigate(`/property/${property.id}`)}
-													className="bg-white rounded-2xl border border-gray-100 overflow-hidden shadow-sm active:scale-[0.99] transition-transform cursor-pointer"
-												>
-													<div className="flex">
-														{/* Photo */}
-														<div className="relative w-[130px] h-[130px] shrink-0 bg-gray-100">
-															<img
-																src={property.images[0]}
-																alt={property.title}
-																className="absolute inset-0 w-full h-full object-cover"
-															/>
-															{property.verified && (
-																<div className="absolute top-1.5 left-1.5 bg-white/95 backdrop-blur-sm px-1.5 py-0.5 rounded-md text-[8px] font-black text-brandRed flex items-center gap-0.5">
-																	<ShieldCheck size={8} /> Verified
-																</div>
-															)}
-															<button
-																onClick={(e) => {
-																	e.stopPropagation();
-																	handleSave(e, property);
-																}}
-																aria-label="Save"
-																className="absolute top-1.5 right-1.5 p-1.5 bg-white/95 backdrop-blur-sm rounded-full hover:bg-white transition-all">
-																<Heart size={11} className="text-gray-700" />
-															</button>
-														</div>
-
-														{/* Info */}
-														<div className="flex-1 min-w-0 p-3 flex flex-col">
-															<p className="text-[9px] font-black text-brandRed uppercase tracking-widest line-clamp-1">{catText}</p>
-															<h4 className="text-[13px] font-black text-gray-900 leading-tight line-clamp-2 mt-0.5">{property.title}</h4>
-															<p className="text-[10px] text-gray-500 font-bold flex items-center gap-1 line-clamp-1 mt-1">
-																<MapPin size={10} className="shrink-0" /> {property.location}
-															</p>
-															<div className="mt-auto flex items-baseline gap-1.5 pt-2">
-																<span className="text-base font-black text-gray-900">৳{(property.price / 1000).toFixed(0)}k</span>
-																<span className="text-[10px] text-gray-500 font-bold">/{t.monthText || "mo"}</span>
-																{property.originalPrice > property.price && (
-																	<span className="ml-auto bg-green-100 text-green-700 text-[9px] font-black px-1.5 py-0.5 rounded">{discountPercent}% {t.offText || "OFF"}</span>
-																)}
-															</div>
-															<div className="flex items-center gap-2.5 text-[10px] font-bold text-gray-500 mt-1.5 pt-1.5 border-t border-gray-100">
-																<span className="flex items-center gap-1"><BedDouble size={10} /> {property.beds}</span>
-																<span className="flex items-center gap-1"><Bath size={10} /> {property.baths}</span>
-																<span className="flex items-center gap-1"><Square size={10} /> {property.sqft}</span>
-																<span className="ml-auto flex items-center gap-1">
-																	<Star size={10} className="fill-yellow-400 text-yellow-400" /> {property.rating}
-																</span>
-															</div>
-														</div>
-													</div>
-
-													{/* CTAs */}
-													<div className="px-3 pb-3 grid grid-cols-2 gap-2 -mt-1">
-														<button
-															onClick={(e) => {
-																e.stopPropagation();
-																navigate(`/property/${property.id}`);
-															}}
-															className="py-2 rounded-lg text-[11px] font-black text-gray-700 bg-gray-50 border border-gray-100 active:scale-95 transition-transform">
-															{t.detailsBtn || "Details"}
-														</button>
-														<button
-															onClick={(e) => {
-																e.stopPropagation();
-																openInquiry(property);
-															}}
-															className="py-2 rounded-lg bg-brandRed text-white text-[11px] font-black active:scale-95 transition-transform flex items-center justify-center gap-1 shadow-sm">
-															<MessageCircle size={11} /> {t.inquireBtn || "Inquire"}
-														</button>
-													</div>
-												</div>
-											);
-										})}
 									</div>
 								)}
 							</motion.div>
@@ -1362,7 +1494,7 @@ const PropertyListing = () => {
 							<div className="max-w-[640px] mx-auto mt-2 pointer-events-auto flex">
 								<span className="bg-white/95 backdrop-blur px-3 py-1.5 rounded-full text-[11px] font-black text-gray-900 shadow-md flex items-center gap-1.5 border border-gray-100">
 									<MapPin size={11} className="text-brandRed" />
-									{filteredProperties.length} {t.properties || "Properties"}
+									{resultCountLabel} {t.properties || "Properties"}
 								</span>
 							</div>
 						</div>

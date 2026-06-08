@@ -38,8 +38,8 @@ import ProfileSection from './shared/ProfileSection';
 // were never rendered. We now render them inline for the matching tabs
 // ("Account Settings" + "Help & Support") so clicking them in the side
 // drawer actually opens the screen.
-import TenantSettings from './tenant/TenantSettings';
-import TenantSupport from './tenant/TenantSupport';
+import SharedSettings from './shared/SharedSettings';
+import SharedSupport from './shared/SharedSupport';
 
 // 🟢 Shared localStorage key — written by HostDashboard when the landlord
 // marks rent as paid, read here so the tenant sees an instant receipt.
@@ -2632,14 +2632,14 @@ const handleWizardSubmit = async (payload) => {
         })()}
 
         {/* 🟢 ACCOUNT SETTINGS — clicking "Account Settings" in the side
-            drawer now opens the existing TenantSettings page inline. The
+            drawer now opens the existing SharedSettings page inline. The
             file lived under ./tenant/ but was never wired in; that was
             the user's main complaint. onGoToProfile flips back to the
             Profile tab so "Edit profile" doesn't dump the user on a
             different route. */}
         {activeTab === 'settings' && (
           <div className="animate-in fade-in duration-500">
-            <TenantSettings onGoToProfile={() => setActiveTab('profile')} />
+            <SharedSettings onGoToProfile={() => setActiveTab('profile')} />
           </div>
         )}
 
@@ -2647,7 +2647,7 @@ const handleWizardSubmit = async (payload) => {
             ./tenant/, it just was never rendered. Now it is. */}
         {activeTab === 'support' && (
           <div className="animate-in fade-in duration-500">
-            <TenantSupport />
+            <SharedSupport />
           </div>
         )}
 

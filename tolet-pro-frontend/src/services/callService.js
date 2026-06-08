@@ -46,7 +46,7 @@ async function api(path = '', { method = 'GET', body } = {}) {
  * (name, profilePicture) so the UI can render rows without extra round-trips.
  */
 export async function listCallHistory({ limit = 50 } = {}) {
-  const { calls } = await api(`?limit=${encodeURIComponent(limit)}`);
+  const { calls } = await api(`/history?limit=${encodeURIComponent(limit)}`);
   return Array.isArray(calls) ? calls : [];
 }
 
@@ -107,11 +107,18 @@ export function describeCall(call, currentUserId) {
       name: peer.name || 'User',
       profilePicture: peer.profilePicture || null,
       phone: peer.phone || null,
+      role: peer.role || null, // 'landlord' | 'tenant' | null — used for "View Profile"
     } : null,
     durationSec: Number(call.duration) || 0,
     iso: call.startedAt || call.createdAt || call.updatedAt,
     createdAt: call.createdAt,
+    startedAt: call.startedAt || null,
+    endedAt: call.endedAt || null,
     roomId: call.roomId,
+    // Phase Call-4: have *I* seen this call? (drives the missed badge.)
+    seen: Array.isArray(call.seenBy)
+      ? call.seenBy.map((x) => String(x?._id || x)).includes(me)
+      : false,
     raw: call,
   };
 }
@@ -128,12 +135,31 @@ export function formatCallDuration(sec) {
   return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
 }
 
+/**
+ * Mark all the current user's missed calls as seen. Clears the missed badge.
+ * (Phase Call-4) Returns { updated }.
+ */
+export async function markSeen() {
+  return api('/mark-seen', { method: 'POST' });
+}
+
+/**
+ * Soft-delete a call from the current user's history (per-user; the other
+ * participant keeps it). (Phase Call-4) Returns { deleted, id }.
+ */
+export async function deleteCall(callId) {
+  if (!callId) throw new Error('callId required');
+  return api(`/${encodeURIComponent(callId)}`, { method: 'DELETE' });
+}
+
 const callService = {
   listCallHistory,
   getCall,
   getActiveCall,
   describeCall,
   formatCallDuration,
+  markSeen,
+  deleteCall,
 };
 
 export default callService;

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Facebook, Instagram, Send } from 'lucide-react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, Link } from 'react-router-dom';
 import { useLanguage } from '../context/LanguageContext'; 
 
 const Footer = () => {
@@ -82,9 +82,9 @@ const Footer = () => {
         <div className="flex flex-col md:flex-row justify-between items-center text-xs text-gray-500 font-medium">
           <p>{t.footerCopyright}</p>
           <div className="flex gap-6 mt-4 md:mt-0">
-            <span className="hover:text-white transition-colors cursor-pointer">{t.privacyPolicyUpper}</span>
-            <span className="hover:text-white transition-colors cursor-pointer">{t.termsServiceUpper}</span>
-            <span className="hover:text-white transition-colors cursor-pointer">{t.cookiesUpper}</span>
+            <Link to="/privacy-policy" className="hover:text-white transition-colors cursor-pointer">{t.privacyPolicyUpper || 'Privacy Policy'}</Link>
+            <Link to="/terms" className="hover:text-white transition-colors cursor-pointer">{t.termsServiceUpper || 'Terms of Service'}</Link>
+            <Link to="/refund" className="hover:text-white transition-colors cursor-pointer">{t.refundUpper || 'Refund Policy'}</Link>
           </div>
         </div>
         

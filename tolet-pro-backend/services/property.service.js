@@ -4,18 +4,79 @@ const mongoose = require('mongoose');
 
 const Property = require('../models/Property');
 const ApiError = require('../utils/ApiError');
+const Booking = require('../models/Booking');
+const Inquiry = require('../models/Inquiry');
+const Receipt  = require('../models/Receipt');
 const searchService = require('./searchService');
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
+const MAX_THUMBNAIL_CHARS = 1_000_000;
+
+function normaliseThumbnail(value) {
+  const s = value ? String(value) : '';
+  return s.length <= MAX_THUMBNAIL_CHARS ? s : '';
+}
+
 function normaliseRoomPhotos(input) {
   if (!Array.isArray(input)) return [];
   return input
     .map((p) => ({
       room: (p && p.room) ? String(p.room).trim().slice(0, 40) : 'other',
       url:  (p && (p.url || p.preview)) ? String(p.url || p.preview) : '',
+      thumbUrl: normaliseThumbnail(p && p.thumbUrl),
     }))
     .filter((p) => p.url);
 }
+
+const LIST_ROOM_PHOTO_PROJECT = {
+  $filter: {
+    input: { $ifNull: ['$roomPhotos', []] },
+    as: 'photo',
+    cond: {
+      $regexMatch: {
+        input: { $toLower: { $ifNull: ['$$photo.room', ''] } },
+        regex: /bed|bath|toilet|wash|living|drawing|hall|kitchen|cook|other/,
+      },
+    },
+  },
+};
+
+const LIST_CARD_PROJECT = {
+  title: 1,
+  intent: 1,
+  type: 1,
+  category: 1,
+  division: 1,
+  district: 1,
+  area: 1,
+  location: 1,
+  gps: 1,
+  beds: 1,
+  baths: 1,
+  sqft: 1,
+  floor: 1,
+  floorNumber: 1,
+  furnishing: 1,
+  amenities: 1,
+  coverPhoto: 1,
+  coverPhotoThumb: 1,
+  roomPhotos: LIST_ROOM_PHOTO_PROJECT,
+  videoId: 1,
+  price: 1,
+  originalPrice: 1,
+  status: 1,
+  ownerUserId: 1,
+  ownerName: 1,
+  ownerPhone: 1,
+  rating: 1,
+  reviews: 1,
+  popularity: 1,
+  inquiries: 1,
+  verified: 1,
+  slug: 1,
+  createdAt: 1,
+  updatedAt: 1,
+};
 
 function gpsFromBody(body) {
   const lat = body.gpsLat === '' || body.gpsLat == null ? null : Number(body.gpsLat);
@@ -66,6 +127,7 @@ async function createProperty({ body, user }) {
     amenities:   Array.isArray(body.amenities) ? body.amenities : [],
     coverPhoto:  body.coverPhoto  || '',
     roomPhotos:  normaliseRoomPhotos(body.roomPhotos),
+    coverPhotoThumb: normaliseThumbnail(body.coverPhotoThumb),
     videoId:     body.videoId     || '',
     videoUrl:    body.videoUrl    || '',
     price:       body.price,
@@ -104,7 +166,31 @@ async function listProperties(query) {
   const skip   = (page - 1) * limit;
 
   const [items, total] = await Promise.all([
-    Property.find(filter).sort(sort).skip(skip).limit(limit),
+    // Never load the walkthrough video for a LIST. `videoUrl` can be a ~25MB
+    // base64 data: URL. We also exclude description and searchHaystack.
+    // We use .lean() to skip Mongoose hydration overhead which prevents OOM
+    // on Render's 512MB RAM limit when loading many properties with base64 images.
+    Property.aggregate([
+      { $match: filter },
+      // Project out the massive base64 strings BEFORE sorting. This prevents the
+      // 32MB in-memory sort limit (OOM) on MongoDB Free Tier (M0) which doesn't
+      // support allowDiskUse: true.
+      { $project: { coverPhoto: 0, coverPhotoThumb: 0, roomPhotos: 0, videoUrl: 0, description: 0, searchHaystack: 0 } },
+      { $sort: sort },
+      { $skip: skip },
+      { $limit: limit }
+    ])
+    .then(async (idDocs) => {
+      const ids = idDocs.map(d => d._id);
+      if (ids.length === 0) return [];
+      const unsortedItems = await Property.aggregate([
+        { $match: { _id: { $in: ids } } },
+        { $project: LIST_CARD_PROJECT },
+      ]);
+      const map = {};
+      unsortedItems.forEach(item => map[item._id.toString()] = item);
+      return ids.map(id => map[id.toString()]).filter(Boolean);
+    }),
     Property.countDocuments(filter),
   ]);
 
@@ -112,7 +198,13 @@ async function listProperties(query) {
 }
 
 async function listMyProperties(user) {
-  return Property.find({ ownerUserId: user._id }).sort({ createdAt: -1, _id: -1 });
+  return Property.find({ ownerUserId: user._id })
+    // Host dashboard cards need editable metadata and photos, but not the
+    // giant video blob or search text. Excluding them keeps /api/host/properties
+    // responsive even when a host uploaded walkthrough videos.
+    .select('-videoUrl -searchHaystack')
+    .sort({ createdAt: -1, _id: -1 })
+    .lean();
 }
 
 async function updateProperty({ idOrSlug, body, user }) {
@@ -130,11 +222,11 @@ async function updateProperty({ idOrSlug, body, user }) {
     'title', 'description', 'intent', 'type', 'category',
     'division', 'district', 'area', 'location',
     'beds', 'baths', 'sqft', 'floor', 'floorNumber', 'furnishing',
-    'amenities', 'price', 'status', 'coverPhoto', 'videoId', 'videoUrl',
+    'amenities', 'price', 'status', 'coverPhoto', 'coverPhotoThumb', 'videoId', 'videoUrl',
   ];
   for (const f of scalarFields) {
     if (Object.prototype.hasOwnProperty.call(body, f)) {
-      doc[f] = body[f];
+      doc[f] = f === 'coverPhotoThumb' ? normaliseThumbnail(body[f]) : body[f];
     }
   }
   // Keep `floor` and `floorNumber` in lockstep on partial updates: if the
@@ -173,8 +265,38 @@ async function deleteProperty({ idOrSlug, user }) {
       code: 'not_owner',
     });
   }
+
+  // ── Cascade guard: refuse if any active lease is in progress ───────────
+  const activeBookings = await Booking.countDocuments({
+    propertyId: doc._id,
+    status: 'active',
+  });
+  if (activeBookings > 0) {
+    throw ApiError.conflict(
+      `এই প্রপার্টিতে ${activeBookings}টি চলমান বুকিং আছে। মুছতে হলে আগে লিজ শেষ করুন।`,
+      { code: 'active_bookings_exist', activeBookings },
+    );
+  }
+
+  // ── Cascade-delete related documents ───────────────────────────────────
+  const relatedBookings = await Booking.find({ propertyId: doc._id }).select('_id');
+  const bookingIds = relatedBookings.map((b) => b._id);
+
+  const [delBookings, delInquiries, delReceipts] = await Promise.all([
+    Booking.deleteMany({ propertyId: doc._id }),
+    Inquiry.deleteMany({ propertyId: doc._id }),
+    bookingIds.length > 0
+      ? Receipt.deleteMany({ bookingId: { $in: bookingIds } })
+      : Promise.resolve({ deletedCount: 0 }),
+  ]);
+
   await doc.deleteOne();
-  return { id: String(doc._id) };
+  return {
+    id: String(doc._id),
+    deletedBookings:  delBookings.deletedCount,
+    deletedInquiries: delInquiries.deletedCount,
+    deletedReceipts:  delReceipts.deletedCount,
+  };
 }
 
 module.exports = {

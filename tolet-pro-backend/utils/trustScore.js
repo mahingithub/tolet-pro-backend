@@ -69,18 +69,24 @@ function computeTenantTrust(profile = {}, parentDoc = {}) {
 // That gives landlords a path to 100 without NID, matching the
 // blueprint's "soft trust" idea for landlord listings.
 function computeLandlordTrust(user = {}) {
+  const lp = user.landlordProfile || {};
   const v = (user.tenantProfile && user.tenantProfile.verification) || {};
   const adminApproved = v.status === 'verified';
   const items = [
     // Phone OTP
     { pts: 20, done: !!user.phone },
     // Avatar uploaded
-    { pts: 20, done: !!user.avatar },
+    { pts: 10, done: !!user.avatar },
     // Verification photo (selfie) — landlords share the same verification
     // sub-document as tenants for now.
     { pts: 20, done: !!v.photo },
     // NID admin-approved
-    { pts: 40, done: adminApproved && !!(v.nidFront && v.nidBack) },
+    { pts: 25, done: adminApproved && !!(v.nidFront && v.nidBack) },
+    // Landlord Preferences
+    { pts: 5, done: (lp.preferredTenants || []).length > 0 },
+    { pts: 5, done: (lp.communication || []).length > 0 },
+    { pts: 5, done: lp.serviceCharge != null && lp.serviceCharge !== '' },
+    { pts: 10, done: (lp.houseRules || []).length > 0 },
   ];
   const score = items.reduce((s, i) => (i.done ? s + i.pts : s), 0);
   return { score, tier: tierFor(score) };

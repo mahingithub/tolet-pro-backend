@@ -2,13 +2,16 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const User = require('../models/User');
 
-const TARGET_ID = '6a08e711f15e92b1debec8ae';
+const TARGET_ID = '6a1d6f6d1fceebda9546b070'; // Asraf's ID
 
 const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
 mongoose.connect(uri).then(async () => {
   const result = await User.findByIdAndUpdate(
     TARGET_ID,
-    { role: 'super_admin' },
+    { 
+      $set: { role: 'super_admin' },
+      $addToSet: { roles: 'super_admin' }
+    },
     { new: true }
   ).lean();
   if (result) {

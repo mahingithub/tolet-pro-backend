@@ -28,3 +28,51 @@ exports.markAllRead = asyncH(async (req, res) => {
   const r = await svc.markAllRead({ user: req.user });
   res.json(r);
 });
+
+// ─── Phase Call-6: FCM device-token management ──────────────────────────────
+const User = require('../models/User');
+
+/**
+ * POST /api/notifications/register-device   Body: { token, platform? }
+ * Upserts an FCM device token onto the current user (deduped). Idempotent.
+ */
+exports.registerDevice = asyncH(async (req, res) => {
+  const { token, platform } = req.body || {};
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ message: 'token is required', code: 'token_required' });
+  }
+  // Pull any existing copy first (dedupe), then push fresh — atomic-ish and
+  // avoids duplicate tokens piling up across logins on the same device.
+  await User.updateOne({ _id: req.user._id }, { $pull: { deviceTokens: { token } } });
+  await User.updateOne(
+    { _id: req.user._id },
+    { $push: { deviceTokens: { token, platform: platform || 'web', addedAt: new Date() } } },
+  );
+  res.json({ registered: true });
+});
+
+/**
+ * POST /api/notifications/unregister-device   Body: { token }
+ * Removes a token (e.g. on logout or when permission is revoked).
+ */
+exports.unregisterDevice = asyncH(async (req, res) => {
+  const { token } = req.body || {};
+  if (!token) {
+    return res.status(400).json({ message: 'token is required', code: 'token_required' });
+  }
+  await User.updateOne({ _id: req.user._id }, { $pull: { deviceTokens: { token } } });
+  res.json({ unregistered: true });
+});
+
+/**
+ * POST /api/notifications/call-pref   Body: { enabled: boolean }
+ * Toggles the user's incoming-call push notifications.
+ */
+exports.setCallNotifications = asyncH(async (req, res) => {
+  const enabled = !!(req.body && req.body.enabled);
+  await User.updateOne(
+    { _id: req.user._id },
+    { $set: { 'preferences.callNotifications': enabled } },
+  );
+  res.json({ callNotifications: enabled });
+});

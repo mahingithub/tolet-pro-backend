@@ -92,9 +92,18 @@ export const updateInquiryStatus = async (id, status) => {
   return data.inquiry;
 };
 
+/** Permanently delete an inquiry (Host only) */
+export const deleteInquiry = async (id) => {
+  const data = await call(`/inquiries/${id}`, {
+    method: 'DELETE',
+  });
+  return data;
+};
+
 export default {
   createInquiry,
   listMyInquiries,
   listHostInquiries,
   updateInquiryStatus,
+  deleteInquiry,
 };

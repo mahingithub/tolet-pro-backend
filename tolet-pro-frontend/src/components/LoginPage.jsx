@@ -128,7 +128,11 @@ const LoginPage = () => {
         return;
       } catch { /* fall through */ }
     }
-    navigate(resolvedRole === 'landlord' ? '/host-dashboard' : '/tenant-dashboard', { replace: true });
+    if (resolvedRole === 'admin') {
+      navigate('/admin', { replace: true });
+    } else {
+      navigate(resolvedRole === 'landlord' ? '/host-dashboard' : '/tenant-dashboard', { replace: true });
+    }
   };
 
   const handlePhoneChange = (e) =>
@@ -159,8 +163,12 @@ const LoginPage = () => {
     e.preventDefault();
     setIsLoading(true); setErrorMsg(''); setInfoMsg('');
     try {
-      await login({ phone: toE164(formData.phone), password: formData.password });
-      goToNextOrDashboard(role);
+      const loggedInUser = await login({ phone: toE164(formData.phone), password: formData.password });
+      if (['super_admin', 'moderator', 'support_agent'].includes(loggedInUser?.role)) {
+        goToNextOrDashboard('admin');
+      } else {
+        goToNextOrDashboard(role);
+      }
     } catch (err) {
       setErrorMsg(err.message || 'লগইন ব্যর্থ হয়েছে।');
     } finally {

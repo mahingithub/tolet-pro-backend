@@ -16,13 +16,14 @@
 //   navigate('/messages', { state: { chatId, source: 'tenant-receipt', receiptId, propertyTitle, monthKey, prefillMessage }}) → tenant CTA.
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Send, Bot, Search, MoreVertical, Paperclip, Sparkles,
   CheckCheck, Check, Phone, Video, ArrowLeft, Smile, X, Mic, PhoneOff,
   UserPlus, Pin, Receipt, FileText, Hourglass, Info, ChevronRight,
   Download, MessageCircle, VolumeX, MessageSquare,
   PhoneIncoming, PhoneOutgoing, PhoneMissed, VideoOff,
+  BellOff, Ban, Flag,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import chatService from '../services/chatService';
@@ -32,6 +33,8 @@ import callProvider from '../services/callProvider';
 import { getCurrentToken } from '../services/authService';
 import callService from '../services/callService';
 import CallHistory from './CallHistory';
+import CallQualityOverlay from './CallQualityOverlay';
+import CallDetailModal from './CallDetailModal';
 
 // ─── Cross-system storage keys (mirrored on HostDashboard / TenantDashboard) ─
 const CHAT_HISTORY_KEY        = 'tolet_chat_history';
@@ -315,6 +318,8 @@ const ChatRow = ({ chat, lastMsg, isActive, onClick, isMobile }) => {
           <h4 className="font-black text-gray-900 text-[13px] truncate flex items-center gap-1.5">
             {chat.name}
             {chat.pinned && <Pin size={10} className="text-gray-400 shrink-0" />}
+            {chat.muted && <BellOff size={10} className="text-gray-400 shrink-0" />}
+            {chat.blocked && <Ban size={10} className="text-red-400 shrink-0" />}
           </h4>
           <span className="text-[9px] font-black text-gray-400 shrink-0 tabular-nums">
             {lastMsg?.iso ? formatTime(lastMsg.iso) : chat.time}
@@ -340,6 +345,7 @@ const ChatRow = ({ chat, lastMsg, isActive, onClick, isMobile }) => {
 // ─── Main ChatSystem component ──────────────────────────────────────────────
 const ChatSystem = () => {
   const location = useLocation();
+  const navigate = useNavigate();
 
   // Chat list = AI bot (local-only) + real backend conversations (polled).
   // We no longer hydrate from localStorage — conversations live in Mongo.
@@ -360,16 +366,34 @@ const ChatSystem = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSidebarMobile, setShowSidebarMobile] = useState(true);
   const [showInfoPane, setShowInfoPane] = useState(false);
+  // Info-pane sub-states + auto-reset whenever the pane closes.
+  const [confirmBlock, setConfirmBlock] = useState(false);
+  const [reportOpen, setReportOpen]     = useState(false);
+  const [reportSent, setReportSent]     = useState(false);
+  useEffect(() => {
+    if (!showInfoPane) { setConfirmBlock(false); setReportOpen(false); setReportSent(false); }
+  }, [showInfoPane]);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [contextBanner, setContextBanner] = useState(null);
   const [activeReceipt, setActiveReceipt] = useState(null);
   const [paymentReceipts, setPaymentReceipts] = useState([]);
+
+  // ── Chat media (image upload + voice message) ──────────────────────────────
+  const [isUploadingMedia, setIsUploadingMedia] = useState(false); // image/audio upload in flight
+  const [isRecording, setIsRecording] = useState(false);           // mic actively recording
+  const [recordSecs, setRecordSecs] = useState(0);                 // elapsed record time
+  const fileInputRef = useRef(null);                               // hidden <input type=file>
+  const mediaRecorderRef = useRef(null);                           // MediaRecorder instance
+  const recordChunksRef = useRef([]);                              // recorded audio chunks
+  const recordTimerRef = useRef(null);                             // setInterval handle
+  const recordStreamRef = useRef(null);                            // mic MediaStream (to stop tracks)
 
   // ─── Sidebar tab: 'messages' (chat list) or 'calls' (call history) ────────
   const [sidebarTab, setSidebarTab] = useState('messages');
   // Recent call history (polled). Items are pre-described via callService.describeCall.
   const [callHistory, setCallHistory] = useState([]);
   const [callHistoryLoading, setCallHistoryLoading] = useState(false);
+  const [selectedCall, setSelectedCall] = useState(null); // Phase Call-4: detail modal
   // Live duration timer for an active accepted call (seconds since accept).
   const [liveCallDuration, setLiveCallDuration] = useState(0);
   // Local UI toggles for media controls (kept in sync with callProvider).
@@ -407,6 +431,20 @@ const ChatSystem = () => {
       if (status === 'ended' || status === 'rejected' || status === 'missed') {
         setIsCalling(false);
         setCallState(null);
+        // Surface a terminal-state toast (merged from the old second handler;
+        // callProvider only keeps ONE state callback, so a second
+        // onCallStateChange registration was silently overwriting this one —
+        // which left calls stuck on 'ringing' and video never mounting).
+        let msg = null;
+        if (status === 'ended')         msg = 'Call ended';
+        else if (status === 'rejected') msg = 'Call declined';
+        else if (status === 'missed')   msg = 'No answer';
+        if (msg) {
+          setCallEndToast({ msg, ts: Date.now() });
+          setTimeout(() => {
+            setCallEndToast((cur) => (cur && Date.now() - cur.ts >= 2800) ? null : cur);
+          }, 3000);
+        }
       } else if (status === 'accepted') {
         setCallState((prev) => prev ? { ...prev, status: 'accepted' } : null);
       }
@@ -422,6 +460,14 @@ const ChatSystem = () => {
   // Each backend conversation becomes a chat row keyed by its Mongo id.
   const mergeBackendConversations = useCallback((list) => {
     setChats((prev) => {
+      // Build a map of existing local UI state (blocked, muted, pinned) keyed by id
+      // so polling never wipes out what the user just set in this session.
+      const localState = new Map(prev.map((c) => [c.id, {
+        blocked: c.blocked,
+        muted:   c.muted,
+        pinned:  c.pinned,
+      }]));
+
       const next = [...initialChats];
       // Anything in `prev` that's a backend convo (id is not 'ai-bot') will be
       // refreshed from `list`. AI bot + any in-flight dynamic threads stay.
@@ -433,6 +479,7 @@ const ChatSystem = () => {
         if (!next.find((x) => x.id === c.id)) next.push(c);
       }
       for (const b of list) {
+        const ls = localState.get(b.id) || {};
         next.push({
           id:        b.id,
           name:      b.peerName || 'User',
@@ -445,7 +492,10 @@ const ChatSystem = () => {
           lastMsg:   b.lastMessageText || 'New conversation',
           time:      b.lastMessageAt ? new Date(b.lastMessageAt).toISOString() : 'Just now',
           unread:    Number(b.unread) || 0,
-          pinned:    false,
+          // Preserve local UI toggles so polling doesn't revert block/mute/pin.
+          pinned:    ls.pinned  ?? false,
+          blocked:   ls.blocked ?? (b.blocked   || false),
+          muted:     ls.muted   ?? (b.muted     || false),
           peerUserId: b.peerUserId,
           propertyId: b.propertyId,
         });
@@ -573,6 +623,10 @@ const ChatSystem = () => {
   }, []);
   const isMobile  = viewport < 768;
   const isDesktop = viewport >= 1280;
+  // True only when a real conversation is open on a phone. Drives the
+  // full-screen "clean chat" layer that covers the app's top navbar +
+  // bottom tab bar so the thread feels like a native messenger.
+  const mobileChatOpen = isMobile && !showSidebarMobile;
 
   const scrollRef = useRef(null);
   const inputRef  = useRef(null);
@@ -587,6 +641,7 @@ const ChatSystem = () => {
   const remoteAudioRef = useRef(null);
   const localVideoRef  = useRef(null);
   const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
   const ringtoneRef = useRef({ ctx: null, osc: null, gain: null, timer: null });
 
   // ─── Ringtone helpers (Web Audio API — no MP3 asset needed) ───────────────
@@ -655,18 +710,31 @@ const ChatSystem = () => {
   }, [callState, startRingtone, stopRingtone]);
 
   // ─── Remote stream → media element wiring ─────────────────────────────────
+  // The stream can arrive BEFORE the <video> element exists (it only mounts
+  // once callState==='accepted'). So we just capture the stream into state
+  // here, and a separate effect attaches it whenever the element is present.
   useEffect(() => {
     callProvider.onRemoteStream((stream) => {
       if (!stream) return;
-      const hasVideo = stream.getVideoTracks().length > 0;
-      if (hasVideo && remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
-      }
+      setRemoteStream(stream);
+      // Audio element exists for the whole call, so it's safe to attach now.
       if (remoteAudioRef.current) {
         remoteAudioRef.current.srcObject = stream;
       }
     });
   }, []);
+
+  // Attach remote stream to the video element once BOTH exist. Re-runs when the
+  // video element mounts (status flips to 'accepted') or the stream changes.
+  useEffect(() => {
+    if (remoteStream && remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = remoteStream;
+      remoteVideoRef.current.play?.().catch(() => {});
+    }
+    if (remoteStream && remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream, callType, callState?.status]);
 
   // ─── Local preview wiring (when our own stream is acquired) ───────────────
   // We poll callProvider.getLocalStream() shortly after accepting/initiating
@@ -678,13 +746,19 @@ const ChatSystem = () => {
       const s = callProvider.getLocalStream();
       if (s && s !== localStream) {
         setLocalStream(s);
-        if (localVideoRef.current && s.getVideoTracks().length > 0) {
-          localVideoRef.current.srcObject = s;
-        }
       }
     }, 300);
     return () => clearInterval(t);
   }, [isCalling, localStream]);
+
+  // Attach local stream to its preview element once both exist (same timing
+  // fix as the remote stream — the PiP <video> only mounts when accepted).
+  useEffect(() => {
+    if (localStream && localVideoRef.current && localStream.getVideoTracks().length > 0) {
+      localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.play?.().catch(() => {});
+    }
+  }, [localStream, callType, callState?.status]);
 
   // ─── Live call duration counter ─────────────────────────────────────────
   // Counts up every second while a call is in the 'accepted' state. Reset
@@ -737,23 +811,22 @@ const ChatSystem = () => {
     prevIsCallingRef.current = isCalling;
   }, [isCalling, refreshCallHistory]);
 
-  // ─── Call-end toast bridge ──────────────────────────────────────────────
-  // We hook into the same call-state stream the overlay uses, but only
-  // surface a toast for terminal states the user should be aware of.
+  // Phase Call-4: when the Calls tab opens, mark missed calls as seen so the
+  // red badge clears. Optimistically flip local `seen`, then tell the backend.
   useEffect(() => {
-    callProvider.onCallStateChange((status, data) => {
-      let msg = null;
-      if (status === 'ended')    msg = 'Call ended';
-      else if (status === 'rejected') msg = 'Call declined';
-      else if (status === 'missed')   msg = 'No answer';
-      if (msg) {
-        setCallEndToast({ msg, ts: Date.now() });
-        setTimeout(() => {
-          setCallEndToast((cur) => (cur && Date.now() - cur.ts >= 2800) ? null : cur);
-        }, 3000);
-      }
-    });
-  }, []);
+    if (sidebarTab !== 'calls') return;
+    const hasUnseen = callHistory.some(c => c.status === 'missed' && !c.seen);
+    if (!hasUnseen) return;
+    setCallHistory((list) => list.map(c => (c.status === 'missed' ? { ...c, seen: true } : c)));
+    callService.markSeen().catch(() => { /* non-fatal; a later refresh corrects */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarTab]);
+
+  // ─── Call-end toast bridge ──────────────────────────────────────────────
+  // NOTE: toast handling now lives inside the PRIMARY onCallStateChange handler
+  // above. callProvider keeps only one state callback, so registering a second
+  // one here used to overwrite the primary handler — which broke ring-stop and
+  // video. Intentionally left empty/removed.
 
   // ─── Centralised call-placement helper ─────────────────────────────────
   // Used by the chat header voice/video buttons, the Calls-tab "call back"
@@ -809,6 +882,71 @@ const ChatSystem = () => {
       type: call.type === 'video' ? 'video' : 'voice',
     });
   }, [chats, placeCall]);
+
+  // ─── Phase Call-4: call-detail modal actions ─────────────────────────────
+  // Call the peer from the modal with an explicit type (voice/video).
+  const callPeerFromDetail = useCallback((peer, type) => {
+    if (!peer?.id) return;
+    setSelectedCall(null);
+    const matchingChat = chats.find(c => String(c.peerUserId || '') === String(peer.id));
+    if (matchingChat) {
+      setSidebarTab('messages');
+      setActiveChatId(matchingChat.id);
+      if (isMobile) setShowSidebarMobile(false);
+    }
+    placeCall({
+      peerUserId: peer.id,
+      peerName: peer.name,
+      peerAvatar: peer.profilePicture,
+      type: type === 'video' ? 'video' : 'voice',
+    });
+  }, [chats, placeCall, isMobile]);
+
+  // Open (or find) the chat thread with this peer from the modal.
+  const messagePeer = useCallback(async (peer) => {
+    if (!peer?.id) return;
+    setSelectedCall(null);
+    setSidebarTab('messages');
+    const matchingChat = chats.find(c => String(c.peerUserId || '') === String(peer.id));
+    if (matchingChat) {
+      setActiveChatId(matchingChat.id);
+      if (isMobile) setShowSidebarMobile(false);
+      return;
+    }
+    // No existing thread — open a backend conversation, then activate it.
+    try {
+      const convo = await chatService.openConversation({ peerUserId: peer.id });
+      if (convo?.id) {
+        try { mergeBackendConversations(await chatService.listConversations()); } catch { /* ignore */ }
+        setActiveChatId(convo.id);
+        if (isMobile) setShowSidebarMobile(false);
+      }
+    } catch (err) {
+      console.warn('[chat] messagePeer failed:', err?.message);
+    }
+  }, [chats, isMobile]);
+
+  // View the peer's profile. Route by role; param is the peer's user id.
+  // NOTE: verify these two route paths match your router (see PHASE4 guide).
+  const viewPeerProfile = useCallback((peer) => {
+    if (!peer?.id) return;
+    setSelectedCall(null);
+    const base = peer.role === 'tenant' ? '/tenant' : '/landlord';
+    navigate(`${base}/${peer.id}`);
+  }, [navigate]);
+
+  // Soft-delete a call from history (optimistic — also hits the backend).
+  const handleDeleteCall = useCallback(async (call) => {
+    if (!call?.id) return;
+    setSelectedCall((cur) => (cur && cur.id === call.id ? null : cur));
+    setCallHistory((list) => list.filter((c) => c.id !== call.id)); // optimistic
+    try {
+      await callService.deleteCall(call.id);
+    } catch (err) {
+      console.warn('[calls] delete failed, refreshing:', err?.message);
+      refreshCallHistory(); // restore truth on failure
+    }
+  }, [refreshCallHistory]);
 
   // Send message — AI bot stays local, real chats POST to /api/conversations/:id/messages.
   const sendMessageTo = useCallback(async (chatId, text) => {
@@ -965,8 +1103,15 @@ const ChatSystem = () => {
           setActiveChatId(convo.id);
           if (isMobile) setShowSidebarMobile(false);
           if (s.mode === 'call') {
-            setCallType('voice');
-            setIsCalling(true);
+            // Phase Call-4 fix: actually start the call (this used to only open
+            // the empty call UI without ringing). Peer details come from the
+            // navigation state (profile pages pass them); placeCall fills gaps.
+            placeCall({
+              peerUserId: s.peerUserId,
+              peerName: s.peerName,
+              peerAvatar: s.peerAvatar,
+              type: s.callType === 'video' ? 'video' : 'voice',
+            });
           }
           if (s.prefillMessage) {
             setInputText(s.prefillMessage);
@@ -1023,6 +1168,149 @@ const ChatSystem = () => {
     setTimeout(() => inputRef.current?.focus(), 0);
   };
 
+  // ── Chat media handlers ────────────────────────────────────────────────────
+
+  // Push a freshly-sent media message straight into the local stream so the
+  // sender sees it immediately (polling would also pick it up, but instant
+  // feedback feels better). De-duped by id on the next poll merge.
+  const appendLocalMessage = (saved) => {
+    const myId = String(getCurrentUser()?.id || getCurrentUser()?._id || '');
+    setMessages((prev) => {
+      const existing = prev[activeChatId] || [];
+      if (existing.some((m) => String(m.id) === String(saved.id))) return prev;
+      const mapped = {
+        id:        saved.id,
+        sender:    String(saved.senderId) === myId ? 'me' : 'them',
+        text:      saved.text || '',
+        type:      saved.type || 'text',
+        mediaUrl:  saved.mediaUrl || null,
+        mediaMeta: saved.mediaMeta || null,
+        iso:       saved.createdAt,
+        status:    'delivered',
+        senderId:  saved.senderId,
+      };
+      latestMessageIso.current[activeChatId] = saved.createdAt;
+      return { ...prev, [activeChatId]: [...existing, mapped] };
+    });
+  };
+
+  // Paperclip → open file picker.
+  const handleAttachClick = () => {
+    if (activeChat.isAI) return;        // can't send media to the AI bot
+    if (isUploadingMedia) return;
+    fileInputRef.current?.click();
+  };
+
+  // A file was chosen → validate + upload as an image message.
+  const handleFileChosen = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';                // reset so the same file can be re-picked
+    if (!file) return;
+    const isImage = file.type.startsWith('image/');
+    const isPdf   = file.type === 'application/pdf';
+    if (!isImage && !isPdf) { alert('শুধু ছবি বা PDF পাঠানো যাবে।'); return; }
+    if (file.size > 10 * 1024 * 1024)  { alert('ফাইল অনেক বড় (সর্বোচ্চ ১০ MB)।'); return; }
+
+    setIsUploadingMedia(true);
+    try {
+      const saved = await chatService.sendMediaMessage(activeChatId, file, {
+        kind: isPdf ? 'document' : 'image',
+        filename: file.name,
+      });
+      appendLocalMessage(saved);
+    } catch (err) {
+      alert('ফাইল পাঠানো যায়নি: ' + (err?.message || 'unknown'));
+    } finally {
+      setIsUploadingMedia(false);
+    }
+  };
+
+  // Mic → start recording (tap to start / tap to stop).
+  const startRecording = async () => {
+    if (activeChat.isAI) return;
+    if (isRecording || isUploadingMedia) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      alert('আপনার ব্রাউজার ভয়েস রেকর্ডিং সাপোর্ট করে না।');
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      alert('মাইক্রোফোন অনুমতি দেওয়া হয়নি।');
+      return;
+    }
+    recordStreamRef.current = stream;
+    recordChunksRef.current = [];
+
+    // Pick a mime type the browser actually supports.
+    let mime = '';
+    if (MediaRecorder.isTypeSupported?.('audio/webm')) mime = 'audio/webm';
+    else if (MediaRecorder.isTypeSupported?.('audio/mp4')) mime = 'audio/mp4';
+    else if (MediaRecorder.isTypeSupported?.('audio/ogg')) mime = 'audio/ogg';
+
+    const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    mediaRecorderRef.current = rec;
+
+    rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) recordChunksRef.current.push(ev.data); };
+    rec.start();
+
+    setIsRecording(true);
+    setRecordSecs(0);
+    recordTimerRef.current = setInterval(() => {
+      setRecordSecs((s) => {
+        // Safety: auto-stop at 2 minutes so we never record forever.
+        if (s >= 120) { stopRecording(true); return s; }
+        return s + 1;
+      });
+    }, 1000);
+  };
+
+  // Stop recording. If `send` is true, upload the clip; otherwise discard.
+  const stopRecording = async (send = true) => {
+    const rec = mediaRecorderRef.current;
+    if (!rec) return;
+    const finalSecs = recordSecs;
+
+    const cleanup = () => {
+      clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+      recordStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+      recordStreamRef.current = null;
+      mediaRecorderRef.current = null;
+      setIsRecording(false);
+      setRecordSecs(0);
+    };
+
+    rec.onstop = async () => {
+      const chunks = recordChunksRef.current;
+      recordChunksRef.current = [];
+      cleanup();
+      if (!send) return;
+      if (!chunks.length) return;
+      const type = rec.mimeType || 'audio/webm';
+      const blob = new Blob(chunks, { type });
+      if (blob.size < 1000) { alert('রেকর্ডিং খুব ছোট।'); return; }
+      if (blob.size > 5 * 1024 * 1024) { alert('ভয়েস মেসেজ অনেক বড়।'); return; }
+
+      const ext = type.includes('mp4') ? 'mp4' : type.includes('ogg') ? 'ogg' : 'webm';
+      setIsUploadingMedia(true);
+      try {
+        const saved = await chatService.sendMediaMessage(activeChatId, blob, {
+          kind: 'audio',
+          durationSec: finalSecs,
+          filename: `voice.${ext}`,
+        });
+        appendLocalMessage(saved);
+      } catch (err) {
+        alert('ভয়েস মেসেজ পাঠানো যায়নি: ' + (err?.message || 'unknown'));
+      } finally {
+        setIsUploadingMedia(false);
+      }
+    };
+    try { rec.stop(); } catch { /* already stopped */ }
+  };
+
   // Filter & sort the sidebar chat list.
   const visibleChats = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1039,6 +1327,28 @@ const ChatSystem = () => {
   }, [chats, searchQuery, messages]);
 
   const activeChat = chats.find(c => c.id === activeChatId) || initialChats[0];
+
+  // ── Info-pane actions. The optional-chained chatService calls auto-persist
+  //    to the backend once those methods exist; until then they're safe
+  //    no-ops and the UI updates optimistically. ───────────────────────────
+  const toggleMuteChat = () => {
+    const next = !activeChat.muted;
+    setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, muted: next } : c));
+    try { chatService.muteConversation?.(activeChatId, next); } catch (e) { console.warn('mute failed', e); }
+  };
+  const blockChat = async () => {
+    setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, blocked: true } : c));
+    setConfirmBlock(false);
+    try { await chatService.blockConversation?.(activeChatId); } catch (e) { console.warn('block failed', e); }
+  };
+  const unblockChat = async () => {
+    setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, blocked: false } : c));
+    try { await chatService.unblockConversation?.(activeChatId); } catch (e) { console.warn('unblock failed', e); }
+  };
+  const submitReport = async (reason) => {
+    try { await chatService.reportConversation?.(activeChatId, reason); } catch (e) { console.warn('report failed', e); }
+    setReportSent(true);
+  };
 
   // Build the rendered message stream for the active chat — merge text/bot
   // messages with inline ReceiptCards from `paymentReceipts` AND inline
@@ -1148,6 +1458,9 @@ const ChatSystem = () => {
             id:     m.id,
             sender: String(m.senderId) === myId ? 'me' : 'them',
             text:   m.text,
+            type:   m.type || 'text',
+            mediaUrl: m.mediaUrl || null,
+            mediaMeta: m.mediaMeta || null,
             iso:    m.createdAt,
             status: 'delivered',
             senderId: m.senderId,
@@ -1171,6 +1484,9 @@ const ChatSystem = () => {
             id:     m.id,
             sender: String(m.senderId) === myId ? 'me' : 'them',
             text:   m.text,
+            type:   m.type || 'text',
+            mediaUrl: m.mediaUrl || null,
+            mediaMeta: m.mediaMeta || null,
             iso:    m.createdAt,
             status: 'delivered',
             senderId: m.senderId,
@@ -1210,16 +1526,20 @@ const ChatSystem = () => {
   const QUICK_EMOJI = ['👍', '🙏', '🙂', '🎉', '❤️', '🔥', '✅', '🏠', '💸', '📅'];
 
   return (
-    <div className="relative w-full">
+    <div className={`relative w-full ${isMobile ? 'h-[100dvh] overflow-hidden' : ''}`}>
       {/* Backdrop accents */}
       <div aria-hidden className="pointer-events-none fixed inset-0 -z-10">
         <div className="absolute -top-40 -left-32 w-[480px] h-[480px] bg-[#ba0036]/15 rounded-full blur-3xl"></div>
         <div className="absolute -bottom-40 -right-32 w-[480px] h-[480px] bg-blue-500/10 rounded-full blur-3xl"></div>
       </div>
 
-      <div className={`flex flex-col md:flex-row ${
-        isMobile ? 'h-[100dvh]' : 'h-[calc(100dvh-2rem)] my-4 max-w-[1400px] mx-auto rounded-[2rem]'
-      } bg-white/60 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_rgba(0,0,0,0.08)] overflow-hidden relative`}>
+      <div className={`flex flex-col md:flex-row overflow-hidden ${
+        mobileChatOpen
+          ? 'fixed inset-0 z-[80] h-[100dvh] bg-white'
+          : isMobile
+            ? 'relative h-[100dvh] bg-white/60 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_rgba(0,0,0,0.08)]'
+            : 'relative h-[calc(100dvh-2rem)] my-4 max-w-[1400px] mx-auto rounded-[2rem] bg-white/60 backdrop-blur-2xl border border-white/70 shadow-[0_30px_80px_rgba(0,0,0,0.08)]'
+      }`}>
 
         {/* CALL OVERLAY */}
         <AnimatePresence>
@@ -1248,6 +1568,13 @@ const ChatSystem = () => {
                     className="absolute top-4 right-4 w-28 h-40 sm:w-36 sm:h-52 object-cover rounded-2xl border-2 border-white/30 shadow-2xl bg-gray-800"
                   />
                 </div>
+              )}
+
+              {/* Phase Call-3: network-quality bars, reconnect banner, camera switch.
+                  Self-contained; subscribes to callProvider quality/reconnect callbacks.
+                  Renders nothing useful under the native provider (callbacks never fire). */}
+              {callState?.status === 'accepted' && (
+                <CallQualityOverlay callType={callType} />
               )}
 
               <div className={`relative mb-6 ${callType === 'video' && callState?.status === 'accepted' ? 'hidden' : ''}`}>
@@ -1391,7 +1718,7 @@ const ChatSystem = () => {
                 <Phone size={13}/>
                 Calls
                 {(() => {
-                  const missedCount = callHistory.filter(c => c.status === 'missed').length;
+                  const missedCount = callHistory.filter(c => c.status === 'missed' && !c.seen).length;
                   if (missedCount === 0) return null;
                   return (
                     <span className={`text-[9px] font-black rounded-full min-w-[18px] h-[16px] px-1.5 inline-flex items-center justify-center ${
@@ -1465,6 +1792,8 @@ const ChatSystem = () => {
                 isLoading={callHistoryLoading}
                 searchQuery={searchQuery}
                 onCallBack={handleCallBack}
+                onSelectCall={setSelectedCall}
+                onDelete={handleDeleteCall}
               />
             )}
           </div>
@@ -1479,12 +1808,14 @@ const ChatSystem = () => {
         </aside>
 
         {/* MAIN CHAT PANE */}
-        <main className={`${isMobile && showSidebarMobile ? 'hidden' : 'flex'} flex-1 flex-col min-w-0 bg-white/30`}>
-          <header className="px-4 sm:px-6 py-3 sm:py-4 border-b border-white/60 bg-white/40 backdrop-blur-md flex justify-between items-center gap-3">
+            <main className={`${isMobile && showSidebarMobile ? 'hidden' : 'flex'} flex-1 flex-col min-w-0 min-h-0 bg-white/30`}>          <header
+            className="px-4 sm:px-6 py-3 sm:py-4 border-b border-white/60 bg-white/40 backdrop-blur-md flex justify-between items-center gap-3"
+            style={mobileChatOpen ? { paddingTop: 'calc(env(safe-area-inset-top) + 0.75rem)' } : undefined}
+          >
             <div className="flex items-center gap-3 min-w-0">
               {isMobile && (
                 <button
-                  onClick={() => setShowSidebarMobile(true)}
+                  onClick={() => { setShowInfoPane(false); setShowSidebarMobile(true); }}
                   className="p-2 -ml-1 rounded-xl hover:bg-white/70 transition-all"
                   aria-label="Back to chats"
                 >
@@ -1555,8 +1886,11 @@ const ChatSystem = () => {
                 </button>
               )}
               <button
-                className="p-2.5 sm:p-3 bg-white hover:bg-red-50 rounded-2xl text-gray-500 hover:text-[#ba0036] transition-all shadow-sm"
-                aria-label="More"
+                onClick={() => setShowInfoPane(s => !s)}
+                className={`p-2.5 sm:p-3 rounded-2xl transition-all shadow-sm ${
+                  showInfoPane ? 'bg-[#ba0036] text-white' : 'bg-white hover:bg-red-50 text-gray-500 hover:text-[#ba0036]'
+                }`}
+                aria-label="Contact info"
               >
                 <MoreVertical size={18}/>
               </button>
@@ -1583,7 +1917,7 @@ const ChatSystem = () => {
           )}
 
           {/* Messages stream */}
-          <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 sm:py-6 bg-gradient-to-b from-transparent via-white/10 to-white/40 relative">
+          <div className="flex-1 overflow-y-auto min-h-0 px-4 sm:px-6 py-4 sm:py-6 bg-gradient-to-b from-transparent via-white/10 to-white/40 relative">
             {groupedStream.length === 0 && !isBotTyping && (
               <div className="h-full flex flex-col items-center justify-center text-center px-6">
                 <div className="w-16 h-16 rounded-3xl bg-gradient-to-br from-[#ba0036] to-[#7a0024] text-white flex items-center justify-center shadow-[0_15px_30px_rgba(186,0,54,0.25)] mb-4">
@@ -1644,7 +1978,28 @@ const ChatSystem = () => {
                         <Sparkles size={10}/> AI Assistant
                       </div>
                     )}
-                    <p className="text-[13px] sm:text-sm font-medium whitespace-pre-line leading-relaxed">{m.text}</p>
+                    {m.type === 'image' && m.mediaUrl ? (
+                      <a href={m.mediaUrl} target="_blank" rel="noopener noreferrer" className="block">
+                        <img
+                          src={m.mediaUrl}
+                          alt="shared"
+                          className="rounded-xl max-w-full max-h-72 object-cover cursor-pointer"
+                          loading="lazy"
+                        />
+                      </a>
+                    ) : m.type === 'audio' && m.mediaUrl ? (
+                      <audio
+                        controls
+                        src={m.mediaUrl}
+                        className="max-w-[240px] sm:max-w-[260px]"
+                        style={{ height: 40 }}
+                      />
+                    ) : null}
+                    {(m.type === 'text' || !m.type) ? (
+                      <p className="text-[13px] sm:text-sm font-medium whitespace-pre-line leading-relaxed">{m.text}</p>
+                    ) : (m.text ? (
+                      <p className="text-[13px] sm:text-sm font-medium whitespace-pre-line leading-relaxed mt-1.5">{m.text}</p>
+                    ) : null)}
                     {showTail && (
                       <div className={`flex items-center gap-1.5 mt-1 ${mine ? 'justify-end text-white/70' : fromBot ? 'justify-start text-white/50' : 'justify-start text-gray-400'}`}>
                         <span className="text-[9px] font-bold tabular-nums">{formatTime(m.iso)}</span>
@@ -1683,7 +2038,18 @@ const ChatSystem = () => {
           )}
 
           {/* Composer */}
-          <div className="px-4 sm:px-6 pb-4 sm:pb-6 pt-2 relative">
+          <div
+            className="px-4 sm:px-6 pb-4 sm:pb-6 pt-2 relative"
+            style={mobileChatOpen ? { paddingBottom: 'calc(env(safe-area-inset-bottom) + 1rem)' } : undefined}
+          >
+            {activeChat.blocked ? (
+              <div className="flex items-center justify-center gap-3 bg-gray-50 border border-gray-200 rounded-[1.6rem] px-4 py-3.5">
+                <Ban size={16} className="text-gray-400 shrink-0" />
+                <span className="text-[12px] font-bold text-gray-500">You blocked {activeChat.name}</span>
+                <button onClick={unblockChat} className="text-[11px] font-black uppercase tracking-widest text-[#ba0036] hover:underline">Unblock</button>
+              </div>
+            ) : (
+              <>
             <AnimatePresence>
               {showEmojiPicker && (
                 <motion.div
@@ -1711,33 +2077,78 @@ const ChatSystem = () => {
               >
                 <Smile size={18}/>
               </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,application/pdf"
+                className="hidden"
+                onChange={handleFileChosen}
+              />
               <button
-                className="p-2.5 rounded-xl text-gray-400 hover:text-[#ba0036] hover:bg-gray-50 transition-all hidden sm:block"
-                aria-label="Attach file"
-                title="Attach (coming soon)"
+                onClick={handleAttachClick}
+                disabled={isUploadingMedia || isRecording}
+                className="p-2.5 rounded-xl text-gray-400 hover:text-[#ba0036] hover:bg-gray-50 transition-all disabled:opacity-40"
+                aria-label="Attach image or PDF"
+                title="ছবি বা PDF পাঠান"
               >
                 <Paperclip size={18}/>
               </button>
-              <textarea
-                ref={inputRef}
-                rows="1"
-                value={inputText}
-                onChange={(e) => {
-                  setInputText(e.target.value);
-                  const el = e.target;
-                  el.style.height = 'auto';
-                  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSendMessage();
-                  }
-                }}
-                placeholder={activeChat.isAI ? 'Ask the AI assistant anything…' : 'Type a message…'}
-                className="flex-1 bg-transparent outline-none text-sm font-bold text-gray-800 resize-none py-2 max-h-[120px] leading-relaxed placeholder:text-gray-400"
-              />
-              {inputText.trim() ? (
+              {isRecording ? (
+                /* Recording in progress — replace the textarea with a live indicator */
+                <div className="flex-1 flex items-center gap-2 py-2 px-1">
+                  <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse shrink-0" />
+                  <span className="text-sm font-bold text-gray-700 tabular-nums">
+                    {String(Math.floor(recordSecs / 60)).padStart(1, '0')}:{String(recordSecs % 60).padStart(2, '0')}
+                  </span>
+                  <span className="text-xs font-bold text-gray-400">রেকর্ড হচ্ছে…</span>
+                </div>
+              ) : (
+                <textarea
+                  ref={inputRef}
+                  rows="1"
+                  value={inputText}
+                  onChange={(e) => {
+                    setInputText(e.target.value);
+                    const el = e.target;
+                    el.style.height = 'auto';
+                    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                  placeholder={activeChat.isAI ? 'Ask the AI assistant anything…' : 'Type a message…'}
+                  className="flex-1 bg-transparent outline-none text-sm font-bold text-gray-800 resize-none py-2 max-h-[120px] leading-relaxed placeholder:text-gray-400"
+                />
+              )}
+              {isRecording ? (
+                /* Cancel + Send buttons while recording */
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => stopRecording(false)}
+                    className="w-11 h-11 bg-gray-100 hover:bg-gray-200 text-gray-500 rounded-xl flex items-center justify-center transition-all active:scale-95"
+                    aria-label="Cancel recording"
+                    title="বাতিল"
+                  >
+                    <X size={18}/>
+                  </button>
+                  <button
+                    onClick={() => stopRecording(true)}
+                    className="w-11 h-11 bg-gradient-to-br from-[#ba0036] to-[#7a0024] text-white rounded-xl flex items-center justify-center shadow-[0_8px_20px_rgba(186,0,54,0.30)] transition-all active:scale-95"
+                    aria-label="Send voice message"
+                    title="পাঠান"
+                  >
+                    <Send size={18} className="ml-0.5"/>
+                  </button>
+                </div>
+              ) : isUploadingMedia ? (
+                /* Upload spinner */
+                <div className="w-11 h-11 bg-gray-100 rounded-xl flex items-center justify-center">
+                  <div className="w-5 h-5 border-2 border-gray-300 border-t-[#ba0036] rounded-full animate-spin" />
+                </div>
+              ) : inputText.trim() ? (
                 <button
                   onClick={handleSendMessage}
                   className="w-11 h-11 bg-gradient-to-br from-[#ba0036] to-[#7a0024] text-white rounded-xl flex items-center justify-center shadow-[0_8px_20px_rgba(186,0,54,0.30)] hover:-translate-y-0.5 transition-all active:scale-95"
@@ -1745,11 +2156,22 @@ const ChatSystem = () => {
                 >
                   <Send size={18} className="ml-0.5"/>
                 </button>
+              ) : activeChat.isAI ? (
+                /* AI chat: no voice message, keep a disabled-looking mic */
+                <button
+                  className="w-11 h-11 bg-gray-100 text-gray-300 rounded-xl flex items-center justify-center cursor-not-allowed"
+                  aria-label="Voice message unavailable"
+                  title="Voice message is for chats with people"
+                  disabled
+                >
+                  <Mic size={18}/>
+                </button>
               ) : (
                 <button
-                  className="w-11 h-11 bg-gray-100 hover:bg-gray-200 text-gray-500 rounded-xl flex items-center justify-center transition-all active:scale-95"
-                  aria-label="Voice message (coming soon)"
-                  title="Voice (coming soon)"
+                  onClick={startRecording}
+                  className="w-11 h-11 bg-gray-100 hover:bg-gray-200 text-gray-500 hover:text-[#ba0036] rounded-xl flex items-center justify-center transition-all active:scale-95"
+                  aria-label="Record voice message"
+                  title="ভয়েস মেসেজ"
                 >
                   <Mic size={18}/>
                 </button>
@@ -1761,12 +2183,32 @@ const ChatSystem = () => {
                 Enter to send · Shift + Enter for new line · Esc to close call
               </p>
             )}
+              </>
+            )}
           </div>
         </main>
 
-        {/* INFO PANE (desktop only) */}
-        {isDesktop && showInfoPane && (
-          <aside className="w-[300px] border-l border-white/60 bg-white/30 backdrop-blur-md p-5 overflow-y-auto shrink-0">
+        {/* CONTACT INFO — desktop: inline right rail · mobile/tablet: slide-up sheet */}
+        {showInfoPane && (
+          <>
+            {!isDesktop && (
+              <div
+                className="fixed inset-0 z-[85] bg-gray-900/40 backdrop-blur-sm"
+                onClick={() => setShowInfoPane(false)}
+              />
+            )}
+            <motion.aside
+              initial={isDesktop ? false : { y: 28, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ duration: 0.26, ease: [0.25, 0.46, 0.45, 0.94] }}
+              className={
+                isDesktop
+                  ? 'w-[300px] border-l border-white/60 bg-white/30 backdrop-blur-md p-5 overflow-y-auto shrink-0'
+                  : 'fixed inset-x-0 bottom-0 z-[90] max-h-[88vh] overflow-y-auto rounded-t-[2rem] bg-white shadow-[0_-20px_60px_rgba(0,0,0,0.25)] p-5'
+              }
+              style={!isDesktop ? { paddingBottom: 'calc(env(safe-area-inset-bottom) + 1.5rem)' } : undefined}
+            >
+              {!isDesktop && <div className="w-10 h-1.5 bg-gray-300 rounded-full mx-auto mb-4" />}
             <div className="flex items-center justify-between mb-4">
               <h4 className="text-sm font-black text-gray-900">Conversation</h4>
               <button onClick={() => setShowInfoPane(false)} className="p-1.5 hover:bg-white rounded-full text-gray-400">
@@ -1804,6 +2246,40 @@ const ChatSystem = () => {
               )}
             </div>
 
+            {/* Shared media — photos + voice from this conversation */}
+            <h5 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 px-1 mt-5">Shared media</h5>
+            {(() => {
+              const msgs = messages[activeChatId] || [];
+              const photos = msgs.filter(m => m.type === 'image' && m.mediaUrl);
+              const voices = msgs.filter(m => m.type === 'audio' && m.mediaUrl);
+              if (photos.length === 0 && voices.length === 0) {
+                return <p className="text-[11px] font-bold text-gray-400 text-center py-5">No photos or voice messages yet.</p>;
+              }
+              return (
+                <div className="space-y-3">
+                  {photos.length > 0 && (
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {photos.slice(-9).reverse().map((m, i) => (
+                        <a key={m.id || i} href={m.mediaUrl} target="_blank" rel="noopener noreferrer" className="block aspect-square rounded-xl overflow-hidden bg-gray-100 ring-1 ring-gray-100 hover:ring-2 hover:ring-[#ba0036]/30 transition-all">
+                          <img src={m.mediaUrl} alt="" loading="lazy" className="w-full h-full object-cover" />
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                  {voices.length > 0 && (
+                    <div className="space-y-1.5">
+                      {voices.slice(-4).reverse().map((m, i) => (
+                        <div key={m.id || i} className="flex items-center gap-2 bg-white border border-gray-100 rounded-xl px-2.5 py-2">
+                          <Mic size={13} className="text-[#ba0036] shrink-0" />
+                          <audio controls src={m.mediaUrl} className="h-8 w-full" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             <h5 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 px-1 mt-5">Quick actions</h5>
             <div className="grid grid-cols-2 gap-2">
               <button onClick={() => { setCallType('voice'); setIsCalling(true); }} className="bg-white hover:bg-red-50 border border-gray-100 hover:border-[#ba0036]/20 rounded-xl py-2.5 text-[10px] font-black uppercase tracking-widest text-gray-700 hover:text-[#ba0036] transition-all flex items-center justify-center gap-1.5">
@@ -1813,13 +2289,73 @@ const ChatSystem = () => {
                 <Video size={12}/> Video
               </button>
               <button
-                onClick={() => setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, pinned: !c.pinned } : c))}
-                className="col-span-2 bg-white hover:bg-amber-50 border border-gray-100 hover:border-amber-200 rounded-xl py-2.5 text-[10px] font-black uppercase tracking-widest text-gray-700 hover:text-amber-700 transition-all flex items-center justify-center gap-1.5"
+                onClick={toggleMuteChat}
+                className={`rounded-xl py-2.5 text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-1.5 border ${
+                  activeChat.muted
+                    ? 'bg-amber-50 border-amber-200 text-amber-700'
+                    : 'bg-white border-gray-100 hover:border-amber-200 text-gray-700 hover:text-amber-700 hover:bg-amber-50'
+                }`}
               >
-                <Pin size={12}/> {activeChat.pinned ? 'Unpin chat' : 'Pin to top'}
+                <BellOff size={12}/> {activeChat.muted ? 'Unmute' : 'Mute'}
+              </button>
+              <button
+                onClick={() => setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, pinned: !c.pinned } : c))}
+                className={`rounded-xl py-2.5 text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-1.5 border ${
+                  activeChat.pinned
+                    ? 'bg-[#ba0036]/10 border-[#ba0036]/20 text-[#ba0036]'
+                    : 'bg-white border-gray-100 hover:border-amber-200 text-gray-700 hover:text-amber-700 hover:bg-amber-50'
+                }`}
+              >
+                <Pin size={12}/> {activeChat.pinned ? 'Unpin' : 'Pin'}
               </button>
             </div>
-          </aside>
+
+            {/* Danger zone — Report + Block (hidden for the AI assistant) */}
+            {!activeChat.isAI && (
+              <div className="mt-5 pt-4 border-t border-gray-100 space-y-2">
+                {reportSent ? (
+                  <div className="rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-bold px-3 py-2.5 text-center">
+                    Report পাঠানো হয়েছে। ধন্যবাদ।
+                  </div>
+                ) : reportOpen ? (
+                  <div className="rounded-xl bg-amber-50 border border-amber-200 p-3">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-amber-700 mb-2">Report reason</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {['Spam', 'Harassment', 'Scam / Fraud', 'Inappropriate'].map(r => (
+                        <button key={r} onClick={() => submitReport(r)} className="text-[10px] font-bold px-2.5 py-1.5 rounded-full bg-white border border-amber-200 text-amber-800 hover:bg-amber-100 transition-all">
+                          {r}
+                        </button>
+                      ))}
+                    </div>
+                    <button onClick={() => setReportOpen(false)} className="mt-2 text-[10px] font-bold text-gray-400 hover:text-gray-600">Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setReportOpen(true)} className="w-full bg-white hover:bg-amber-50 border border-gray-100 hover:border-amber-200 rounded-xl py-2.5 text-[10px] font-black uppercase tracking-widest text-gray-600 hover:text-amber-700 transition-all flex items-center justify-center gap-1.5">
+                    <Flag size={12}/> Report
+                  </button>
+                )}
+
+                {confirmBlock ? (
+                  <div className="rounded-xl bg-red-50 border border-red-200 p-3 text-center">
+                    <p className="text-[11px] font-bold text-red-700 mb-2.5">Block <b>{activeChat.name}</b>?</p>
+                    <div className="flex gap-2">
+                      <button onClick={() => setConfirmBlock(false)} className="flex-1 bg-white border border-gray-200 rounded-xl py-2 text-[10px] font-black uppercase tracking-widest text-gray-600">Cancel</button>
+                      <button onClick={blockChat} className="flex-1 bg-[#ba0036] text-white rounded-xl py-2 text-[10px] font-black uppercase tracking-widest">Block</button>
+                    </div>
+                  </div>
+                ) : activeChat.blocked ? (
+                  <button onClick={unblockChat} className="w-full bg-white hover:bg-emerald-50 border border-gray-100 hover:border-emerald-200 rounded-xl py-2.5 text-[10px] font-black uppercase tracking-widest text-emerald-700 hover:text-emerald-800 transition-all flex items-center justify-center gap-1.5">
+                    <Ban size={12}/> Unblock {activeChat.name}
+                  </button>
+                ) : (
+                  <button onClick={() => setConfirmBlock(true)} className="w-full bg-white hover:bg-red-50 border border-gray-100 hover:border-red-200 rounded-xl py-2.5 text-[10px] font-black uppercase tracking-widest text-red-600 hover:text-red-700 transition-all flex items-center justify-center gap-1.5">
+                    <Ban size={12}/> Block
+                  </button>
+                )}
+              </div>
+            )}
+            </motion.aside>
+          </>
         )}
       </div>
 
@@ -1923,6 +2459,18 @@ const ChatSystem = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Phase Call-4: call detail modal (tap a row in the Calls tab) */}
+      {selectedCall && (
+        <CallDetailModal
+          call={selectedCall}
+          calls={callHistory}
+          onClose={() => setSelectedCall(null)}
+          onCall={(type) => callPeerFromDetail(selectedCall.peer, type)}
+          onMessage={() => messagePeer(selectedCall.peer)}
+          onViewProfile={selectedCall.peer?.id ? () => viewPeerProfile(selectedCall.peer) : undefined}
+        />
+      )}
     </div>
   );
 };

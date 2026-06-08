@@ -1,0 +1,18 @@
+# robots.txt — TO-LET PRO  [Phase 7 / SEO]
+# Allows search engines to crawl public pages, but keeps private/authenticated
+# and API areas out of the index.
+
+User-agent: *
+Allow: /
+
+# Don't index private / authenticated areas (no SEO value, keeps them private).
+Disallow: /login
+Disallow: /admin
+Disallow: /tenant-dashboard
+Disallow: /host-dashboard
+Disallow: /account
+Disallow: /messages
+Disallow: /api/
+
+# Point crawlers at the sitemap.
+Sitemap: https://tolet-pro.vercel.app/sitemap.xml

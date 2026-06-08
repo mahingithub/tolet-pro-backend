@@ -301,10 +301,15 @@ const fetchNearbyPlaces = async (lat, lng) => {
   `;
 
   try {
-    const res = await fetch('https://overpass-api.de/api/interpreter', {
+    // Routed through our own backend proxy (server-side Overpass call). The
+    // browser can't hit overpass-api.de directly — CORS-blocked + 406 on the
+    // browser User-Agent. The proxy returns Overpass JSON untouched, so the
+    // parsing below is unchanged.
+    const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+    const res = await fetch(`${API_BASE}/geo/overpass`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `data=${encodeURIComponent(query)}`,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -495,6 +500,38 @@ const UnavailableOverlay = ({ intent }) => (
   </motion.div>
 );
 
+// Hook to safely convert massive base64 video strings into streamable Blob URLs
+// Browsers natively struggle (or completely fail) to seek/playback large
+// data:video/... base64 strings directly in a <video src="..."> tag.
+function useDataUrlToBlobUrl(dataUrl) {
+  const [blobUrl, setBlobUrl] = useState(dataUrl);
+
+  useEffect(() => {
+    if (typeof dataUrl === 'string' && dataUrl.startsWith('data:video/')) {
+      let active = true;
+      let objectUrl = null;
+      fetch(dataUrl)
+        .then(res => res.blob())
+        .then(blob => {
+          if (!active) return;
+          objectUrl = URL.createObjectURL(blob);
+          setBlobUrl(objectUrl);
+        })
+        .catch(() => {
+          if (active) setBlobUrl(dataUrl);
+        });
+      return () => {
+        active = false;
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      };
+    } else {
+      setBlobUrl(dataUrl);
+    }
+  }, [dataUrl]);
+
+  return blobUrl;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // VIDEO PLAYER COMPONENT
 // Supports: mainVideo (direct file URL/upload path) OR videoId (YouTube)
@@ -503,6 +540,8 @@ const UnavailableOverlay = ({ intent }) => (
 const VideoPlayer = ({ mainVideo, videoId, coverPhoto, title }) => {
   const [showVideo, setShowVideo] = useState(false);
   const hasVideo = mainVideo || videoId;
+  const safeMainVideoUrl = useDataUrlToBlobUrl(mainVideo?.preview || mainVideo);
+
   if (!hasVideo) return null;
 
   const isYouTube = !mainVideo && videoId;
@@ -565,7 +604,7 @@ const VideoPlayer = ({ mainVideo, videoId, coverPhoto, title }) => {
           {isDirectVideo ? (
             // muted + playsInline are required so browsers actually start playback
             // immediately after the click (autoplay policy blocks unmuted autoplay).
-            <video src={mainVideo?.preview || mainVideo} controls autoPlay muted playsInline
+            <video src={safeMainVideoUrl} controls autoPlay muted playsInline
               className="w-full h-full object-cover" style={{ background: '#000' }} />
           ) : (
             // mute=1 is required so YouTube actually starts playback on autoplay.
@@ -899,6 +938,8 @@ const WidePhotoCarousel = ({ images, isUnavailable, property, onShowAll, onPhoto
 //   • Close button (X) is anchored TOP-RIGHT.
 // ─────────────────────────────────────────────────────────────────────────────
 const PhotoGridModal = ({ images, isOpen, onClose, onPhotoClick, property }) => {
+  const modalVideoUrl = useDataUrlToBlobUrl(property?.mainVideo?.preview || property?.mainVideo);
+
   // Group by room — preserving the order rooms first appear in the gallery.
   const grouped = {};
   const orderedRooms = [];
@@ -1158,7 +1199,7 @@ const PhotoGridModal = ({ images, isOpen, onClose, onPhotoClick, property }) => 
                     </div>
                     {property?.mainVideo ? (
                       <div className="relative rounded-[1.25rem] overflow-hidden" style={{ aspectRatio: '16/9' }}>
-                        <video src={property.mainVideo?.preview || property.mainVideo} controls className="w-full h-full object-cover" style={{ background: '#000' }} />
+                        <video src={modalVideoUrl} controls className="w-full h-full object-cover" style={{ background: '#000' }} />
                       </div>
                     ) : property?.videoId ? (
                       <div className="relative rounded-[1.25rem] overflow-hidden" style={{ aspectRatio: '16/9', border: '1px solid rgba(15,23,42,0.06)' }}>
@@ -1902,6 +1943,36 @@ const PropertyDetails = () => {
                   </div>
                 ))}
               </div>
+
+              {(landlord?.preferredTenants?.length > 0 || landlord?.houseRules?.length > 0) && (
+                <div className="mt-5 pt-5" style={{ borderTop: '1px solid rgba(15,23,42,0.06)' }}>
+                  {landlord.preferredTenants?.length > 0 && (
+                    <div className="mb-4">
+                      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Preferred Tenants</p>
+                      <div className="flex flex-wrap gap-2">
+                        {landlord.preferredTenants.map((pt, i) => (
+                          <span key={i} className="bg-blue-50 text-blue-700 border border-blue-100 px-2.5 py-1 rounded-lg text-[10px] font-bold capitalize">
+                            {pt.replace('_', ' ')}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {landlord.houseRules?.length > 0 && (
+                    <div>
+                      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">House Rules</p>
+                      <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {landlord.houseRules.map((hr, i) => (
+                          <li key={i} className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                            <CheckCircle2 size={12} className="text-[#ba0036]" />
+                            <span className="capitalize">{hr.replace(/_/g, ' ')}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
               <Link to={`/landlord/${landlord.id}`}
                 className="cyber-btn mt-4 w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl font-black text-sm transition-all active:scale-95 text-slate-700"
                 style={{ background: '#fafbfc', border: '1px solid rgba(15,23,42,0.08)' }}>
@@ -2017,6 +2088,11 @@ const PropertyDetails = () => {
                     ৳{Number(property.price).toLocaleString('en-IN')}
                     {priceLabel && <span className="text-sm font-bold text-slate-500">{priceLabel}</span>}
                   </h2>
+                  {landlord?.serviceCharge > 0 && (
+                    <p className="text-xs font-bold text-slate-500 mt-1">
+                      + ৳{Number(landlord.serviceCharge).toLocaleString('en-IN')} Service Charge
+                    </p>
+                  )}
                   <div className="flex flex-wrap gap-2 mt-2">
                     <IntentBadge intent={property.intent} />
                     <CategoryBadge category={property.category} />
@@ -2124,6 +2200,7 @@ const PropertyDetails = () => {
       </div>
 
       {/* ── MOBILE: FLOATING BOTTOM ACTION CARD ── */}
+      {/* Sits above the 64px MobileBottomNav so it is never hidden behind it */}
       <div className="lg:hidden fixed left-3 right-3 z-40"
         style={{
           bottom: 'calc(18px + env(safe-area-inset-bottom))',
@@ -2148,6 +2225,9 @@ const PropertyDetails = () => {
               ৳{Number(property.price).toLocaleString('en-IN')}
               {priceLabel && <span className="text-[10px] text-slate-500 font-bold ml-0.5">{priceLabel}</span>}
             </p>
+            {landlord?.serviceCharge > 0 && (
+              <p className="text-[9px] font-bold text-slate-500 mt-0.5">+ ৳{Number(landlord.serviceCharge).toLocaleString('en-IN')} SC</p>
+            )}
           </div>
           <motion.button disabled={isUnavailable}
             whileTap={{ scale: 0.9 }}

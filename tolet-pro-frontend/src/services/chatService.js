@@ -87,6 +87,41 @@ export const sendMessage = async (conversationId, text) => {
   return data.message;
 };
 
+/**
+ * Send an image or voice message (multipart upload).
+ * @param {string} conversationId
+ * @param {Blob|File} file       the image / audio blob
+ * @param {object} opts
+ * @param {'image'|'audio'} opts.kind
+ * @param {string=} opts.caption
+ * @param {number=} opts.durationSec   voice length (audio only)
+ * @param {string=} opts.filename
+ */
+export const sendMediaMessage = async (conversationId, file, { kind, caption = '', durationSec, filename } = {}) => {
+  const fd = new FormData();
+  fd.append('file', file, filename || (kind === 'audio' ? 'voice.webm' : 'photo.jpg'));
+  fd.append('kind', kind);
+  if (caption) fd.append('caption', caption);
+  if (durationSec != null) fd.append('durationSec', String(durationSec));
+
+  const t = getToken();
+  const res = await fetch(`${API}/conversations/${conversationId}/media`, {
+    method: 'POST',
+    // NOTE: do NOT set Content-Type — the browser sets the multipart boundary.
+    headers: { ...(t ? { Authorization: `Bearer ${t}` } : {}) },
+    body: fd,
+  });
+  let data;
+  try { data = await res.json(); } catch { data = {}; }
+  if (!res.ok) {
+    const err = new Error(data.message || 'আপলোডে সমস্যা হয়েছে।');
+    err.code = data.code;
+    err.status = res.status;
+    throw err;
+  }
+  return data.message;
+};
+
 /** Mark all messages in this conversation as read by the current user. */
 export const markRead = async (conversationId) => {
   return call(`/conversations/${conversationId}/read`, { method: 'POST' });
@@ -97,5 +132,6 @@ export default {
   openConversation,
   listMessages,
   sendMessage,
+  sendMediaMessage,
   markRead,
 };

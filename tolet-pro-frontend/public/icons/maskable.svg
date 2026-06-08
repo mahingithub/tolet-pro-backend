@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maskable variant for Android adaptive icons.
+  ► Same logo, but the building sits inside the centre ~64% "safe zone" so when
+    Android masks it into a circle/squircle/rounded-square the building is never
+    clipped. The red fills the whole canvas (full bleed).
+  ► TO CHANGE: edit alongside logo.svg; keep the building within the safe zone.
+-->
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="512" height="512" fill="#ba0036"/>
+  <g fill="#ffffff" transform="translate(256,256) scale(0.66) translate(-256,-256)">
+    <rect x="176" y="150" width="160" height="226" rx="10"/>
+    <rect x="232" y="120" width="48" height="36" rx="8"/>
+    <rect x="236" y="320" width="40" height="56" rx="6" fill="#ba0036"/>
+    <g fill="#ba0036">
+      <rect x="200" y="182" width="34" height="30" rx="5"/>
+      <rect x="278" y="182" width="34" height="30" rx="5"/>
+      <rect x="200" y="232" width="34" height="30" rx="5"/>
+      <rect x="278" y="232" width="34" height="30" rx="5"/>
+      <rect x="200" y="282" width="34" height="30" rx="5"/>
+      <rect x="278" y="282" width="34" height="30" rx="5"/>
+    </g>
+  </g>
+</svg>

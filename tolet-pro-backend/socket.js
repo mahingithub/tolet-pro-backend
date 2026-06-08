@@ -27,28 +27,105 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const env = require('./config/env');
 const Call = require('./models/Call');
-
-// userId → Set<socketId>
-const userSockets = new Map();
+// Phase Call-6: push notifications when the receiver's app is closed.
+const User = require('./models/User');
+const fcm = require('./services/fcm.service');
 
 // callId → TimeoutHandle (for missed-call detection)
 const ringTimers = new Map();
+let ioInstance = null;
 
 /**
- * Look up all socket IDs for a given user.
+ * Room naming: every socket for a given user joins the room `user:<userId>`.
+ *
+ * Why rooms instead of tracking socket.id in a Map?
+ *   On platforms like Render's free tier the WebSocket/long-poll connection
+ *   drops and reconnects constantly, so a socket.id captured at call-start is
+ *   stale seconds later — emitting to it silently goes nowhere (which is why
+ *   "accept" and "hang up" never reached the other side). A room is keyed by
+ *   userId, so no matter how many times the underlying socket reconnects with
+ *   a new id, the NEW socket re-joins the same room and routing keeps working.
+ *   Socket.IO also cleans membership up automatically on disconnect.
  */
-function getSocketsForUser(userId) {
-  return userSockets.get(String(userId)) || new Set();
+function roomFor(userId) {
+  return `user:${String(userId)}`;
 }
 
 /**
- * Emit an event to ALL sockets belonging to a user.
+ * Emit an event to ALL of a user's sockets via their room. Reconnect-safe.
  */
 function emitToUser(io, userId, event, payload) {
-  const sockets = getSocketsForUser(userId);
-  for (const sid of sockets) {
-    io.to(sid).emit(event, payload);
+  io.to(roomFor(userId)).emit(event, payload);
+}
+
+function clearRingTimer(callId) {
+  const timer = ringTimers.get(String(callId));
+  if (!timer) return;
+  clearTimeout(timer);
+  ringTimers.delete(String(callId));
+}
+
+function notifyCallRejected(call) {
+  if (!call) return;
+  clearRingTimer(call._id || call.id);
+  if (!ioInstance) return;
+  const payload = {
+    callId: String(call._id || call.id),
+  };
+  emitToUser(ioInstance, call.callerId.toString(), 'CALL_REJECTED', payload);
+  emitToUser(ioInstance, call.receiverId.toString(), 'CALL_REJECTED', payload);
+}
+
+/**
+ * Back-compat helper: report whether a user currently has any live socket.
+ * Uses the adapter's room membership rather than a hand-maintained Map.
+ */
+function getSocketsForUser(io, userId) {
+  const room = io.sockets.adapter.rooms.get(roomFor(userId));
+  return room || new Set();
+}
+
+/**
+ * Load a call and authorize the acting user against it. This is the security
+ * gate for every call lifecycle + signaling event: handlers must NOT trust
+ * client-supplied caller / receiver / target ids.
+ *
+ *   role 'caller'      → user must be the call's caller (initiate).
+ *   role 'receiver'    → user must be the call's receiver (accept / reject).
+ *   role 'participant' → user must be caller OR receiver (end / signaling).
+ *
+ * Returns { call, callerId, receiverId, peerId } on success, or null if the
+ * call is missing or the user isn't allowed to act on it (logged as a security
+ * warning). A null return means the handler should silently ignore the event.
+ */
+async function authorizeCallEvent(userId, callId, role, eventName) {
+  if (!callId) return null;
+  let call;
+  try {
+    call = await Call.findById(callId);
+  } catch {
+    return null; // malformed id / cast error
   }
+  if (!call) return null;
+
+  const uid        = String(userId);
+  const callerId   = String(call.callerId);
+  const receiverId = String(call.receiverId);
+  const isCaller   = uid === callerId;
+  const isReceiver = uid === receiverId;
+
+  const ok = role === 'caller'   ? isCaller
+           : role === 'receiver' ? isReceiver
+           : isCaller || isReceiver; // 'participant'
+
+  if (!ok) {
+    console.warn(
+      `[socket][security] user ${uid} not authorized for ${eventName} on call ${callId}`,
+    );
+    return null;
+  }
+
+  return { call, callerId, receiverId, peerId: isCaller ? receiverId : callerId };
 }
 
 /**
@@ -64,11 +141,24 @@ function initSocket(httpServer) {
     // Optimize for Bangladesh mobile networks:
     // • Aggressive ping to detect drops quickly on 3G/4G.
     // • Reasonable timeout before declaring a disconnect.
-    pingInterval: 10_000,   // 10s
-    pingTimeout:  15_000,   // 15s
-    // Allow polling as a fallback for restrictive networks.
-    transports: ['websocket', 'polling'],
+    pingInterval: 25_000,   // 25s — too-frequent pings on a sleepy free dyno
+    pingTimeout:  60_000,   // 60s — give flaky mobile + free-tier room to breathe
+    // IMPORTANT (Render free tier): list polling FIRST. Render's proxy does not
+    // hold a raw WebSocket reliably, so "websocket-first" makes every client
+    // open WS → fail → fall back → retry WS → fail, in a loop. That loop is
+    // exactly the connect/disconnect churn seen in the logs, and it's why call
+    // signaling never completes. Start on polling (which always works through
+    // the proxy); Socket.IO then quietly upgrades to WS only if it actually holds.
+    transports: ['polling', 'websocket'],
+    // If a socket blips out and reconnects within this window, Socket.IO
+    // restores its session + missed packets instead of treating it as brand
+    // new. Smooths over the brief drops common on free hosting + mobile.
+    connectionStateRecovery: {
+      maxDisconnectionDuration: 2 * 60 * 1000, // 2 min
+      skipMiddlewares: false, // re-run auth on recovery
+    },
   });
+  ioInstance = io;
 
   // ─── Authentication middleware ──────────────────────────────────────────
   io.use((socket, next) => {
@@ -93,19 +183,33 @@ function initSocket(httpServer) {
   io.on('connection', (socket) => {
     const userId = socket.userId;
 
-    // Register socket in presence map.
-    if (!userSockets.has(userId)) {
-      userSockets.set(userId, new Set());
-    }
-    userSockets.get(userId).add(socket.id);
+    // Join this user's room. Reconnect-safe: a new socket for the same user
+    // re-joins the same room automatically, so call routing never breaks even
+    // when the underlying connection churns (Render free tier / mobile).
+    socket.join(roomFor(userId));
 
-    console.log(`[socket] user ${userId} connected (${socket.id})`);
+    if (socket.recovered) {
+      console.log(`[socket] user ${userId} RECONNECTED+recovered (${socket.id})`);
+    } else {
+      console.log(`[socket] user ${userId} connected (${socket.id})`);
+    }
 
     // ── CALL_INITIATED ────────────────────────────────────────────────────
     // Payload: { callId, receiverId, type, roomId, callerName, callerAvatar }
     socket.on('CALL_INITIATED', async (data) => {
       try {
-        const { callId, receiverId, type, roomId, callerName, callerAvatar } = data;
+        const { callId, callerName, callerAvatar } = data;
+
+        // Authorize: only the real caller of THIS call may initiate it. The
+        // receiver / type / roomId come from the DB record, never the client,
+        // so a user can't ring arbitrary people or spoof someone else's call.
+        const auth = await authorizeCallEvent(userId, callId, 'caller', 'CALL_INITIATED');
+        if (!auth) return;
+        const { call } = auth;
+        if (call.status !== 'ringing') return;
+        const receiverId = auth.receiverId;
+        const type       = call.type;
+        const roomId     = call.roomId;
 
         // Notify the receiver on all their devices.
         emitToUser(io, receiverId, 'CALL_RINGING', {
@@ -116,6 +220,36 @@ function initSocket(httpServer) {
           type,
           roomId,
         });
+
+        // Phase Call-6: ALSO send a push notification so the receiver is
+        // alerted even if their PWA is closed/backgrounded (socket only
+        // reaches a live tab). Fire-and-forget — never blocks the ring, and
+        // failures are swallowed inside the service. Dead tokens get pruned.
+        (async () => {
+          try {
+            const receiver = await User.findById(receiverId)
+              .select('deviceTokens preferences')
+              .lean();
+            if (!receiver) return;
+            // Respect the user's toggle (defaults on).
+            if (receiver.preferences && receiver.preferences.callNotifications === false) return;
+            const tokens = (receiver.deviceTokens || []).map((d) => d.token).filter(Boolean);
+            if (tokens.length === 0) return;
+
+            const { invalidTokens } = await fcm.sendIncomingCall(tokens, {
+              callId, callerId: userId, receiverId, callerName, callerAvatar, type, roomId,
+            });
+            // Prune any tokens FCM rejected as dead.
+            if (invalidTokens && invalidTokens.length) {
+              await User.updateOne(
+                { _id: receiverId },
+                { $pull: { deviceTokens: { token: { $in: invalidTokens } } } },
+              );
+            }
+          } catch (err) {
+            console.warn('[socket] FCM push on CALL_INITIATED failed:', err.message);
+          }
+        })();
 
         // Set a 30-second timeout for missed call detection.
         const timer = setTimeout(async () => {
@@ -130,13 +264,44 @@ function initSocket(httpServer) {
               // Notify both parties.
               emitToUser(io, userId, 'CALL_MISSED', { callId });
               emitToUser(io, receiverId, 'CALL_MISSED', { callId });
+
+              // Also notify closed/backgrounded PWAs. The socket event above
+              // only reaches live tabs, so a user with their phone locked would
+              // otherwise never see the missed-call notice until opening the app.
+              try {
+                const receiver = await User.findById(receiverId)
+                  .select('deviceTokens preferences')
+                  .lean();
+                if (receiver && !(receiver.preferences && receiver.preferences.callNotifications === false)) {
+                  const tokens = (receiver.deviceTokens || []).map((d) => d.token).filter(Boolean);
+                  if (tokens.length) {
+                    const { invalidTokens } = await fcm.sendMissedCall(tokens, {
+                      callId,
+                      callerId: userId,
+                      receiverId,
+                      callerName,
+                      callerAvatar,
+                      type,
+                      roomId,
+                    });
+                    if (invalidTokens && invalidTokens.length) {
+                      await User.updateOne(
+                        { _id: receiverId },
+                        { $pull: { deviceTokens: { token: { $in: invalidTokens } } } },
+                      );
+                    }
+                  }
+                }
+              } catch (err) {
+                console.warn('[socket] FCM push on CALL_MISSED failed:', err.message);
+              }
             }
           } catch (err) {
             console.error('[socket] missed-call timer error:', err.message);
           }
         }, 30_000);
 
-        ringTimers.set(callId, timer);
+        ringTimers.set(String(callId), timer);
       } catch (err) {
         console.error('[socket] CALL_INITIATED error:', err.message);
       }
@@ -147,19 +312,18 @@ function initSocket(httpServer) {
     socket.on('CALL_ACCEPTED', async (data) => {
       try {
         const { callId } = data;
-        const call = await Call.findById(callId);
-        if (!call || call.status !== 'ringing') return;
+        // Only the receiver of this call may accept it.
+        const auth = await authorizeCallEvent(userId, callId, 'receiver', 'CALL_ACCEPTED');
+        if (!auth) return;
+        const { call } = auth;
+        if (call.status !== 'ringing') return;
 
         call.status = 'accepted';
         call.startedAt = new Date();
         await call.save();
 
         // Clear the missed-call timer.
-        const timer = ringTimers.get(callId);
-        if (timer) {
-          clearTimeout(timer);
-          ringTimers.delete(callId);
-        }
+        clearRingTimer(callId);
 
         // Notify the caller that the receiver picked up.
         emitToUser(io, call.callerId.toString(), 'CALL_ACCEPTED', {
@@ -182,22 +346,21 @@ function initSocket(httpServer) {
     socket.on('CALL_REJECTED', async (data) => {
       try {
         const { callId } = data;
-        const call = await Call.findById(callId);
-        if (!call || !['ringing'].includes(call.status)) return;
+        // A participant may reject/cancel a RINGING call: the receiver
+        // declining, or the caller cancelling their own outgoing call. A
+        // third party can never touch it. (Mid-call teardown uses CALL_ENDED.)
+        const auth = await authorizeCallEvent(userId, callId, 'participant', 'CALL_REJECTED');
+        if (!auth) return;
+        const { call } = auth;
+        if (call.status !== 'ringing') return;
 
         call.status = 'rejected';
         call.endedAt = new Date();
         await call.save();
 
         // Clear the missed-call timer.
-        const timer = ringTimers.get(callId);
-        if (timer) {
-          clearTimeout(timer);
-          ringTimers.delete(callId);
-        }
-
         // Notify the caller.
-        emitToUser(io, call.callerId.toString(), 'CALL_REJECTED', { callId });
+        notifyCallRejected(call);
       } catch (err) {
         console.error('[socket] CALL_REJECTED error:', err.message);
       }
@@ -208,24 +371,20 @@ function initSocket(httpServer) {
     socket.on('CALL_ENDED', async (data) => {
       try {
         const { callId } = data;
-        const call = await Call.findById(callId);
-        if (!call || ['ended', 'missed', 'rejected'].includes(call.status)) return;
+        // Either participant (caller or receiver) may end the call.
+        const auth = await authorizeCallEvent(userId, callId, 'participant', 'CALL_ENDED');
+        if (!auth) return;
+        const { call, peerId } = auth;
+        if (['ended', 'missed', 'rejected'].includes(call.status)) return;
 
         call.status = 'ended';
         call.endedAt = new Date();
         await call.save();
 
         // Clear any lingering ring timer.
-        const timer = ringTimers.get(callId);
-        if (timer) {
-          clearTimeout(timer);
-          ringTimers.delete(callId);
-        }
+        clearRingTimer(callId);
 
         // Notify the other party.
-        const peerId = call.callerId.toString() === userId
-          ? call.receiverId.toString()
-          : call.callerId.toString();
         emitToUser(io, peerId, 'CALL_ENDED', {
           callId,
           duration: call.duration,
@@ -238,47 +397,49 @@ function initSocket(httpServer) {
     // ── WebRTC Signaling Relay ────────────────────────────────────────────
     // These events just relay payloads between peers. No DB writes needed.
 
-    socket.on('OFFER', (data) => {
-      // data: { callId, targetUserId, sdp }
-      emitToUser(io, data.targetUserId, 'OFFER', {
-        callId: data.callId,
+    socket.on('OFFER', async (data) => {
+      // data: { callId, sdp } — the target is derived from the call record,
+      // NOT from the client, so signaling can't be injected into other calls.
+      const auth = await authorizeCallEvent(userId, data?.callId, 'participant', 'OFFER');
+      if (!auth) return;
+      emitToUser(io, auth.peerId, 'OFFER', {
+        callId: String(auth.call._id),
         sdp: data.sdp,
         fromUserId: userId,
       });
     });
 
-    socket.on('ANSWER', (data) => {
-      // data: { callId, targetUserId, sdp }
-      emitToUser(io, data.targetUserId, 'ANSWER', {
-        callId: data.callId,
+    socket.on('ANSWER', async (data) => {
+      // data: { callId, sdp } — target derived from the call, not the client.
+      const auth = await authorizeCallEvent(userId, data?.callId, 'participant', 'ANSWER');
+      if (!auth) return;
+      emitToUser(io, auth.peerId, 'ANSWER', {
+        callId: String(auth.call._id),
         sdp: data.sdp,
         fromUserId: userId,
       });
     });
 
-    socket.on('ICE_CANDIDATE', (data) => {
-      // data: { callId, targetUserId, candidate }
-      emitToUser(io, data.targetUserId, 'ICE_CANDIDATE', {
-        callId: data.callId,
+    socket.on('ICE_CANDIDATE', async (data) => {
+      // data: { callId, candidate } — target derived from the call, not client.
+      const auth = await authorizeCallEvent(userId, data?.callId, 'participant', 'ICE_CANDIDATE');
+      if (!auth) return;
+      emitToUser(io, auth.peerId, 'ICE_CANDIDATE', {
+        callId: String(auth.call._id),
         candidate: data.candidate,
         fromUserId: userId,
       });
     });
 
     // ── Disconnect ────────────────────────────────────────────────────────
-    socket.on('disconnect', () => {
-      const sockets = userSockets.get(userId);
-      if (sockets) {
-        sockets.delete(socket.id);
-        if (sockets.size === 0) {
-          userSockets.delete(userId);
-        }
-      }
-      console.log(`[socket] user ${userId} disconnected (${socket.id})`);
+    socket.on('disconnect', (reason) => {
+      // No manual cleanup needed: Socket.IO removes the socket from its rooms
+      // automatically. We keep this purely for observability.
+      console.log(`[socket] user ${userId} disconnected (${socket.id}) — ${reason}`);
     });
   });
 
   return io;
 }
 
-module.exports = { initSocket, getSocketsForUser, emitToUser };
+module.exports = { initSocket, getSocketsForUser, emitToUser, notifyCallRejected, clearRingTimer };

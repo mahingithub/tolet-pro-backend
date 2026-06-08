@@ -15,8 +15,10 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Phone, PhoneOff, Mic, MicOff, Video, VideoOff, UserPlus } from 'lucide-react';
 import callProvider from '../services/callProvider';
+import { getCurrentToken } from '../services/authService';
 
 // ─── Ringtone — Web Audio API synthesized tone, no file needed ──────────────
 class Ringtone {
@@ -70,6 +72,9 @@ class Ringtone {
 }
 
 const GlobalCallUI = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
+
   // callState shape:
   //   null  — no call
   //   { status: 'ringing'|'accepted', direction: 'incoming'|'outgoing',
@@ -82,6 +87,7 @@ const GlobalCallUI = () => {
   const remoteVideoRef = useRef(null);
   const localVideoRef  = useRef(null);
   const ringtoneRef    = useRef(null);
+  const handledNotificationActionsRef = useRef(new Set());
 
   if (!ringtoneRef.current) ringtoneRef.current = new Ringtone();
 
@@ -100,19 +106,89 @@ const GlobalCallUI = () => {
     }
   }, [callState?.type]);
 
+  const attachLocalStream = useCallback((stream, type) => {
+    if (type === 'video' && stream && localVideoRef.current) {
+      localVideoRef.current.srcObject = stream;
+      localVideoRef.current.play?.().catch(() => {});
+    }
+  }, []);
+
+  const ensureSocket = useCallback(() => {
+    const token = getCurrentToken();
+    if (!token) return false;
+    callProvider.connect(token);
+    return true;
+  }, []);
+
+  const toIncomingState = useCallback((data, status = 'ringing') => ({
+    status,
+    direction: 'incoming',
+    callId:      data.callId,
+    callerId:    data.callerId,
+    peerName:    data.callerName || data.peerName || 'Unknown',
+    peerAvatar:  data.callerAvatar || data.peerAvatar || null,
+    type:        data.type || 'voice',
+    roomId:      data.roomId,
+  }), []);
+
+  const acceptIncomingCall = useCallback(async (incoming) => {
+    if (!incoming?.callId) return;
+    setCallState(toIncomingState(incoming, 'ringing'));
+    if (!ensureSocket()) return;
+
+    try {
+      await callProvider.acceptCall({
+        callId:   incoming.callId,
+        callerId: incoming.callerId,
+        type:     incoming.type || 'voice',
+        roomId:   incoming.roomId,
+      });
+      setCallState((prev) => (
+        prev?.callId === incoming.callId
+          ? { ...prev, status: 'accepted' }
+          : toIncomingState(incoming, 'accepted')
+      ));
+    } catch (err) {
+      console.error('[GlobalCallUI] acceptCall failed:', err);
+      setCallState(null);
+    }
+  }, [ensureSocket, toIncomingState]);
+
+  const rejectIncomingCall = useCallback((incoming) => {
+    if (!incoming?.callId) return;
+    if (!ensureSocket()) {
+      setCallState(null);
+      return;
+    }
+    callProvider.rejectCall({ callId: incoming.callId });
+    setCallState(null);
+  }, [ensureSocket]);
+
+  const handleNotificationLaunch = useCallback((incoming, action = 'open') => {
+    if (!incoming?.callId) return;
+
+    const key = `${incoming.callId}:${action}:${incoming.roomId || ''}`;
+    if (handledNotificationActionsRef.current.has(key)) return;
+    handledNotificationActionsRef.current.add(key);
+
+    if (action === 'decline') {
+      rejectIncomingCall(incoming);
+      return;
+    }
+
+    if (action === 'accept') {
+      acceptIncomingCall(incoming);
+      return;
+    }
+
+    ensureSocket();
+    setCallState(toIncomingState(incoming, 'ringing'));
+  }, [acceptIncomingCall, ensureSocket, rejectIncomingCall, toIncomingState]);
+
   // ─── Subscribe to provider events ──────────────────────────────────────
   useEffect(() => {
     const unsubIncoming = callProvider.onIncomingCall((data) => {
-      setCallState({
-        status: 'ringing',
-        direction: 'incoming',
-        callId:      data.callId,
-        callerId:    data.callerId,
-        peerName:    data.callerName || 'Unknown',
-        peerAvatar:  data.callerAvatar || null,
-        type:        data.type || 'voice',
-        roomId:      data.roomId,
-      });
+      setCallState(toIncomingState(data, 'ringing'));
     });
 
     const unsubOutgoing = callProvider.onOutgoingCall((data) => {
@@ -145,12 +221,7 @@ const GlobalCallUI = () => {
       attachRemoteStream(stream);
     });
 
-    const unsubLocalStream = callProvider.onLocalStream((stream, type) => {
-      if (type === 'video' && localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.play?.().catch(() => {});
-      }
-    });
+    const unsubLocalStream = callProvider.onLocalStream(attachLocalStream);
 
     return () => {
       unsubIncoming?.();
@@ -159,7 +230,63 @@ const GlobalCallUI = () => {
       unsubRemoteStream?.();
       unsubLocalStream?.();
     };
-  }, [attachRemoteStream]);
+  }, [attachLocalStream, attachRemoteStream, toIncomingState]);
+
+  useEffect(() => {
+    if (callState?.status !== 'accepted' || callState?.type !== 'video') return;
+    attachLocalStream(callProvider.getLocalStream(), callState.type);
+  }, [attachLocalStream, callState?.status, callState?.type]);
+
+  // Notification click → app launch. The service worker opens /messages with
+  // these params when the PWA was closed or in the background.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get('incomingCall') !== '1') return;
+
+    const incoming = {
+      callId: params.get('callId') || '',
+      callerId: params.get('callerId') || '',
+      callerName: params.get('callerName') || 'Unknown',
+      callerAvatar: params.get('callerAvatar') || '',
+      type: params.get('type') || 'voice',
+      roomId: params.get('roomId') || '',
+    };
+    const action = params.get('callAction') || params.get('action') || 'open';
+
+    handleNotificationLaunch(incoming, action);
+
+    [
+      'incomingCall',
+      'callAction',
+      'action',
+      'callId',
+      'callerId',
+      'callerName',
+      'callerAvatar',
+      'type',
+      'roomId',
+    ].forEach((key) => params.delete(key));
+
+    navigate({
+      pathname: location.pathname,
+      search: params.toString() ? `?${params.toString()}` : '',
+    }, { replace: true });
+  }, [handleNotificationLaunch, location.pathname, location.search, navigate]);
+
+  // Notification click → already-open app tab. This avoids waiting for a route
+  // navigation if the browser focuses an existing PWA window.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return undefined;
+
+    const onMessage = (event) => {
+      const msg = event.data || {};
+      if (msg.type !== 'TOLET_INCOMING_CALL_NOTIFICATION_CLICK') return;
+      handleNotificationLaunch(msg.call || {}, msg.action || 'open');
+    };
+
+    navigator.serviceWorker.addEventListener('message', onMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+  }, [handleNotificationLaunch]);
 
   // Ringtone control — ring while status === 'ringing', stop otherwise.
   useEffect(() => {
@@ -187,24 +314,12 @@ const GlobalCallUI = () => {
 
   const handleAccept = async () => {
     if (!callState || callState.direction !== 'incoming') return;
-    try {
-      await callProvider.acceptCall({
-        callId:   callState.callId,
-        callerId: callState.callerId,
-        type:     callState.type,
-        roomId:   callState.roomId,
-      });
-      setCallState((prev) => prev ? { ...prev, status: 'accepted' } : null);
-    } catch (err) {
-      console.error('[GlobalCallUI] acceptCall failed:', err);
-      setCallState(null);
-    }
+    acceptIncomingCall(callState);
   };
 
   const handleReject = () => {
     if (!callState) return;
-    callProvider.rejectCall({ callId: callState.callId });
-    setCallState(null);
+    rejectIncomingCall(callState);
   };
 
   const handleHangup = () => {

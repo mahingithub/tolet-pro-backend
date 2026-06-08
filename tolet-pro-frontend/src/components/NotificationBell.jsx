@@ -104,20 +104,31 @@ export default function NotificationBell({ isAuthed, className = '' }) {
     setOpen(false);
 
     // Deep-link by type.
-    if (n.type === 'message_new' && n.data?.conversationId) {
-      navigate('/messages');
-      return;
+    const d = n.data || {};
+    switch (n.type) {
+      case 'message_new':
+        // Pass the thread id in router state so ChatSystem opens that exact
+        // conversation (it hydrates from location.state.chatId, same as the
+        // dashboard message CTAs).
+        navigate('/messages', { state: { chatId: d.conversationId || null, source: 'notification' } });
+        return;
+      case 'inquiry_new':
+        // New inquiry → landlord inbox on the host dashboard.
+        navigate('/host-dashboard?tab=inquiries');
+        return;
+      case 'inquiry_status':
+        // Accept / reject update → tenant's inquiries.
+        navigate('/tenant-dashboard?tab=inquiries');
+        return;
+      case 'rent_receipt':
+      case 'rent_invoice':
+      case 'rent_overdue':
+        // Rent activity (receipt / invoice / overdue) → tenant payments view.
+        navigate('/tenant-dashboard?tab=payments');
+        return;
+      default:
+        navigate('/smart-alerts');
     }
-    if (n.type === 'inquiry_new' && n.data?.inquiryId) {
-      // Landlord inbox lives on the host dashboard.
-      navigate('/host-dashboard?tab=inquiries');
-      return;
-    }
-    if (n.type === 'inquiry_status' && n.data?.inquiryId) {
-      navigate('/tenant-dashboard?tab=inquiries');
-      return;
-    }
-    navigate('/smart-alerts');
   };
 
   const handleMarkAllRead = async () => {

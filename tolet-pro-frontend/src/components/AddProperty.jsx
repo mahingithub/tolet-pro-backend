@@ -63,7 +63,7 @@ const IMAGE_JPEG_QUALITY = 0.85;
 // the upload on the client side. The real ceiling will be whatever the
 // host's Cloudinary/storage plan allows (Cloudinary free tier = 100 MB
 // per file; bump it in their dashboard if you need more).
-const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024;  // 2 GB ceiling
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;  // 100 MB ceiling
 const formatMB = (bytes) => (bytes / (1024 * 1024)).toFixed(1);
 
 /**
@@ -353,6 +353,127 @@ const AREAS_BY_DISTRICT = {
   mymensingh:  ['Mymensingh Sadar', 'Charpara', 'Maskanda', 'Notun Bazar', 'Ganginar Par', 'Brahmapalli'],
 };
 
+// ─── AREAS BY THANA ───────────────────────────────────────────────────────────
+// Per-thana neighbourhood lists — so picking a thana shows ONLY that thana's
+// areas (e.g. Mohammadpur → Lalmatia/Shyamoli, which a name-substring filter
+// would miss). District-nested to avoid thana-name collisions (Dhaka & Chattogram
+// both have "Kotwali"/"Chawkbazar"). Thanas not listed here fall back to a
+// substring filter on the district's flat area list (see areasForThana).
+const AREAS_BY_THANA = {
+  dhaka: {
+    'Dhanmondi':       ['Dhanmondi 1', 'Dhanmondi 2', 'Dhanmondi 3', 'Dhanmondi 4', 'Dhanmondi 5', 'Dhanmondi 6', 'Dhanmondi 7', 'Dhanmondi 8', 'Dhanmondi 9A', 'Dhanmondi 10', 'Dhanmondi 11', 'Dhanmondi 12', 'Dhanmondi 13', 'Dhanmondi 14', 'Dhanmondi 15', 'Dhanmondi 27', 'Dhanmondi 32', 'Jigatola', 'Sukrabad', 'Shankar', 'West Dhanmondi'],
+    'Gulshan':         ['Gulshan 1', 'Gulshan 2', 'Niketan', 'Gulshan Avenue', 'Gulshan Circle 1', 'Gulshan Circle 2'],
+    'Banani':          ['Banani', 'Banani DOHS', 'Mohakhali', 'Mohakhali DOHS', 'Banani Chairmanbari', 'Kakoli'],
+    'Baridhara':       ['Baridhara DOHS', 'Baridhara J Block', 'Baridhara K Block', 'Baridhara Diplomatic Zone', 'Notun Bazar'],
+    'Mohammadpur':     ['Mohammadpur', 'Lalmatia', 'Shyamoli', 'Tajmahal Road', 'Nurjahan Road', 'Asad Avenue', 'Iqbal Road', 'Mohammadia Housing', 'Katasur', 'Bosila', 'Ring Road', 'Town Hall', 'Shekhertek', 'Chand Udyan'],
+    'Adabar':          ['Adabar', 'Sunibir Housing', 'Baitul Aman Housing', 'Shyamoli Housing', 'Mohammadpur Bera'],
+    'Mirpur':          ['Mirpur 1', 'Mirpur 2', 'Mirpur 6', 'Mirpur 7', 'Mirpur 10', 'Mirpur 11', 'Mirpur 12', 'Mirpur 13', 'Mirpur 14', 'Mirpur DOHS', 'Kazipara', 'Shewrapara', 'Senpara Parbata', 'Monipur'],
+    'Pallabi':         ['Pallabi', 'Mirpur 11', 'Mirpur 12', 'Kalshi', 'Duaripara', 'Baunia'],
+    'Kafrul':          ['Kafrul', 'Mirpur 13', 'Mirpur 14', 'Ibrahimpur', 'Kachukhet', 'West Kafrul'],
+    'Sher-e-Bangla Nagar': ['Agargaon', 'Sher-e-Bangla Nagar', 'Taltola', 'East Sher-e-Bangla Nagar'],
+    'Darus Salam':     ['Darus Salam', 'Gabtoli', 'Technical', 'Ahmed Nagar', 'Mirpur 1'],
+    'Shah Ali':        ['Shah Ali', 'Mirpur 1', 'Rupnagar', 'Pirerbag', 'Gudaraghat'],
+    'Uttara West':     ['Uttara Sector 11', 'Uttara Sector 12', 'Uttara Sector 13', 'Uttara Sector 14', 'Uttara Sector 16', 'Uttara Sector 17', 'Uttara Sector 18'],
+    'Uttara East':     ['Uttara Sector 1', 'Uttara Sector 3', 'Uttara Sector 4', 'Uttara Sector 5', 'Uttara Sector 6', 'Uttara Sector 7', 'Uttara Sector 9', 'Uttara Sector 10', 'Jasimuddin'],
+    'Dakshinkhan':     ['Dakshinkhan', 'Ashkona', 'Faydabad', 'Kawla', 'Gawair'],
+    'Uttarkhan':       ['Uttarkhan', 'Mausaid', 'Chamurkhan', 'Bawnia'],
+    'Turag':           ['Turag', 'Diabari', 'Ranavola', 'Kamarpara', 'Dhour'],
+    'Khilkhet':        ['Khilkhet', 'Nikunja 1', 'Nikunja 2', 'Namapara', 'Tanpara'],
+    'Vatara':          ['Bashundhara R/A', 'Vatara', 'Notun Bazar', 'Jagannathpur', 'Solmaid', 'Kuril'],
+    'Badda':           ['Badda', 'Merul Badda', 'North Badda', 'Middle Badda', 'South Badda', 'Shahjadpur', 'Gulshan Link Road', 'Beraid'],
+    'Tejgaon':         ['Tejgaon', 'Farmgate', 'Karwan Bazar', 'Nakhalpara', 'Tejturi Bazar', 'Indira Road'],
+    'Tejgaon I/A':     ['Tejgaon Industrial Area', 'Nabisco', 'Love Road', 'Gulshan Link'],
+    'Hazaribagh':      ['Hazaribagh', 'Rayer Bazar', 'Zafrabad', 'Beribadh', 'Ganaktuli'],
+    'Kalabagan':       ['Kalabagan', 'Lake Circus', 'First Lane', 'Second Lane', 'Mirpur Road'],
+    'New Market':      ['New Market', 'Nilkhet', 'Azimpur', 'Hatirpool', 'Elephant Road', 'Katabon', 'Green Road'],
+    'Ramna':           ['Shantinagar', 'Eskaton', 'Bailey Road', 'Magbazar', 'Kakrail', 'Bangla Motor', 'Minto Road'],
+    'Shahbagh':        ['Shahbagh', 'Paribagh', 'Bakshibazar', 'Hatirpool', 'Nilkhet'],
+    'Kotwali':         ['Sadarghat', 'Babubazar', 'Islampur', 'Patuatuli', 'Shakhari Bazar'],
+    'Sutrapur':        ['Sutrapur', 'Tikatuli', 'Dholaikhal', 'Faridabad', 'Narinda'],
+    'Gendaria':        ['Gendaria', 'Dhupkhola', 'Distillery Road', 'Dayaganj'],
+    'Wari':            ['Wari', 'Rankin Street', 'Hatkhola', 'Joykali Mandir', 'Baniyanagar'],
+    'Lalbagh':         ['Lalbagh', 'Nawabganj', 'Shahid Nagar', 'Posta', 'Chawk Circular Road'],
+    'Chawkbazar':      ['Chawkbazar', 'Bakshibazar', 'Urdu Road', 'Champatoli', 'Begum Bazar'],
+    'Kamrangirchar':   ['Kamrangirchar', 'Ashrafabad', 'Bosila', 'Char Kamrangir', 'Hujurpara'],
+    'Khilgaon':        ['Khilgaon', 'Malibagh', 'Mouchak', 'Taltola', 'Goran', 'Tilpapara', 'Nandipara', 'Chowdhurypara'],
+    'Sabujbagh':       ['Bashabo', 'Madartek', 'Sabujbagh', 'Kadamtala', 'South Bashabo'],
+    'Mugda':           ['Mugda', 'Mugdapara', 'Maniknagar', 'Manda', 'Golapbagh'],
+    'Motijheel':       ['Motijheel', 'Arambagh', 'Fakirapool', 'Kamalapur', 'Dilkusha', 'Toyenbee Road'],
+    'Paltan':          ['Purana Paltan', 'Naya Paltan', 'Bijoynagar', 'Segunbagicha', 'Topkhana Road'],
+    'Shahjahanpur':    ['Shahjahanpur', 'Shantibagh', 'Razarbagh', 'North Shahjahanpur'],
+    'Jatrabari':       ['Jatrabari', 'Kazla', 'Dholaipar', 'Shanir Akhra', 'Mridha Bari', 'Kutubkhali'],
+    'Demra':           ['Demra', 'Matuail', 'Sarulia', 'Dogair', 'Konapara', 'Staff Quarter'],
+    'Shyampur':        ['Shyampur', 'Jurain', 'Postogola', 'Dolaipar', 'Mir Hajirbag'],
+    'Kadamtali':       ['Kadamtali', 'Dhania', 'Raysaheb Bazar', 'Mir Hazaribagh', 'Shyampur Bazar'],
+    'Cantonment':      ['Cantonment', 'Manikdi', 'Matikata', 'MES', 'Ibrahimpur', 'Balughat'],
+    'Bhashantek':      ['Bhashantek', 'Damalkot', 'Mirpur Cantonment', 'Kalshi'],
+  },
+  chattogram: {
+    'Kotwali':         ['Kotwali', 'Anderkilla', 'Jamalkhan', 'Laldighi', 'Court Building', 'Riazuddin Bazar'],
+    'Panchlaish':      ['Panchlaish', 'Nasirabad', 'Mehedibag', 'Probartak', 'O.R. Nizam Road', 'Hillview'],
+    'Pahartali':       ['Pahartali', "Foy's Lake", 'Akbarshah', 'Sarail', 'Khulshi Hills'],
+    'Double Mooring':  ['Agrabad', 'Double Mooring', 'Dewanhat', 'Barik Building', 'Chowmuhani'],
+    'Halishahar':      ['Halishahar', 'Boropol', 'Artillery', 'Block A', 'Block G', 'Ananda Bazar'],
+    'Chandgaon':       ['Chandgaon', 'Bahaddarhat', 'Kapasgola', 'Mohra', 'Khaja Road'],
+    'Bayezid Bostami': ['Bayezid', 'Nasirabad Industrial', 'Oxygen', 'Sholoshahar', 'Amin Colony'],
+    'Khulshi':         ['Khulshi', 'South Khulshi', 'North Khulshi', 'Jakir Hossain Road', 'Lalkhan Bazar'],
+    'Bakalia':         ['Bakalia', 'Chaktai', 'Rajakhali', 'Bou Bazar', 'DC Road'],
+    'Patenga':         ['Patenga', 'EPZ', 'Steel Mill', 'Airport Road', 'Sea Beach'],
+    'EPZ':             ['EPZ', 'Free Port', 'Bandartila', 'Steel Mill Bazar'],
+    'Akbarshah':       ['Akbarshah', 'Kornelhat', 'A K Khan', 'Firingi Bazar'],
+    'Chawkbazar':      ['Chawkbazar', 'Gulzar', 'Kapasgola', 'College Road', 'Didar Market'],
+  },
+};
+
+// ─── THANAS / UPAZILAS BY DISTRICT ────────────────────────────────────────────
+// The specific thana (police-station area / upazila) a property sits in — the
+// level tenants actually search by, since a district like Dhaka or Bhola is far
+// too broad. Dhaka is covered comprehensively; other districts list their main
+// upazilas. Where a district isn't mapped here, the wizard falls back to a
+// free-text thana input and search still works (thana feeds the search haystack).
+const THANAS_BY_DISTRICT = {
+  dhaka: [
+    'Dhanmondi', 'Gulshan', 'Banani', 'Baridhara', 'Mohammadpur', 'Adabar',
+    'Mirpur', 'Pallabi', 'Kafrul', 'Sher-e-Bangla Nagar', 'Darus Salam', 'Shah Ali',
+    'Uttara West', 'Uttara East', 'Dakshinkhan', 'Uttarkhan', 'Turag', 'Khilkhet',
+    'Vatara', 'Badda', 'Tejgaon', 'Tejgaon I/A', 'Hazaribagh', 'Kalabagan',
+    'New Market', 'Ramna', 'Shahbagh', 'Kotwali', 'Sutrapur', 'Gendaria', 'Wari',
+    'Lalbagh', 'Chawkbazar', 'Kamrangirchar', 'Khilgaon', 'Sabujbagh', 'Mugda',
+    'Motijheel', 'Paltan', 'Shahjahanpur', 'Jatrabari', 'Demra', 'Shyampur',
+    'Kadamtali', 'Cantonment', 'Bhashantek',
+  ],
+  gazipur:     ['Gazipur Sadar', 'Tongi', 'Kaliakair', 'Kapasia', 'Sreepur', 'Kaliganj'],
+  narayanganj: ['Narayanganj Sadar', 'Fatullah', 'Siddhirganj', 'Bandar', 'Sonargaon', 'Rupganj', 'Araihazar'],
+  chattogram: [
+    'Kotwali', 'Panchlaish', 'Pahartali', 'Double Mooring', 'Halishahar', 'Chandgaon',
+    'Bayezid Bostami', 'Khulshi', 'Bakalia', 'Patenga', 'EPZ', 'Akbarshah', 'Chawkbazar',
+  ],
+  coxs_bazar:  ["Cox's Bazar Sadar", 'Teknaf', 'Ukhia', 'Chakaria', 'Maheshkhali', 'Ramu'],
+  sylhet:      ['Sylhet Sadar', 'Beanibazar', 'Golapganj', 'Jaintiapur', 'Companiganj', 'Kanaighat', 'Zakiganj', 'Bishwanath'],
+  rajshahi:    ['Boalia', 'Rajpara', 'Motihar', 'Shah Makhdum', 'Paba', 'Godagari'],
+  khulna:      ['Khulna Sadar', 'Sonadanga', 'Khalishpur', 'Daulatpur', 'Khan Jahan Ali', 'Rupsha'],
+  barishal:    ['Barishal Sadar', 'Bakerganj', 'Babuganj', 'Banaripara', 'Gournadi', 'Hizla', 'Mehendiganj', 'Muladi', 'Wazirpur', 'Agailjhara'],
+  bhola:       ['Bhola Sadar', 'Borhanuddin', 'Charfasson', 'Daulatkhan', 'Lalmohan', 'Manpura', 'Tazumuddin'],
+  rangpur:     ['Rangpur Sadar', 'Badarganj', 'Gangachara', 'Kaunia', 'Mithapukur', 'Pirgachha', 'Pirganj', 'Taraganj'],
+  mymensingh:  ['Mymensingh Sadar', 'Trishal', 'Bhaluka', 'Muktagachha', 'Gouripur', 'Fulbaria', 'Gafargaon', 'Phulpur'],
+};
+
+// Areas filtered to the selected thana — derived from the district's area list by
+// matching the thana name (e.g. thana "Dhanmondi" → "Dhanmondi 3/27/32"; "Gulshan"
+// → "Gulshan 1/2"). Falls back to the full district list when nothing matches.
+function areasForThana(district, thana) {
+  const key = String(thana || '').trim();
+  const mapped = (AREAS_BY_THANA[district] || {})[key] || [];
+  if (mapped.length) return mapped;
+  // Fallback for thanas/districts not in AREAS_BY_THANA: substring-filter the
+  // district's flat area list by the thana name.
+  const all = AREAS_BY_DISTRICT[district] || [];
+  const t = key.toLowerCase();
+  if (!t) return all;
+  const filtered = all.filter((a) => a.toLowerCase().includes(t));
+  return filtered.length ? filtered : all;
+}
+
 const FURNISHING_OPTIONS = [
   { id: 'Furnished',      label: 'Furnished',      labelBn: 'সম্পূর্ণ আসবাবপত্র', color: 'text-emerald-600', bg: 'bg-emerald-50 border-emerald-200' },
   { id: 'Semi-Furnished', label: 'Semi-Furnished', labelBn: 'আংশিক আসবাবপত্র',   color: 'text-amber-600',   bg: 'bg-amber-50 border-amber-200'   },
@@ -396,6 +517,7 @@ const INITIAL_FORM = {
   division: '',
   district: '',
   area: '',
+  thana: '',
   location: '',
   gpsLat: '',
   gpsLng: '',
@@ -485,6 +607,160 @@ const ErrMsg = ({ text }) => (
 );
 
 // ─── GPS LOCATION PANEL ───────────────────────────────────────────────────────
+// ── Reverse-geocode → app location matching ─────────────────────────────────
+// Normalises an OSM/Google place name and matches it to the app's own
+// division/district/thana/area lists, tolerating Bangladesh spelling variants
+// (Chittagong↔Chattogram, Barisal↔Barishal) and small differences
+// (OSM "Lalmohan" ↔ our "Lalmohan") via an edit-distance fallback.
+const _GEO_ALIASES = {
+  chittagong: 'chattogram', chattagram: 'chattogram',
+  barisal: 'barishal',
+  comilla: 'cumilla',
+  jessore: 'jashore',
+  bogra: 'bogura',
+  lalmohan: 'lalmohan',
+};
+const _geoNorm = (s) =>
+  String(s || '')
+    .toLowerCase()
+    .replace(/\b(division|district|sub-?district|upazil[al]+|thana|metropolitan|paurashava|union|ward)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, '');
+const _geoCanon = (s) => { const n = _geoNorm(s); return _GEO_ALIASES[n] || n; };
+const _geoLev = (a, b) => {
+  const m = a.length, n = b.length;
+  if (!m) return n; if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+};
+// Returns the best-matching option (exact/substring on canonical form, else edit
+// distance ≤ 2), or null when nothing is close enough.
+const matchGeo = (raw, options, getLabel = (o) => o) => {
+  const target = _geoCanon(raw);
+  if (!target) return null;
+  let best = null, bestDist = Infinity;
+  for (const opt of options) {
+    const cand = _geoCanon(getLabel(opt));
+    if (!cand) continue;
+    if (cand === target || (target.length >= 4 && (cand.includes(target) || target.includes(cand)))) return opt;
+    const d = _geoLev(cand, target);
+    if (d < bestDist) { bestDist = d; best = opt; }
+  }
+  return bestDist <= 2 ? best : null;
+};
+
+// ── Union (Bangladesh rural sub-thana level) data ───────────────────────────
+// Numbered union parishads (EN + BN) so GPS results in rural upazilas resolve to
+// the actual union (e.g. Kalma) with its official number. Verified against the
+// union parishad sites / Bengali Wikipedia. Keyed district → thana; extendable.
+const UNIONS_BY_THANA = {
+  bhola: {
+    Lalmohan: [
+      { no: 1, en: 'Badarpur',          bn: 'বদরপুর' },
+      { no: 2, en: 'Kalma',             bn: 'কালমা' },
+      { no: 3, en: 'Dhali Gournagar',   bn: 'ধলী গৌরনগর' },
+      { no: 4, en: 'Char Bhuta',        bn: 'চর ভূতা' },
+      { no: 5, en: 'Lalmohan',          bn: 'লালমোহন' },
+      { no: 6, en: 'Farajganj',         bn: 'ফরাজগঞ্জ' },
+      { no: 7, en: 'Paschim Char Umed', bn: 'পশ্চিম চর উমেদ' },
+      { no: 8, en: 'Ramagonj',          bn: 'রমাগঞ্জ' },
+      { no: 9, en: 'Lord Hardinge',     bn: 'লর্ড হার্ডিঞ্জ' },
+    ],
+  },
+};
+
+// Bengali thana/upazila labels (district-nested). Division & district already
+// carry BN labels; this fills the thana gap so the form + GPS text show Bengali
+// in Bengali mode. Districts not listed here fall back to the English label.
+const THANA_BN = {
+  bhola: {
+    'Bhola Sadar': 'ভোলা সদর',
+    'Borhanuddin': 'বোরহানউদ্দিন',
+    'Charfasson':  'চরফ্যাশন',
+    'Daulatkhan':  'দৌলতখান',
+    'Lalmohan':    'লালমোহন',
+    'Manpura':     'মনপুরা',
+    'Tazumuddin':  'তজুমদ্দিন',
+  },
+};
+const thanaBn = (districtId, thanaLabel) => (THANA_BN[districtId] || {})[thanaLabel] || '';
+
+// Match a geocoded union name (English) to our numbered union list for a thana.
+const matchUnion = (raw, districtId, thanaLabel) => {
+  const list = (UNIONS_BY_THANA[districtId] || {})[thanaLabel] || [];
+  if (!list.length || !raw) return null;
+  return matchGeo(raw, list, (u) => u.en);
+};
+
+const _BN_DIGITS = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
+const _toBnDigits = (n) => String(n).replace(/[0-9]/g, (d) => _BN_DIGITS[+d]);
+
+// Normalise a Google geocode result (works for both the JS SDK geocoder and the
+// REST web service — identical address_components shape) into a common parts object.
+const _fromGoogle = (result) => {
+  const comp = (type) => {
+    const c = (result.address_components || []).find((x) => (x.types || []).includes(type));
+    return c ? c.long_name : '';
+  };
+  return {
+    division: comp('administrative_area_level_1'),
+    district: comp('administrative_area_level_2'),
+    thana:    comp('administrative_area_level_3'),
+    // Union/village level — what rural Bangladesh listings (e.g. Kalma) need.
+    union:    comp('administrative_area_level_4') || comp('sublocality_level_1') || comp('sublocality') || comp('locality'),
+    road:     comp('route') || comp('neighborhood') || '',
+    formatted: result.formatted_address || '',
+  };
+};
+
+// Normalise a Nominatim/OSM reverse result into the same parts object.
+const _fromOsm = (data) => {
+  const a = data.address || {};
+  return {
+    division: a.state || a.region || '',
+    district: a.state_district || a.district || a.county || '',
+    thana:    a.county || a.subdistrict || a.municipality || a.city_district || a.town || '',
+    union:    a.village || a.suburb || a.neighbourhood || a.hamlet || '',
+    road:     a.road || '',
+    formatted: data.display_name || '',
+  };
+};
+
+// Reverse geocode with Google: prefer the already-loaded JS SDK geocoder (uses the
+// referrer-restricted Maps key seamlessly); fall back to the REST web service
+// (works before the SDK has finished loading). Returns a result object or null.
+// Both paths require the "Geocoding API" to be enabled on the key in Google Cloud.
+const _googleReverse = async (lat, lng) => {
+  if (typeof window !== 'undefined' && window.google && window.google.maps && window.google.maps.Geocoder) {
+    try {
+      const geocoder = new window.google.maps.Geocoder();
+      const results = await new Promise((resolve, reject) => {
+        geocoder.geocode({ location: { lat, lng } }, (res, status) => {
+          if (status === 'OK' && res && res.length) resolve(res);
+          else reject(new Error(status || 'GEOCODE_FAILED'));
+        });
+      });
+      if (results && results.length) return results[0];
+    } catch { /* fall through to REST */ }
+  }
+  if (GOOGLE_MAPS_API_KEY) {
+    try {
+      const r = await fetch(
+        `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&language=en&key=${GOOGLE_MAPS_API_KEY}`
+      );
+      const d = await r.json();
+      if (d.status === 'OK' && d.results && d.results.length) return d.results[0];
+    } catch { /* fall through */ }
+  }
+  return null;
+};
+
 const GpsPanel = ({ form, set, isBn }) => {
   const [gpsLoading, setGpsLoading] = useState(false);
   const [gpsError, setGpsError]     = useState('');
@@ -502,15 +778,71 @@ const GpsPanel = ({ form, set, isBn }) => {
         const { latitude, longitude } = pos.coords;
         set('gpsLat', latitude.toFixed(6));
         set('gpsLng', longitude.toFixed(6));
-        // Reverse geocode using nominatim (free, no key required)
+        // Reverse geocode. Google first (best Bangladesh coverage — resolves down
+        // to union/village like Kalma), then OSM as a free fallback. Both return the
+        // same normalised parts, so the matching + display below is source-agnostic.
+        const applyGeo = (g) => {
+          // Resolve the Division → District → Thana → Area cascade first (English
+          // matching, spelling-tolerant), setting each dropdown on a confident match.
+          const divMatch = matchGeo(g.division, DIVISIONS, (d) => d.label);
+          let distMatch = null, thMatch = null, unionObj = null;
+          if (divMatch) {
+            set('division', divMatch.id);
+            const distList = DISTRICTS_BY_DIVISION[divMatch.id] || [];
+            distMatch = matchGeo(g.district, distList, (d) => d.label) || matchGeo(g.thana, distList, (d) => d.label);
+            if (distMatch) {
+              set('district', distMatch.id);
+              const thanaList = THANAS_BY_DISTRICT[distMatch.id] || [];
+              thMatch = matchGeo(g.thana, thanaList) || matchGeo(g.district, thanaList);
+              if (thMatch) {
+                set('thana', thMatch);
+                const areaList = (AREAS_BY_THANA[distMatch.id] || {})[thMatch] || [];
+                const areaMatch = matchGeo(g.union || g.road, areaList);
+                if (areaMatch) set('area', areaMatch);
+                unionObj = matchUnion(g.union, distMatch.id, thMatch);
+              }
+            }
+          }
+
+          // Build the location label in the ACTIVE language from the matched
+          // entities, so Bengali mode shows Bengali names. Falls back to the raw
+          // geocode text where there's no match. Union carries its official number.
+          const districtLabel = distMatch ? (isBn ? distMatch.labelBn : distMatch.label) : String(g.district || '').trim();
+          const thanaLabel    = thMatch  ? (isBn ? (thanaBn(distMatch.id, thMatch) || thMatch) : thMatch) : String(g.thana || '').trim();
+          let unionLabel;
+          if (unionObj) {
+            unionLabel = isBn ? `${_toBnDigits(unionObj.no)}নং ${unionObj.bn}` : `${unionObj.en} (No. ${unionObj.no})`;
+          } else {
+            unionLabel = String(g.union || g.road || '').trim();
+          }
+          const out = [];
+          for (const p of [unionLabel, thanaLabel, districtLabel]) {
+            const v = String(p || '').trim();
+            if (v && !out.some((q) => q.toLowerCase() === v.toLowerCase())) out.push(v);
+          }
+          if (out.length) set('location', out.join(', '));
+
+          // Confirmation address line — also language-aware.
+          if (isBn) {
+            const divLabel = divMatch ? divMatch.labelBn : String(g.division || '').trim();
+            set('gpsAddress', [...out, divLabel, 'বাংলাদেশ'].filter(Boolean).join(', '));
+          } else {
+            set('gpsAddress', g.formatted || out.join(', '));
+          }
+        };
+
         try {
-          const res = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
-          );
-          const data = await res.json();
-          const addr = data.display_name || `${latitude}, ${longitude}`;
-          set('gpsAddress', addr);
-          if (!form.location) set('location', addr.split(',').slice(0, 3).join(',').trim());
+          const gResult = await _googleReverse(latitude, longitude);
+          if (gResult) {
+            applyGeo(_fromGoogle(gResult));
+          } else {
+            // Free OSM fallback (no key) — reaches thana level for most rural points.
+            const res = await fetch(
+              `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&addressdetails=1&accept-language=${isBn ? 'bn' : 'en'}`
+            );
+            const data = await res.json();
+            applyGeo(_fromOsm(data));
+          }
         } catch {
           set('gpsAddress', `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`);
         }
@@ -1362,6 +1694,7 @@ const AddProperty = () => {
                         set('division', e.target.value);
                         set('district', '');
                         set('area', '');
+                        set('thana', '');
                         setErrors(er => ({ ...er, division: false }));
                       }}>
                       <option value="">{isBn ? 'বিভাগ নির্বাচন করুন' : 'Select Division'}</option>
@@ -1384,6 +1717,7 @@ const AddProperty = () => {
                             onChange={e => {
                               set('district', e.target.value);
                               set('area', '');
+                              set('thana', '');
                               setErrors(er => ({ ...er, district: false }));
                             }}>
                             <option value="">{isBn ? 'জেলা নির্বাচন করুন' : 'Select District'}</option>
@@ -1399,9 +1733,41 @@ const AddProperty = () => {
                   )}
                 </AnimatePresence>
 
+                {/* Thana / Upazila (cascades from District) — the specific place tenants search by */}
+                <AnimatePresence>
+                  {form.district && (
+                    <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
+                      <Field label={isBn ? 'থানা / উপজেলা' : 'Thana / Upazila'}
+                        hint={isBn ? 'নির্দিষ্ট থানা — ভাড়াটিয়া এটা দিয়েই বাসা খুঁজে পাবে' : 'The specific thana — tenants find your place by this'}>
+                        {(THANAS_BY_DISTRICT[form.district] || []).length > 0 ? (
+                          <div className="relative">
+                            <select className={`${inputCls} appearance-none pr-10`}
+                              value={form.thana}
+                              onChange={e => { set('thana', e.target.value); set('area', ''); }}>
+                              <option value="">{isBn ? 'থানা নির্বাচন করুন' : 'Select Thana'}</option>
+                              {(THANAS_BY_DISTRICT[form.district] || []).map(th => (
+                                <option key={th} value={th}>{th}</option>
+                              ))}
+                            </select>
+                            <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                          </div>
+                        ) : (
+                          <div className="relative">
+                            <MapPin size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" />
+                            <input type="text" className={`${inputCls} pl-10`}
+                              placeholder={isBn ? 'যেমন: লালমোহন' : 'e.g. Lalmohan'}
+                              value={form.thana}
+                              onChange={e => { set('thana', e.target.value); set('area', ''); }} />
+                          </div>
+                        )}
+                      </Field>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
                 {/* Area / neighborhood (cascades from District) */}
                 <AnimatePresence>
-                  {form.district && (AREAS_BY_DISTRICT[form.district] || []).length > 0 && (
+                  {form.district && form.thana && areasForThana(form.district, form.thana).length > 0 && (
                     <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
                       <Field label={isBn ? 'এলাকা / পাড়া' : 'Area / Neighborhood'}
                         hint={isBn ? 'যেমন: ধানমন্ডি ৩, গুলশান ২, উত্তরা সেক্টর ৭' : 'e.g. Dhanmondi 3, Gulshan 2, Uttara Sector 7'}>
@@ -1417,7 +1783,7 @@ const AddProperty = () => {
                               }
                             }}>
                             <option value="">{isBn ? 'এলাকা নির্বাচন করুন (ঐচ্ছিক)' : 'Select Area (optional)'}</option>
-                            {(AREAS_BY_DISTRICT[form.district] || []).map(a => (
+                            {areasForThana(form.district, form.thana).map(a => (
                               <option key={a} value={a}>{a}</option>
                             ))}
                           </select>

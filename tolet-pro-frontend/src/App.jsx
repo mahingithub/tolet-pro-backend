@@ -4,6 +4,7 @@ import { LanguageProvider } from "./context/LanguageContext";
 import { AuthProvider, useAuth } from "./context/AuthContext.jsx";
 import callProvider from "./services/callProvider";
 import { getCurrentToken } from "./services/authService";
+import fcmService from "./services/fcmService";
 
 // Existing Imports
 import Navbar from "./components/Navbar";
@@ -26,6 +27,18 @@ import SubscriptionPage from "./components/SubscriptionPage";
 
 // --- Mobile Shell ---
 import MobileBottomNav from "./components/mobile/MobileBottomNav";
+
+// --- PWA install banner (Phase Call-5) ---
+import InstallPrompt from "./components/InstallPrompt";
+
+// --- Legal pages (Phase 7) ---
+import PrivacyPolicy from "./components/legal/PrivacyPolicy";
+import TermsOfService from "./components/legal/TermsOfService";
+import RefundPolicy from "./components/legal/RefundPolicy";
+
+// --- Beta feedback button (Phase 7) ---
+import FeedbackButton from "./components/FeedbackButton";
+import GlobalCallUI from "./components/GlobalCallUI";
 
 // --- Admin Imports ---
 import AdminLayout from "./components/AdminLayout";
@@ -54,8 +67,21 @@ const GlobalCallSocket = () => {
 		const token = getCurrentToken();
 		if (!token) return;
 		callProvider.connect(token);
-		// No cleanup — we want the socket to persist across navigations.
+		// Phase Call-6: register this device for incoming-call push so the user
+		// is alerted even when the PWA is closed. If permission is already
+		// granted, refresh the token quietly; if permission is undecided, wait
+		// for the user's next tap/key so mobile browsers allow the permission
+		// prompt and the token registration actually succeeds.
+		const fcmTimer = setTimeout(() => {
+			fcmService.enableCallNotifications({ prompt: false }).catch(() => {});
+		}, 1500);
+		const cleanupPushGesture = fcmService.enableCallNotificationsOnNextUserGesture();
+		// No socket cleanup — we want it to persist across navigations.
 		// It only tears down on logout (handled by the !isAuthenticated branch).
+		return () => {
+			clearTimeout(fcmTimer);
+			cleanupPushGesture?.();
+		};
 	}, [isAuthenticated, user?.id, user?._id]);
 
 	return null;
@@ -77,15 +103,26 @@ const AppLayout = () => {
 		location.pathname.startsWith(route),
 	);
 
-	// The AI Assistant lives globally but is hidden on auth + admin pages
-	// (admins have their own ticket workspace, not the floating widget).
-	const isAuthOrAdminPage =
-		location.pathname === "/login" || location.pathname.startsWith("/admin");
+	// Hide the AI Assistant on auth, admin, and the messages page
+	// (the chat page has its own interface — the floating widget is redundant there).
+	const shouldHideAIAssistant =
+		location.pathname === "/login" ||
+		location.pathname.startsWith("/admin") ||
+		location.pathname === "/messages";
+
+	// On the property listing page, the Navbar is replaced on mobile by the
+	// immersive Daraz-style header built into PropertyListing itself.
+	// We still render it on desktop (lg+) so the brand bar stays visible there.
+	const isPropertyListingRoute = location.pathname.startsWith("/properties/");
 
 	return (
 		<div className="min-h-screen bg-white">
 			<GlobalCallSocket />
-			{!shouldHideNavbar && <Navbar />}
+			{!shouldHideNavbar && (
+				<div className={isPropertyListingRoute ? "hidden lg:block" : ""}>
+					<Navbar />
+				</div>
+			)}
 
 			<Routes>
 				{/* Public Routes */}
@@ -94,6 +131,11 @@ const AppLayout = () => {
 				<Route path="/property/:id" element={<PropertyDetails />} />
 				<Route path="/inquire/:id" element={<InquiryPage />} />
 				<Route path="/login" element={<LoginPage />} />
+
+				{/* Legal pages — public, no auth required (Phase 7) */}
+				<Route path="/privacy-policy" element={<PrivacyPolicy />} />
+				<Route path="/terms" element={<TermsOfService />} />
+				<Route path="/refund" element={<RefundPolicy />} />
 
 				<Route
 					path="/host-dashboard"
@@ -159,8 +201,11 @@ const AppLayout = () => {
 				<Route path="*" element={<Navigate to="/" replace />} />
 			</Routes>
 
-			{!isAuthOrAdminPage && <GlobalAIAssistant />}
-			<MobileBottomNav />
+			<GlobalCallUI />
+			{!shouldHideAIAssistant && <GlobalAIAssistant />}
+			<MobileBottomNav hideOnRoutes={['/login', '/admin', '/list-property', '/properties/']} />
+			<InstallPrompt />
+			<FeedbackButton />
 		</div>
 	);
 };

@@ -19,6 +19,8 @@ import {
 } from '../services/privacyService.js';
 import LoadingState from './common/LoadingState.jsx';
 import ErrorState from './common/ErrorState.jsx';
+// Phase Call-6: enable/disable incoming-call push (handles device token too)
+import fcmService from '../services/fcmService';
 
 /**
  * /account/privacy
@@ -111,6 +113,34 @@ const PrivacyCenter = () => {
     const next = { ...prefs, [key]: !prefs[key] };
     setPrefs(next);
     await setPreferences({ [key]: next[key] });
+  };
+
+  // Phase Call-6: call-notification toggle is special — besides saving the
+  // preference, turning it ON must request notification permission + register
+  // this device's push token, and turning it OFF should unregister it.
+  const handleCallNotifToggle = async () => {
+    if (!prefs) return;
+    const enabling = !prefs.callNotifications;
+    // Optimistic UI flip.
+    setPrefs((p) => ({ ...p, callNotifications: enabling }));
+    try {
+      if (enabling) {
+        const token = await fcmService.enableCallNotifications();
+        // If the browser blocked permission, revert the switch so it reflects reality.
+        if (!token) {
+          setPrefs((p) => ({ ...p, callNotifications: false }));
+          await fcmService.setCallNotificationPref(false);
+          return;
+        }
+        await fcmService.setCallNotificationPref(true);
+      } else {
+        await fcmService.disableCallNotifications();
+        await fcmService.setCallNotificationPref(false);
+      }
+    } catch {
+      // On any failure, fall back to the previous value.
+      setPrefs((p) => ({ ...p, callNotifications: !enabling }));
+    }
   };
 
   const handleConfirmDelete = async () => {
@@ -297,6 +327,12 @@ const PrivacyCenter = () => {
               description="Booking updates and ticket replies sent to your phone."
               checked={prefs?.smsAlerts ?? false}
               onChange={() => handlePrefToggle('smsAlerts')}
+            />
+            <Toggle
+              label="Call notifications"
+              description="Get a push notification for incoming voice/video calls, even when the app is closed. Requires notification permission."
+              checked={prefs?.callNotifications ?? false}
+              onChange={handleCallNotifToggle}
             />
           </div>
         </Section>

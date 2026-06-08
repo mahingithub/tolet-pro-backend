@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@sentry/node": "^10.55.0",
+    "@sentry/react": "^10.55.0",
+    "cloudinary": "^2.10.0",
+    "zego-express-engine-webrtc": "^3.12.0"
+  }
+}

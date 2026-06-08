@@ -41,3 +41,22 @@ exports.markRead = asyncH(async (req, res) => {
   const r = await svc.markRead({ id: req.params.id, user: req.user });
   res.json(r);
 });
+
+// Send an image or voice message. The file arrives via multer (field 'file').
+// The `kind` ('image' | 'audio') + optional caption/duration come from the
+// multipart body.
+exports.sendMedia = asyncH(async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ message: 'কোনো ফাইল পাওয়া যায়নি।', code: 'no_file' });
+  }
+  const msg = await svc.sendMediaMessage({
+    id:          req.params.id,
+    user:        req.user,
+    buffer:      req.file.buffer,
+    mimetype:    req.file.mimetype,
+    kind:        req.body.kind,
+    caption:     req.body.caption || '',
+    durationSec: req.body.durationSec,
+  });
+  res.status(201).json({ message: msg.toJSON() });
+});

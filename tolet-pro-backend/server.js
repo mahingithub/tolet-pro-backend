@@ -1,5 +1,9 @@
 'use strict';
 
+// Sentry MUST be initialised before anything else (Phase 7).
+// This require runs instrument.js, which calls Sentry.init().
+require('./instrument');
+
 const env = require('./config/env');
 const express = require('express');
 const cors = require('cors');
@@ -17,6 +21,8 @@ const landlordRoutes = require('./routes/landlord.routes');
 const tenantRoutes   = require('./routes/tenant.routes');
 const errorHandler   = require('./middleware/errorHandler');
 const firebaseAdmin  = require('./services/firebaseAdmin');
+// Phase Call-7: request rate limiting (brute-force + spam protection)
+const { authLimiter, writeLimiter, chatLimiter, apiLimiter } = require('./middleware/rateLimiters');
 
 const app = express();
 
@@ -55,27 +61,45 @@ app.get('/healthz', (_req, res) => {
 });
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
-app.use('/api/auth',       authRoutes);
+// Phase Call-7: light global limiter as a backstop on ALL api traffic.
+app.use('/api', apiLimiter);
+
+// STRICT limiter on auth — stops login/OTP brute-force.
+app.use('/api/auth',       authLimiter, authRoutes);
 app.use('/api/properties', propertyRoutes);
-app.use('/api/inquiries',  inquiryRoutes);
+// Server-side Overpass (OpenStreetMap) proxy for property "Nearby places" —
+// browser can't call Overpass directly (CORS + 406). Global apiLimiter covers it.
+app.use('/api/geo',        require('./routes/geo.routes'));
+// MEDIUM limiter on inquiry creation (spam-prone).
+app.use('/api/inquiries',  writeLimiter, inquiryRoutes);
 app.use('/api/host',       hostRoutes);
+app.use('/api/host-stats', require('./routes/hostStats.routes')); // real host performance metrics
 app.use('/api/landlords',  landlordRoutes);
 app.use('/api/tenants',    tenantRoutes);
 app.use('/api/admin',      require('./routes/admin.routes'));
-app.use('/api/conversations',  require('./routes/chat.routes'));
+// MEDIUM limiter on messaging (spam-prone).
+app.use('/api/conversations',  chatLimiter, require('./routes/chat.routes'));
 app.use('/api/notifications',  require('./routes/notification.routes'));
-app.use('/api/bookings',       require('./routes/booking.routes'));
+// MEDIUM limiter on bookings (spam-prone).
+app.use('/api/bookings',       writeLimiter, require('./routes/booking.routes'));
 app.use('/api/receipts',       require('./routes/receipt.routes'));
 app.use('/api/billing',        require('./routes/billing.routes'));
-app.use('/api/support',        require('./routes/support.routes'));
+// MEDIUM limiter on support ticket creation (spam-prone).
+app.use('/api/support',        writeLimiter, require('./routes/support.routes'));
 app.use('/api/users/me',       require('./routes/privacy.routes')); // Phase 7
 app.use('/api/calls',          require('./routes/calls.routes')); // Phase 8
-app.use('/api/admin/support',  require('./routes/admin.support.routes'));
+app.use('/api/admin/support', require('./routes/admin.support.routes'));
+
 
 // 404
 app.use((req, res) => {
   res.status(404).json({ message: 'পথ পাওয়া যায়নি।', code: 'not_found', path: req.originalUrl });
 });
+
+// Phase 7: Sentry must capture errors BEFORE our own handler formats them.
+// (No-op if SENTRY_DSN isn't set — safe either way.)
+const Sentry = require('@sentry/node');
+Sentry.setupExpressErrorHandler(app);
 
 app.use(errorHandler);
 

@@ -43,6 +43,13 @@ const MobileBottomNav = ({ hideOnRoutes }) => {
 
   const hides = hideOnRoutes ?? ['/login', '/admin', '/list-property'];
 
+  // The property-detail page (/property/:id) has its own sticky contact /
+  // booking action bar pinned to the bottom on mobile. The rail would sit on
+  // top of it and hide the primary CTA, so we always hide the rail there —
+  // independent of the configurable `hideOnRoutes` above. (Note: the listing
+  // page is /properties/all, which does NOT match '/property/'.)
+  if (location.pathname.startsWith('/property/')) return null;
+
   if (hides.some((r) => location.pathname.startsWith(r))) return null;
 
   // Tenants don't list properties — swap the centre +List FAB for a

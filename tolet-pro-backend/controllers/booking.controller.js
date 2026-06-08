@@ -13,6 +13,7 @@ const Booking       = require('../models/Booking');
 const Receipt       = require('../models/Receipt');
 const Inquiry       = require('../models/Inquiry');
 const notifications = require('../services/notification.service');
+const { applyPayment } = require('../services/bookingPayment.service');
 const ApiError      = require('../utils/ApiError');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ async function createBooking(req, res, next) {
       inquiryId:        inquiryId && isObjectId(inquiryId) ? inquiryId : null,
       property:         property || '',
       tenant:           tenant || '',
-      tenantPhone:      tenantPhone || '',
+      tenantPhone:      (tenantPhone && tenantPhone.trim().length >= 10) ? tenantPhone.trim() : null,
       leaseStart:       new Date(leaseStart),
       leaseEnd:         new Date(leaseEnd),
       monthlyRent:      rent,
@@ -79,6 +80,7 @@ async function listHostBookings(req, res, next) {
     const bookings = await Booking.find({ landlordId: req.user._id })
       .sort({ createdAt: -1 })
       .lean();
+    bookings.forEach(b => { b.id = String(b._id); delete b._id; });
     return res.json({ bookings });
   } catch (err) {
     return next(err);
@@ -97,6 +99,7 @@ async function listTenantBookings(req, res, next) {
     const bookings = await Booking.find({ $or: conditions })
       .sort({ createdAt: -1 })
       .lean();
+    bookings.forEach(b => { b.id = String(b._id); delete b._id; });
     return res.json({ bookings });
   } catch (err) {
     return next(err);
@@ -120,68 +123,28 @@ async function updateLedger(req, res, next) {
       throw ApiError.forbidden('এই বুকিং আপনার নয়।');
     }
 
-    const {
-      status = 'full', paid, paidOn, method, txnId,
-      amount, balance, dueNote, expectedPayBy,
-    } = req.body;
+    // All ledger writes (manual here + gateway webhook later) go through the
+    // shared helper, so the ledger row, receipt, and tenant notification stay
+    // perfectly consistent between the two paths.
+    const updated = await applyPayment({
+      booking,
+      monthKey,
+      source: 'manual',
+      payment: {
+        status:        req.body.status || 'full',
+        paidOn:        req.body.paidOn,
+        method:        req.body.method,
+        txnId:         req.body.txnId,
+        amount:        req.body.amount,
+        balance:       req.body.balance,
+        lateFee:       req.body.lateFee,
+        dueNote:       req.body.dueNote,
+        expectedPayBy: req.body.expectedPayBy,
+        monthLabel:    req.body.monthLabel,
+        totalDue:      req.body.totalDue,
+      },
+    });
 
-    const entry = {
-      paid:          status !== 'due',
-      status,
-      paidOn:        paidOn || '',
-      method:        method || '',
-      txnId:         txnId || '',
-      amount:        Number(amount) || 0,
-      balance:       Number(balance) || 0,
-      dueNote:       dueNote || '',
-      expectedPayBy: expectedPayBy || '',
-    };
-
-    booking.ledger.set(monthKey, entry);
-    await booking.save();
-
-    // ── Receipt upsert / cleanup ────────────────────────────────────────
-    if (status === 'full' || status === 'partial') {
-      await Receipt.findOneAndUpdate(
-        { bookingId: booking._id, monthKey },
-        {
-          $set: {
-            landlordId:    booking.landlordId,
-            tenantId:      booking.tenantId,
-            propertyId:    booking.propertyId,
-            propertyTitle: booking.property || '',
-            tenantPhone:   booking.tenantPhone || '',
-            monthLabel:    req.body.monthLabel || monthKey,
-            status,
-            totalDue:      Number(req.body.totalDue) || Number(booking.monthlyRent) || 0,
-            totalPaid:     Number(amount) || 0,
-            balance:       Number(balance) || 0,
-            method:        method || '',
-            txnId:         txnId || '',
-            paidOn:        paidOn || '',
-            issuedAt:      new Date(),
-            read:          false,
-          },
-        },
-        { upsert: true, new: true },
-      );
-
-      // Notify tenant
-      if (booking.tenantId) {
-        notifications.emit({
-          userId:  booking.tenantId,
-          type:    'rent_receipt',
-          title:   `ভাড়া রিসিট — ${booking.property || 'Property'}`,
-          body:    `${req.body.monthLabel || monthKey} এর ${status === 'full' ? 'সম্পূর্ণ' : 'আংশিক'} ভাড়া রিসিট পাওয়া গেছে।`,
-          data:    { bookingId: String(booking._id), monthKey },
-        });
-      }
-    } else {
-      // 'due' — remove stale receipt if exists
-      await Receipt.deleteOne({ bookingId: booking._id, monthKey }).catch(() => {});
-    }
-
-    const updated = await Booking.findById(id).lean();
     return res.json({ booking: updated });
   } catch (err) {
     return next(err);
@@ -209,6 +172,7 @@ async function undoLedger(req, res, next) {
     await Receipt.deleteOne({ bookingId: booking._id, monthKey }).catch(() => {});
 
     const updated = await Booking.findById(id).lean();
+    if (updated) { updated.id = String(updated._id); delete updated._id; }
     return res.json({ booking: updated });
   } catch (err) {
     return next(err);

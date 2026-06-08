@@ -19,6 +19,7 @@ const User          = require('../models/User');
 const Property      = require('../models/Property');
 const ApiError      = require('../utils/ApiError');
 const notifications = require('./notification.service');
+const cloudinary    = require('./cloudinary.service');
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 
@@ -168,6 +169,102 @@ async function sendMessage({ id, body, user }) {
   return msg;
 }
 
+/**
+ * Send an IMAGE or AUDIO message.
+ * Uploads the buffer (from multer memoryStorage) to Cloudinary, then creates
+ * a Message of the given type. Mirrors sendMessage's conversation bookkeeping
+ * (last-message preview, unread bump, peer notification).
+ *
+ * @param {object}  args
+ * @param {string}  args.id      conversation id
+ * @param {object}  args.user    req.user
+ * @param {Buffer}  args.buffer  file bytes (req.file.buffer)
+ * @param {string}  args.mimetype
+ * @param {string}  args.kind    'image' | 'audio'
+ * @param {string=} args.caption optional text caption (image only, usually '')
+ * @param {number=} args.durationSec optional voice length
+ */
+async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = '', durationSec = null }) {
+  const convo = await getConversationOr403({ id, user });
+
+  if (!buffer || !buffer.length) {
+    throw ApiError.badRequest('কোনো ফাইল পাওয়া যায়নি।', { code: 'no_file' });
+  }
+  if (kind !== 'image' && kind !== 'audio') {
+    throw ApiError.badRequest('অজানা মিডিয়া টাইপ।', { code: 'bad_kind' });
+  }
+
+  // Mime allow-list per kind.
+  const okImage = /^image\/(jpe?g|png|webp|gif|heic|heif)$/i.test(mimetype || '');
+  const okAudio = /^audio\/(webm|ogg|mpeg|mp3|mp4|m4a|aac|wav|x-m4a)$/i.test(mimetype || '');
+  if (kind === 'image' && !okImage) {
+    throw ApiError.badRequest('শুধু ছবি পাঠানো যাবে।', { code: 'bad_image_mime' });
+  }
+  if (kind === 'audio' && !okAudio) {
+    throw ApiError.badRequest('শুধু অডিও পাঠানো যাবে।', { code: 'bad_audio_mime' });
+  }
+
+  // Hard size cap (5 MB) — multer lets 8 MB through so we can give a clean error.
+  if (buffer.length > 5 * 1024 * 1024) {
+    throw ApiError.badRequest('ফাইল অনেক বড় (সর্বোচ্চ ৫ MB)।', { code: 'too_large' });
+  }
+
+  // Cloudinary: images as 'image', audio as 'video' (Cloudinary stores audio
+  // under the video resource type).
+  const resourceType = kind === 'image' ? 'image' : 'video';
+  const folder = `tolet-pro/chat/${String(convo._id)}`;
+
+  let up;
+  try {
+    // Upload the raw bytes untouched (no server-side transformation).
+    up = await cloudinary.uploadBuffer(buffer, { folder, resourceType, transformation: null });
+  } catch (e) {
+    if (e?.code === 'cloudinary_not_configured') throw e;
+    throw ApiError.badRequest('আপলোড ব্যর্থ হয়েছে।', { code: 'upload_failed' });
+  }
+
+  const cap = (caption || '').trim().slice(0, 4000);
+
+  const msg = await Message.create({
+    conversationId: convo._id,
+    senderId:       user._id,
+    type:           kind,
+    text:           cap,
+    mediaUrl:       up.secureUrl,
+    mediaPublicId:  up.publicId,
+    mediaMeta: {
+      durationSec: durationSec != null ? Number(durationSec) : null,
+      bytes:       up.bytes || buffer.length,
+      format:      up.format || null,
+    },
+    readBy: [user._id],
+  });
+
+  // Denormalised preview text shown in the sidebar.
+  const preview = kind === 'image' ? '📷 Photo' : '🎤 Voice message';
+
+  const peerId  = convo.participants.find((p) => String(p) !== String(user._id));
+  const peerKey = String(peerId);
+  convo.lastMessageText = cap ? `${preview}: ${cap}`.slice(0, 600) : preview;
+  convo.lastMessageAt   = msg.createdAt;
+  convo.lastSenderId    = user._id;
+  convo.unreadCounts    = convo.unreadCounts || new Map();
+  const prev            = convo.unreadCounts.get(peerKey) || 0;
+  convo.unreadCounts.set(peerKey, prev + 1);
+  convo.unreadCounts.set(String(user._id), 0);
+  await convo.save();
+
+  notifications.emit({
+    userId: peerId,
+    type:   'message_new',
+    title:  user.name || 'New message',
+    body:   preview,
+    data:   { conversationId: String(convo._id), messageId: String(msg._id) },
+  }).catch(() => {});
+
+  return msg;
+}
+
 async function markRead({ id, user }) {
   const convo = await getConversationOr403({ id, user });
   // Zero my unread counter.
@@ -188,5 +285,6 @@ module.exports = {
   listConversations,
   listMessages,
   sendMessage,
+  sendMediaMessage,
   markRead,
 };

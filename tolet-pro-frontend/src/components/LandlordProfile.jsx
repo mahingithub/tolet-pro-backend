@@ -205,10 +205,14 @@ const LandlordProfile = () => {
               </div>
 
               <div className="hidden md:flex gap-3">
-                <button className="bg-gray-100 text-gray-800 py-3 px-6 rounded-2xl font-black text-sm hover:bg-green-50 hover:text-green-600 transition-all flex items-center gap-2">
+                <button
+                  onClick={() => navigate('/messages', { state: { peerUserId: landlord.id || landlord._id || id, peerName: landlord.name, peerAvatar: avatar, mode: 'call', callType: 'voice' } })}
+                  className="bg-gray-100 text-gray-800 py-3 px-6 rounded-2xl font-black text-sm hover:bg-green-50 hover:text-green-600 transition-all flex items-center gap-2">
                   <Phone size={16} /> Call
                 </button>
-                <button className="bg-[#ba0036] text-white py-3 px-6 rounded-2xl font-black text-sm shadow-lg hover:bg-[#90002a] active:scale-95 transition-all flex items-center gap-2">
+                <button
+                  onClick={() => navigate('/messages', { state: { peerUserId: landlord.id || landlord._id || id, peerName: landlord.name, peerAvatar: avatar } })}
+                  className="bg-[#ba0036] text-white py-3 px-6 rounded-2xl font-black text-sm shadow-lg hover:bg-[#90002a] active:scale-95 transition-all flex items-center gap-2">
                   <MessageCircle size={16} /> Send Message
                 </button>
               </div>
@@ -253,10 +257,14 @@ const LandlordProfile = () => {
               </div>
 
               <div className="flex md:hidden gap-3 w-full">
-                <button className="flex-1 bg-gray-50 border border-gray-200 text-gray-800 py-3.5 rounded-2xl font-black text-sm active:scale-95 transition-all flex items-center justify-center gap-2">
+                <button
+                  onClick={() => navigate('/messages', { state: { peerUserId: landlord.id || landlord._id || id, peerName: landlord.name, peerAvatar: avatar, mode: 'call', callType: 'voice' } })}
+                  className="flex-1 bg-gray-50 border border-gray-200 text-gray-800 py-3.5 rounded-2xl font-black text-sm active:scale-95 transition-all flex items-center justify-center gap-2">
                   <Phone size={16} /> Call
                 </button>
-                <button className="flex-1 bg-[#ba0036] text-white py-3.5 rounded-2xl font-black text-sm shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2">
+                <button
+                  onClick={() => navigate('/messages', { state: { peerUserId: landlord.id || landlord._id || id, peerName: landlord.name, peerAvatar: avatar } })}
+                  className="flex-1 bg-[#ba0036] text-white py-3.5 rounded-2xl font-black text-sm shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2">
                   <MessageCircle size={16} /> Message
                 </button>
               </div>
@@ -302,6 +310,74 @@ const LandlordProfile = () => {
                 <p className="text-gray-600 font-medium leading-relaxed text-sm md:text-base">
                   {bio}
                 </p>
+              </div>
+            )}
+
+            {/* ── Preferences & Rules ── */}
+            {(landlord.preferredTenants?.length > 0 || landlord.houseRules?.length > 0 || landlord.serviceCharge !== null || landlord.communication?.length > 0) && (
+              <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+                {(landlord.preferredTenants?.length > 0 || landlord.communication?.length > 0) && (
+                  <div className="bg-white rounded-[2rem] border border-gray-100 p-6 shadow-[0_4px_20px_rgba(0,0,0,0.02)]">
+                    <h3 className="text-lg font-black text-gray-900 mb-4">Landlord Preferences</h3>
+                    
+                    {landlord.preferredTenants?.length > 0 && (
+                      <div className="mb-5">
+                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2.5">Preferred Tenants</p>
+                        <div className="flex flex-wrap gap-2">
+                          {landlord.preferredTenants.map((pt, i) => (
+                            <span key={i} className="bg-blue-50 text-blue-700 border border-blue-100 px-3 py-1.5 rounded-xl text-xs font-bold capitalize">
+                              {pt.replace('_', ' ')}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {landlord.communication?.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2.5">Preferred Contact</p>
+                        <div className="flex flex-wrap gap-2">
+                          {landlord.communication.map((cm, i) => (
+                            <span key={i} className="bg-gray-50 text-gray-600 border border-gray-200 px-3 py-1.5 rounded-xl text-xs font-bold capitalize">
+                              {cm.replace('_', ' ')}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                
+                {(landlord.houseRules?.length > 0 || landlord.serviceCharge !== null) && (
+                  <div className="bg-white rounded-[2rem] border border-gray-100 p-6 shadow-[0_4px_20px_rgba(0,0,0,0.02)]">
+                    <h3 className="text-lg font-black text-gray-900 mb-4">House Rules & Fees</h3>
+                    
+                    {landlord.houseRules?.length > 0 && (
+                      <div className="mb-5">
+                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2.5">House Rules</p>
+                        <ul className="space-y-2">
+                          {landlord.houseRules.map((hr, i) => (
+                            <li key={i} className="flex items-center gap-2 text-sm font-medium text-gray-600">
+                              <div className="w-1.5 h-1.5 rounded-full bg-[#ba0036]"></div>
+                              <span className="capitalize">{hr.replace(/_/g, ' ')}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {landlord.serviceCharge !== null && (
+                      <div>
+                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2.5">Service Charge</p>
+                        {landlord.serviceCharge > 0 ? (
+                          <p className="text-sm font-black text-gray-900">৳{landlord.serviceCharge.toLocaleString('en-IN')}<span className="text-xs text-gray-500 font-medium">/mo</span></p>
+                        ) : (
+                          <p className="text-sm font-bold text-green-600">No service charge</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

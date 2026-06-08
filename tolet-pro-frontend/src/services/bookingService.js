@@ -3,14 +3,13 @@
  * ──────────────────────────────────────────────────────────────────────────
  * Follows the same pattern as inquiryService.js / chatService.js:
  *   • Uses getCurrentToken() for Bearer auth
- *   • Falls back to import.meta.env.VITE_API_URL or localhost:5000
+ *   • Falls back to import.meta.env.VITE_API_BASE_URL or localhost:5000
  *   • Named exports (not a class)
  */
 
 import { getCurrentToken } from './authService';
 
-const BASE = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/+$/, '');
-
+const BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000').replace(/\/+$/, '').replace(/\/api$/, '');
 async function request(path, options = {}) {
   const token = getCurrentToken();
   const res = await fetch(`${BASE}${path}`, {

@@ -367,12 +367,12 @@ const VerificationModal = ({
     workPlace:        '',
     familySize:       null,
     emergencyName:    '',
-    emergencyPhone:   '',
+    emergencyPhone:   '+880',
     // Landlord
     ownerType:        '',
     propertyAddress:  '',
     caretakerName:    '',
-    caretakerPhone:   '',
+    caretakerPhone:   '+880',
     ownershipProof:   null,
     // Shared
     nidFront:         null,
@@ -402,7 +402,7 @@ const VerificationModal = ({
           ownerType:       initialData.ownerType       || '',
           propertyAddress: initialData.address         || initialData.propertyAddress || '',
           caretakerName:   initialData.caretaker?.name  || initialData.caretakerName  || '',
-          caretakerPhone:  initialData.caretaker?.phone || initialData.caretakerPhone || '',
+          caretakerPhone:  initialData.caretaker?.phone || initialData.caretakerPhone || '+880',
           // NID + ownershipProof intentionally NOT hydrated — file objects
           // can't survive a JSON round-trip; if the user already uploaded
           // them, the backend will already have the URLs and won't ask
@@ -415,7 +415,7 @@ const VerificationModal = ({
           workPlace:      initialData.workPlace      || '',
           familySize:     initialData.familySize     || null,
           emergencyName:  initialData.emergencyContact?.name  || '',
-          emergencyPhone: initialData.emergencyContact?.phone || '',
+          emergencyPhone: initialData.emergencyContact?.phone || '+880',
         };
       }
     }

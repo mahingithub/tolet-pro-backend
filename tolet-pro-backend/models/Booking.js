@@ -19,14 +19,18 @@ const mongoose = require('mongoose');
 const LedgerEntrySchema = new mongoose.Schema(
   {
     paid:          { type: Boolean, default: false },
-    status:        { type: String, enum: ['full', 'partial', 'due'], default: 'full' },
+    status:        { type: String, enum: ['scheduled', 'pending', 'due', 'overdue', 'full', 'partial'], default: 'full' },
     paidOn:        { type: String, default: '' },
     method:        { type: String, default: '' },
     txnId:         { type: String, default: '' },
     amount:        { type: Number, default: 0 },
     balance:       { type: Number, default: 0 },
+    lateFee:       { type: Number, default: 0 },
     dueNote:       { type: String, default: '' },
     expectedPayBy: { type: String, default: '' },
+    // How this entry was settled — distinguishes auto gateway payments from
+    // manual cash/host entries (HostDashboard shows a badge based on this).
+    paymentSource: { type: String, enum: ['manual', 'gateway'], default: 'manual' },
   },
   { _id: false },
 );
@@ -48,6 +52,8 @@ const BookingSchema = new mongoose.Schema(
     leaseEnd:         { type: Date, required: true },
     monthlyRent:      { type: Number, required: true, min: 0 },
     rentDueDay:       { type: Number, default: 5, min: 1, max: 28 },
+    gracePeriodDays:  { type: Number, default: 5, min: 0, max: 28 },
+    lateFeeAmount:    { type: Number, default: 500, min: 0 },
     reminderLeadDays: { type: Number, default: 3 },
     autoReminder:     { type: Boolean, default: true },
     serviceCharge:    { type: Number, default: 0 },

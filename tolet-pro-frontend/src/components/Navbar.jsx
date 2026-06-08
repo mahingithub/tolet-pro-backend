@@ -388,6 +388,10 @@ useEffect(() => {
             <h1 className="font-black text-base md:text-lg lg:text-xl tracking-tighter">
               <span className="text-gray-900">TO-LET</span> <span className="text-[#ba0036]">PRO</span>
             </h1>
+            {/* Beta badge (Phase 7) — signals the app is in beta testing. */}
+            <span className="ml-1 px-1.5 py-0.5 text-[9px] md:text-[10px] font-black uppercase tracking-wider text-[#ba0036] bg-red-50 border border-[#ba0036]/30 rounded-md leading-none self-center">
+              Beta
+            </span>
           </a>
 
           <div className={`hidden md:flex flex-1 justify-center transition-all duration-300 ${(isScrolled || compactHeader) ? 'opacity-100 translate-y-0 pointer-events-auto' : 'opacity-0 -translate-y-2 pointer-events-none absolute'}`}>

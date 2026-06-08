@@ -1,11 +1,21 @@
 // CallHistory.jsx
 //
 // The "Calls" tab of the Messages surface — a Messenger / WhatsApp-style
-// list of every call the user has made or received. Renders nothing on
-// its own outside the sidebar; it's mounted by ChatSystem when the user
-// flips the sidebar tab from Messages → Calls.
+// list of every call the user has made or received. Mounted by ChatSystem
+// when the sidebar tab flips Messages → Calls.
+//
+// Phase Call-4 additions:
+//   • Filter tabs: All / Missed / Incoming / Outgoing (Missed shows a red count)
+//   • Swipe a row right → call back, left → delete (framer-motion gestures)
+//   • Tap a row → open the call detail modal (onSelectCall)
+//
+// Icons: only lucide icons already proven elsewhere in the app are imported
+// (lucide-react is pinned old); the delete/trash glyph is inline SVG.
 
-import React from 'react';
+import React, { useState, useRef, useMemo } from 'react';
+import {
+  motion, AnimatePresence, useMotionValue, useTransform, animate,
+} from 'framer-motion';
 import {
   Phone, Video, PhoneIncoming, PhoneOutgoing, PhoneMissed,
   PhoneOff, Bot,
@@ -54,7 +64,8 @@ const statusVisuals = (call) => {
   return { Icon: PhoneOutgoing, color: 'text-blue-600',  label: 'Outgoing' };
 };
 
-const CallHistoryRow = ({ call, onCallBack }) => {
+// ─── The visible row content (shared; sits on top of the swipe actions) ──────
+const RowContent = ({ call, onCallBack }) => {
   const { Icon, color, label } = statusVisuals(call);
   const initials = (call.peer?.name || '?')
     .split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
@@ -63,7 +74,7 @@ const CallHistoryRow = ({ call, onCallBack }) => {
   const TypeIcon = call.type === 'video' ? Video : Phone;
 
   return (
-    <div className="group w-full text-left p-3 sm:p-4 rounded-2xl flex items-center gap-3 border border-transparent hover:bg-white/70 transition-all">
+    <div className="w-full p-3 sm:p-4 flex items-center gap-3">
       {/* Avatar */}
       <div className="relative shrink-0">
         {call.peer?.profilePicture ? (
@@ -96,9 +107,10 @@ const CallHistoryRow = ({ call, onCallBack }) => {
         </div>
       </div>
 
-      {/* Tap-to-call-back icon */}
+      {/* Tap-to-call-back icon (stops propagation so it doesn't open the modal) */}
       <button
-        onClick={() => onCallBack?.(call)}
+        onClick={(e) => { e.stopPropagation(); onCallBack?.(call); }}
+        onPointerDownCapture={(e) => e.stopPropagation()}
         className={`shrink-0 p-2.5 rounded-xl transition-all active:scale-90 ${
           call.type === 'video'
             ? 'bg-blue-50 hover:bg-blue-100 text-blue-600'
@@ -113,6 +125,82 @@ const CallHistoryRow = ({ call, onCallBack }) => {
   );
 };
 
+// ─── Swipeable wrapper: right → call back, left → delete, tap → details ──────
+const SWIPE_TRIGGER = 64;
+
+const SwipeableRow = ({ call, onCallBack, onSelectCall, onDelete }) => {
+  const x = useMotionValue(0);
+  const callOpacity = useTransform(x, [8, 56], [0, 1]);   // green reveal (right swipe)
+  const delOpacity  = useTransform(x, [-56, -8], [1, 0]); // red reveal (left swipe)
+  const draggedRef = useRef(false);
+
+  const snapBack = () => animate(x, 0, { type: 'spring', stiffness: 500, damping: 40 });
+
+  const handleDragEnd = (_e, info) => {
+    const dx = info.offset.x;
+    if (dx <= -SWIPE_TRIGGER) {
+      animate(x, -420, { duration: 0.18 });
+      setTimeout(() => onDelete?.(call), 160);
+    } else if (dx >= SWIPE_TRIGGER) {
+      snapBack();
+      onCallBack?.(call);
+    } else {
+      snapBack();
+    }
+  };
+
+  return (
+    <div className="relative overflow-hidden rounded-2xl">
+      {/* Call-back action (revealed on right swipe) */}
+      <motion.div
+        style={{ opacity: callOpacity }}
+        className="absolute inset-y-0 left-0 right-0 flex items-center pl-5 bg-green-500 rounded-2xl pointer-events-none"
+        aria-hidden="true"
+      >
+        <Phone size={20} className="text-white" />
+        <span className="ml-2 text-white font-black text-sm uppercase tracking-widest">Call back</span>
+      </motion.div>
+
+      {/* Delete action (revealed on left swipe) */}
+      <motion.div
+        style={{ opacity: delOpacity }}
+        className="absolute inset-y-0 left-0 right-0 flex items-center justify-end pr-5 bg-red-500 rounded-2xl pointer-events-none"
+        aria-hidden="true"
+      >
+        <span className="mr-2 text-white font-black text-sm uppercase tracking-widest">Delete</span>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+             stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+          <path d="M10 11v6M14 11v6" />
+        </svg>
+      </motion.div>
+
+      {/* Foreground (opaque so it hides the actions at rest) */}
+      <motion.div
+        drag="x"
+        dragDirectionLock
+        dragConstraints={{ left: -96, right: 96 }}
+        dragElastic={0.45}
+        style={{ x }}
+        onDragStart={() => { draggedRef.current = false; }}
+        onDrag={(_e, info) => { if (Math.abs(info.offset.x) > 6) draggedRef.current = true; }}
+        onDragEnd={handleDragEnd}
+        onClick={() => {
+          if (draggedRef.current) { draggedRef.current = false; return; }
+          onSelectCall?.(call);
+        }}
+        className="relative bg-white hover:bg-gray-50 rounded-2xl cursor-pointer select-none active:bg-gray-100 transition-colors"
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter') onSelectCall?.(call); }}
+      >
+        <RowContent call={call} onCallBack={onCallBack} />
+      </motion.div>
+    </div>
+  );
+};
+
+// ─── Day dividers ─────────────────────────────────────────────────────────
 const DayGroup = ({ label }) => (
   <div className="px-4 pt-4 pb-1 text-[9px] font-black uppercase tracking-[0.18em] text-gray-400">
     {label}
@@ -140,46 +228,128 @@ const groupByDay = (calls) => {
   return groups;
 };
 
-const CallHistory = ({ calls = [], onCallBack, isLoading = false, searchQuery = '' }) => {
+// ─── Filter tabs ────────────────────────────────────────────────────────────
+const FILTERS = [
+  { key: 'all',      label: 'All' },
+  { key: 'missed',   label: 'Missed' },
+  { key: 'incoming', label: 'Incoming' },
+  { key: 'outgoing', label: 'Outgoing' },
+];
+
+const matchesFilter = (c, filter) => {
+  if (filter === 'all') return true;
+  if (filter === 'missed') return c.status === 'missed';
+  if (filter === 'incoming') return c.direction === 'incoming';
+  if (filter === 'outgoing') return c.direction === 'outgoing';
+  return true;
+};
+
+const FilterTabs = ({ filter, setFilter, counts }) => (
+  <div className="flex gap-1.5 px-3 pb-2">
+    {FILTERS.map(({ key, label }) => {
+      const active = filter === key;
+      const showMissedBadge = key === 'missed' && counts.missed > 0;
+      return (
+        <button
+          key={key}
+          onClick={() => setFilter(key)}
+          className={`flex-1 px-2 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-1 ${
+            active ? 'bg-[#ba0036] text-white shadow-sm' : 'text-gray-500 hover:text-gray-800 hover:bg-white/60'
+          }`}
+        >
+          {label}
+          {showMissedBadge && (
+            <span className={`text-[8px] rounded-full min-w-[15px] h-[14px] px-1 inline-flex items-center justify-center ${
+              active ? 'bg-white/25 text-white' : 'bg-red-100 text-red-700'
+            }`}>{counts.missed}</span>
+          )}
+        </button>
+      );
+    })}
+  </div>
+);
+
+// ─── Main ────────────────────────────────────────────────────────────────
+const CallHistory = ({
+  calls = [],
+  onCallBack,
+  onSelectCall,
+  onDelete,
+  isLoading = false,
+  searchQuery = '',
+}) => {
+  const [filter, setFilter] = useState('all');
+
   const q = (searchQuery || '').trim().toLowerCase();
-  const filtered = q
-    ? calls.filter(c => (c.peer?.name || '').toLowerCase().includes(q))
-    : calls;
+  const searched = useMemo(
+    () => (q ? calls.filter(c => (c.peer?.name || '').toLowerCase().includes(q)) : calls),
+    [calls, q],
+  );
+
+  const counts = useMemo(() => ({
+    all: searched.length,
+    missed: searched.filter(c => c.status === 'missed').length,
+    incoming: searched.filter(c => c.direction === 'incoming').length,
+    outgoing: searched.filter(c => c.direction === 'outgoing').length,
+  }), [searched]);
+
+  const filtered = useMemo(
+    () => searched.filter(c => matchesFilter(c, filter)),
+    [searched, filter],
+  );
 
   const grouped = groupByDay(filtered);
 
-  if (isLoading && calls.length === 0) {
-    return (
-      <div className="text-center text-xs font-bold text-gray-400 py-10 px-4">
-        Loading call history…
-      </div>
-    );
-  }
-
-  if (filtered.length === 0) {
-    return (
-      <div className="text-center px-6 py-12">
-        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-gray-100 to-gray-200 text-gray-400 flex items-center justify-center mx-auto mb-3">
-          <Phone size={22}/>
-        </div>
-        <h4 className="text-sm font-black text-gray-700">
-          {q ? `No calls matching "${searchQuery}"` : 'No calls yet'}
-        </h4>
-        <p className="text-[11px] font-bold text-gray-400 mt-1 leading-relaxed max-w-[240px] mx-auto">
-          {q
-            ? 'Try a different name.'
-            : 'Voice and video calls will appear here. Tap the phone icon on any chat to start one.'}
-        </p>
-      </div>
-    );
-  }
-
   return (
-    <div className="space-y-1">
-      {grouped.map((g) =>
-        g.kind === 'divider'
-          ? <DayGroup key={g.id} label={g.label}/>
-          : <CallHistoryRow key={g.id} call={g.call} onCallBack={onCallBack}/>
+    <div>
+      <FilterTabs filter={filter} setFilter={setFilter} counts={counts} />
+
+      {isLoading && calls.length === 0 ? (
+        <div className="text-center text-xs font-bold text-gray-400 py-10 px-4">
+          Loading call history…
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center px-6 py-12">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-gray-100 to-gray-200 text-gray-400 flex items-center justify-center mx-auto mb-3">
+            <Phone size={22}/>
+          </div>
+          <h4 className="text-sm font-black text-gray-700">
+            {q
+              ? `No calls matching "${searchQuery}"`
+              : filter === 'all' ? 'No calls yet' : `No ${filter} calls`}
+          </h4>
+          <p className="text-[11px] font-bold text-gray-400 mt-1 leading-relaxed max-w-[240px] mx-auto">
+            {q
+              ? 'Try a different name.'
+              : filter === 'all'
+                ? 'Voice and video calls will appear here. Tap the phone icon on any chat to start one.'
+                : 'Switch filters to see your other calls.'}
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-1">
+          <AnimatePresence initial={false}>
+            {grouped.map((g) =>
+              g.kind === 'divider'
+                ? <DayGroup key={g.id} label={g.label}/>
+                : (
+                  <motion.div
+                    key={g.id}
+                    layout
+                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                    transition={{ duration: 0.18 }}
+                  >
+                    <SwipeableRow
+                      call={g.call}
+                      onCallBack={onCallBack}
+                      onSelectCall={onSelectCall}
+                      onDelete={onDelete}
+                    />
+                  </motion.div>
+                )
+            )}
+          </AnimatePresence>
+        </div>
       )}
     </div>
   );

@@ -11,7 +11,7 @@ const objectIdSchema = z
 // Status enum MUST match `models/Inquiry.js` (the InquirySchema's status
 // field). Earlier this exposed UI-only labels ('seen', 'replied', 'closed')
 // which the model rejected on save → every PATCH 500'd.
-const INQUIRY_STATUS = ['new', 'active', 'archived', 'converted', 'rejected'];
+const INQUIRY_STATUS = ['new', 'pending', 'accepted', 'rejected', 'archived', 'converted', 'active'];
 
 module.exports = {
   createInquiry: z.object({
