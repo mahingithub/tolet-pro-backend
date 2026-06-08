@@ -27,12 +27,14 @@ import { propertyService, subscribeUserProperties, propertyLocationHaystack } fr
 // ╚══════════════════════════════════════════════════════════════════════════╝
 import { GoogleMap, OverlayView, OverlayViewF, useJsApiLoader } from "@react-google-maps/api";
 
-// Pull the API key from whichever bundler the host project uses. Comment the
-// line that does NOT match your build tool — the other line stays.
+// Pull the API key from whichever bundler the host project uses. There is NO
+// hard-coded fallback: a Maps key shipped in source is a security risk, and an
+// empty key here cleanly degrades to the keyless iframe map below. Set
+// VITE_GOOGLE_MAPS_API_KEY on the FRONTEND host (Vercel), then redeploy.
 const GOOGLE_MAPS_API_KEY =
 	(typeof import.meta !== "undefined" && import.meta?.env?.VITE_GOOGLE_MAPS_API_KEY) ||
 	(typeof process !== "undefined" && process?.env?.REACT_APP_GOOGLE_MAPS_API_KEY) ||
-	"AIzaSyC9xWNjjSPhxy2aUWLubPqHR7N6KZWmKlg";
+	"";
 
 // Default centre — middle of Dhaka. Override via the prop on <MapView />.
 const DEFAULT_MAP_CENTER = { lat: 23.7652, lng: 90.3893 };
@@ -44,6 +46,8 @@ const MAP_STYLES = [
 	{ featureType: "poi.attraction", elementType: "labels", stylers: [{ visibility: "off" }] },
 	{ featureType: "transit", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
 ];
+
+const GOOGLE_MAPS_LIBRARIES = [];
 
 // ─── DATA SOURCE ──────────────────────────────────────────────────────────────
 // Listings now come from propertyService. No demo / hard-coded properties live
@@ -360,11 +364,12 @@ const MapView = ({ properties, highlightedId, onMarkerHover, onMarkerHoverEnd, o
 	);
 
 	// Load the Maps JS SDK once per page (the loader de-duplicates internally).
-	// NOTE: `libraries` prop is intentionally omitted — passing an empty array
-	// causes an internal constructor crash in some versions of @react-google-maps/api.
+	// Must match the options passed in other files exactly to avoid the
+	// "Loader must not be called again with different options" error.
 	const { isLoaded, loadError } = useJsApiLoader({
 		id: "tlp-google-map-script",
 		googleMapsApiKey: GOOGLE_MAPS_API_KEY,
+		libraries: GOOGLE_MAPS_LIBRARIES,
 	});
 
 	// TODO (backend): when the user pans/zooms the map, refetch properties
