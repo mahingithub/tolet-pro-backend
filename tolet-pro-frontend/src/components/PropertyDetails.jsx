@@ -1263,21 +1263,20 @@ const PropertyLocationMap = ({ lat, lng, title }) => {
     libraries: GOOGLE_MAPS_LIBRARIES,
   });
 
-  // Fallback (no API key OR loader error) → Google Maps iframe embed (no
-  // API key required). Matches the same approach used in AddProperty.jsx
-  // so the maps are visually consistent across the entire app.
+  // Fallback (no API key OR loader error) → static placeholder.
+  // Previously this rendered a Google Maps output=embed iframe, but that
+  // iframe loads Google's own internal Maps JS with their default key,
+  // causing a "NoApiKeys" console warning and a second uncontrolled Maps
+  // instance. A simple placeholder avoids that entirely.
   if (!GOOGLE_MAPS_API_KEY || loadError) {
     return (
-      <iframe
-        title={`Map location for ${title}`}
-        src={`https://www.google.com/maps?q=${lat},${lng}&hl=en&z=16&output=embed`}
-        width="100%"
-        height="100%"
-        loading="lazy"
-        referrerPolicy="no-referrer-when-downgrade"
-        style={{ border: 'none' }}
-        allowFullScreen
-      />
+      <div
+        style={{ width: '100%', height: '100%', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 8, borderRadius: 16 }}
+      >
+        <MapPin size={28} style={{ color: '#94a3b8' }} />
+        <span style={{ fontSize: 13, fontWeight: 800, color: '#64748b' }}>Map unavailable</span>
+        <span style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8' }}>Set VITE_GOOGLE_MAPS_API_KEY to enable the map</span>
+      </div>
     );
   }
 

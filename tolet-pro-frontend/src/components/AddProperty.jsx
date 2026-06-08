@@ -977,18 +977,20 @@ const GpsPanelMap = ({ lat, lng }) => {
     libraries: GOOGLE_MAPS_LIBRARIES,
   });
 
-  // Fallback — Google Maps iframe embed (no API key required)
+  // Fallback — static placeholder (no iframe).
+  // The old output=embed iframe loaded Google's own internal Maps JS with
+  // their default key, causing a "NoApiKeys" console warning. A simple
+  // placeholder avoids that entirely.
   if (!GOOGLE_MAPS_API_KEY || loadError) {
     return (
-      <iframe
-        title="Property location map"
-        src={`https://www.google.com/maps?q=${lat},${lng}&hl=en&z=16&output=embed`}
-        className="w-full h-52"
-        style={{ border: 0 }}
-        loading="lazy"
-        referrerPolicy="no-referrer-when-downgrade"
-        allowFullScreen
-      />
+      <div
+        className="w-full h-52 flex items-center justify-center flex-col gap-2"
+        style={{ background: '#f1f5f9', borderRadius: 16 }}
+      >
+        <MapPin size={24} style={{ color: '#94a3b8' }} />
+        <span style={{ fontSize: 12, fontWeight: 800, color: '#64748b' }}>Map unavailable</span>
+        <span style={{ fontSize: 10, fontWeight: 600, color: '#94a3b8' }}>Set VITE_GOOGLE_MAPS_API_KEY to enable the map</span>
+      </div>
     );
   }
 

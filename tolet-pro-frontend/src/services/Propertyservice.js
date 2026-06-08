@@ -574,8 +574,7 @@ export const propertyService = {
    * ✅ DELETE /api/properties/:id  (backend চালু থাকলে)
    *
    * Returns { ok, id, deletedBookings, deletedInquiries, deletedReceipts }
-   * on success. Throws with `e.code === 'active_bookings_exist'` (409) if
-   * there are active leases blocking deletion.
+   * on success.
    */
   async deleteProperty(id) {
     if (!getToken()) throw new Error('Sign in before deleting a property.');

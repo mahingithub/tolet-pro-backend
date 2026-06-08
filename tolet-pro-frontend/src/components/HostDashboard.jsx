@@ -1052,21 +1052,12 @@ const HostDashboard = () => {
       } catch (err) {
         // Re-add to the list on failure
         setProperties((prev) => [prop, ...prev]);
-        if (err.code === 'active_bookings_exist') {
-          showToast(
-            language === 'বাংলা'
-              ? `মুছতে পারেননি — ${err.activeBookings || ''}টি চলমান বুকিং আছে`
-              : `Cannot delete — ${err.activeBookings || ''} active booking(s) exist`,
-            { type: 'error' },
-          );
-        } else {
-          showToast(
-            language === 'বাংলা'
-              ? 'প্রপার্টি মুছতে সমস্যা হয়েছে'
-              : (err.message || 'Failed to delete property'),
-            { type: 'error' },
-          );
-        }
+        showToast(
+          language === 'বাংলা'
+            ? 'প্রপার্টি মুছতে সমস্যা হয়েছে'
+            : (err.message || 'Failed to delete property'),
+          { type: 'error' },
+        );
       } finally {
         setDeleteLoading(false);
       }
@@ -4467,8 +4458,8 @@ const HostDashboard = () => {
                       </p>
                       <p className="text-[10px] font-bold text-amber-700 mt-1 leading-relaxed">
                         {language === 'বাংলা'
-                          ? 'এই প্রপার্টির সাথে সম্পর্কিত সকল ইনকোয়ারি, সম্পন্ন বুকিং এবং রসিদ মুছে যাবে। চলমান বুকিং থাকলে ডিলিট হবে না।'
-                          : 'All related inquiries, completed bookings, and receipts will be permanently removed. Properties with active bookings cannot be deleted.'}
+                          ? 'এই প্রপার্টির সাথে সম্পর্কিত সকল ইনকোয়ারি, বুকিং (চলমান লিজ সহ) এবং রসিদ সম্পূর্ণভাবে মুছে যাবে।'
+                          : 'All related inquiries, bookings (including active leases), and receipts will be permanently removed.'}
                       </p>
                     </div>
                   </div>

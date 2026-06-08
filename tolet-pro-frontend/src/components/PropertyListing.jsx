@@ -47,8 +47,6 @@ const MAP_STYLES = [
 	{ featureType: "transit", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
 ];
 
-const GOOGLE_MAPS_LIBRARIES = [];
-
 // ─── DATA SOURCE ──────────────────────────────────────────────────────────────
 // Listings now come from propertyService. No demo / hard-coded properties live
 // in this file anymore — the only properties that ever render are:
@@ -364,12 +362,11 @@ const MapView = ({ properties, highlightedId, onMarkerHover, onMarkerHoverEnd, o
 	);
 
 	// Load the Maps JS SDK once per page (the loader de-duplicates internally).
-	// Must match the options passed in other files exactly to avoid the
-	// "Loader must not be called again with different options" error.
+	// NOTE: `libraries` prop is intentionally omitted — passing an empty array
+	// causes an internal constructor crash in some versions of @react-google-maps/api.
 	const { isLoaded, loadError } = useJsApiLoader({
 		id: "tlp-google-map-script",
 		googleMapsApiKey: GOOGLE_MAPS_API_KEY,
-		libraries: GOOGLE_MAPS_LIBRARIES,
 	});
 
 	// TODO (backend): when the user pans/zooms the map, refetch properties
@@ -406,23 +403,20 @@ const MapView = ({ properties, highlightedId, onMarkerHover, onMarkerHoverEnd, o
 	const onLoad = useCallback((map) => setMapInstance(map), []);
 	const onUnmount = useCallback(() => setMapInstance(null), []);
 
-	// ── Fallback: no API key → public iframe embed (no key required) ──────────
-	// Lets the page keep rendering before the key is provisioned.
+	// ── Fallback: no API key → static placeholder (NO Google embed iframe) ────
+	// We intentionally do NOT use a `google.com/maps?...&output=embed` iframe
+	// here: that embed page loads its OWN Maps JS internally (Google's default
+	// key + callback=onApiLoad), which surfaces a "NoApiKeys" console warning
+	// and a second Maps load we can't control. A plain placeholder avoids it.
 	if (!GOOGLE_MAPS_API_KEY) {
 		return (
-			<div className="relative w-full h-full rounded-[2rem] overflow-hidden bg-gray-100">
-				<iframe
-					title="Properties map"
-					src={`https://www.google.com/maps?q=${defaultCenter.lat},${defaultCenter.lng}&hl=en&z=${defaultZoom}&output=embed`}
-					width="100%"
-					height="100%"
-					loading="lazy"
-					referrerPolicy="no-referrer-when-downgrade"
-					style={{ border: "none", minHeight: 400 }}
-					allowFullScreen
-				/>
-				<div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-lg text-[10px] font-bold text-gray-600 shadow-sm border border-gray-100">
-					Add VITE_GOOGLE_MAPS_API_KEY to enable interactive markers
+			<div className="relative w-full h-full rounded-[2rem] overflow-hidden bg-gray-50 flex items-center justify-center" style={{ minHeight: 400 }}>
+				<div className="text-center px-6">
+					<div className="w-12 h-12 mx-auto rounded-full bg-gray-100 flex items-center justify-center mb-3">
+						<MapPin size={20} className="text-gray-400" />
+					</div>
+					<p className="text-sm font-black text-gray-900 mb-1">Map unavailable</p>
+					<p className="text-xs font-bold text-gray-500">Set VITE_GOOGLE_MAPS_API_KEY to enable the interactive map.</p>
 				</div>
 			</div>
 		);
