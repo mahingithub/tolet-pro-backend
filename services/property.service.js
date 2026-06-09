@@ -147,6 +147,24 @@ async function getPropertyById(idOrSlug) {
   return doc;
 }
 
+async function getSuggestions(q) {
+  const filter = searchService.buildSearchFilter({ q });
+  // We only want a few fields to build the autocomplete suggestions
+  const properties = await Property.find(filter)
+    .select('title location area district division')
+    .limit(20)
+    .lean();
+    
+  return properties.map(p => ({
+    id: String(p._id),
+    title: p.title || '',
+    location: p.location || '',
+    area: p.area || '',
+    district: p.district || '',
+    division: p.division || ''
+  }));
+}
+
 async function listProperties(query) {
   const filter = searchService.buildSearchFilter(query);
 
@@ -291,6 +309,7 @@ async function deleteProperty({ idOrSlug, user }) {
 module.exports = {
   createProperty,
   getPropertyById,
+  getSuggestions,
   listProperties,
   listMyProperties,
   updateProperty,

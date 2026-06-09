@@ -64,8 +64,7 @@ function isTenantProfileVerifiedEnough(tenantProfile) {
   const v  = tp.verification?.toObject?.() || tp.verification || {};
   const hasPhoto = !!v.photo;
   const hasNid   = !!(v.nidFront && v.nidBack);
-  const profOk   = !!v.professionProof || tp.professionType === 'other';
-  return hasPhoto && hasNid && profOk;
+  return hasPhoto && hasNid;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -225,7 +224,6 @@ async function submitVerification(req, res, next) {
       photo:              !!v.photo,
       nidFront:           !!v.nidFront,
       nidBack:            !!v.nidBack,
-      professionProof:    !!v.professionProof,
       submittedForReview: true,
       status:             'pending',
       reviewedAt:         null,
@@ -333,7 +331,7 @@ async function uploadAvatar(req, res, next) {
 //
 //   Path B — Fresh Landlord (no prior tenant verification, OR rejected)
 //     • body:  propertyAddress
-//     • files: utilityBill, nidFront, nidBack, photo, professionProof
+//     • files: utilityBill, nidFront, nidBack, photo
 //
 // We detect the path server-side from the user's existing
 // tenantProfile.verification.status. If a Path B user sends a partial
@@ -386,7 +384,6 @@ async function submitLandlordVerification(req, res, next) {
     const nidFront        = filesByField.nidFront        || null;
     const nidBack         = filesByField.nidBack         || null;
     const photo           = filesByField.photo           || null;
-    const professionProof = filesByField.professionProof || null;
 
     // ── Validate per path ────────────────────────────────────────────
     const missing = [];
@@ -399,7 +396,6 @@ async function submitLandlordVerification(req, res, next) {
       if (!nidFront        && !tv.nidFrontUrl)        missing.push('nidFront');
       if (!nidBack         && !tv.nidBackUrl)         missing.push('nidBack');
       if (!photo           && !tv.photoUrl)           missing.push('photo');
-      if (!professionProof && !tv.professionProofUrl) missing.push('professionProof');
     }
     if (missing.length > 0) {
       return res.status(400).json({
@@ -422,8 +418,7 @@ async function submitLandlordVerification(req, res, next) {
       assertMime(utilityBill,     'Utility bill');
       assertMime(nidFront,        'NID front');
       assertMime(nidBack,         'NID back');
-      assertMime(photo,           'Photo');
-      assertMime(professionProof, 'Profession proof');
+      assertMime(photo,           'Profile photo');
     } catch (e) {
       return res.status(e.status || 415).json({ message: e.message, code: e.code });
     }
@@ -471,7 +466,7 @@ async function submitLandlordVerification(req, res, next) {
       await uploadIfPresent(nidFront,        'nidFront',        'nid_front');
       await uploadIfPresent(nidBack,         'nidBack',         'nid_back');
       await uploadIfPresent(photo,           'photo',           'profile_photo');
-      await uploadIfPresent(professionProof, 'professionProof', 'profession_proof');
+
 
       // Mark tenant-side as pending too so the admin can approve both
       // queues from the same dashboard pass.

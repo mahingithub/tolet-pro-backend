@@ -24,7 +24,6 @@ const uploadLandlordVerificationFields = multer({
   { name: 'nidFront',        maxCount: 1 },
   { name: 'nidBack',         maxCount: 1 },
   { name: 'photo',           maxCount: 1 },
-  { name: 'professionProof', maxCount: 1 },
 ]);
 
 const router = express.Router();
@@ -61,8 +60,7 @@ router.post ('/me/avatar',              requireAuth, uploadSingle, additions.upl
 
 // ─── Landlord verification submission (Path A or B — see controller) ────────
 // Multi-file upload. Path A (verified tenant) sends only utilityBill.
-// Path B (fresh landlord) sends utilityBill + nidFront + nidBack +
-// photo + professionProof. The controller decides which path applies.
+// Path B // Requires multipart/form-data: utilityBill, nidFront, nidBack, photo. The controller decides which path applies.
 router.post(
   '/me/landlord-verification/submit',
   requireAuth,

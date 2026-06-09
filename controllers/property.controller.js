@@ -83,6 +83,15 @@ exports.createProperty = asyncH(async (req, res) => {
   res.status(201).json({ property: doc.toJSON() });
 });
 
+exports.getSuggestions = asyncH(async (req, res) => {
+  const q = req.query.q || '';
+  if (!q || q.length < 2) {
+    return res.json({ suggestions: [] });
+  }
+  const suggestions = await propertyService.getSuggestions(q);
+  res.json({ suggestions });
+});
+
 exports.getProperties = asyncH(async (req, res) => {
   const parsed = propertyValidators.listQuery.safeParse(req.query);
   if (!parsed.success) {

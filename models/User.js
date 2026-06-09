@@ -19,7 +19,6 @@ const VerificationSchema = new mongoose.Schema(
     photo:              { type: Boolean, default: false },
     nidFront:           { type: Boolean, default: false },
     nidBack:            { type: Boolean, default: false },
-    professionProof:    { type: Boolean, default: false },
 
     // ── Cloudinary URLs (display) + public_ids (deletion on replace).
     //     Empty string when no doc is uploaded. URLs are HTTPS-signed by
@@ -31,8 +30,6 @@ const VerificationSchema = new mongoose.Schema(
     nidFrontPublicId:          { type: String, default: '', maxlength: 200 },
     nidBackUrl:                { type: String, default: '', maxlength: 600 },
     nidBackPublicId:           { type: String, default: '', maxlength: 200 },
-    professionProofUrl:        { type: String, default: '', maxlength: 600 },
-    professionProofPublicId:   { type: String, default: '', maxlength: 200 },
 
     submittedForReview: { type: Boolean, default: false },
     status: {
@@ -267,9 +264,11 @@ const UserSchema = new mongoose.Schema(
     // dead tokens are pruned automatically when FCM reports them invalid.
     deviceTokens: [
       {
-        token:    { type: String, required: true },
-        platform: { type: String, default: 'web', maxlength: 20 },
-        addedAt:  { type: Date, default: Date.now },
+        token:      { type: String, required: true, index: true },
+        platform:   { type: String, default: 'web', maxlength: 20 },
+        userAgent:  { type: String, maxlength: 256 },
+        addedAt:    { type: Date, default: Date.now },
+        lastSeenAt: { type: Date, default: Date.now },
       }
     ],
     pendingDeletion: {

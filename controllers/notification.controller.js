@@ -41,13 +41,31 @@ exports.registerDevice = asyncH(async (req, res) => {
   if (!token || typeof token !== 'string') {
     return res.status(400).json({ message: 'token is required', code: 'token_required' });
   }
-  // Pull any existing copy first (dedupe), then push fresh — atomic-ish and
-  // avoids duplicate tokens piling up across logins on the same device.
-  await User.updateOne({ _id: req.user._id }, { $pull: { deviceTokens: { token } } });
+
+  const now = new Date();
+  const userAgent = (req.headers && req.headers['user-agent'])
+    ? String(req.headers['user-agent']).slice(0, 256)
+    : undefined;
+
+  // 1) Detach this token from EVERY user that currently holds it (including
+  //    this one). On a shared browser, or after logging in as a different
+  //    account on the same device, the same FCM token can otherwise stay
+  //    attached to an old user and misroute their calls/notifications to
+  //    whoever is using the device now. Clearing it everywhere first
+  //    guarantees single ownership (audit 6.4).
+  await User.updateMany(
+    { 'deviceTokens.token': token },
+    { $pull: { deviceTokens: { token } } },
+  );
+
+  // 2) Attach it fresh to the current user, with metadata for later cleanup.
+  const entry = { token, platform: platform || 'web', addedAt: now, lastSeenAt: now };
+  if (userAgent) entry.userAgent = userAgent;
   await User.updateOne(
     { _id: req.user._id },
-    { $push: { deviceTokens: { token, platform: platform || 'web', addedAt: new Date() } } },
+    { $push: { deviceTokens: entry } },
   );
+
   res.json({ registered: true });
 });
 
