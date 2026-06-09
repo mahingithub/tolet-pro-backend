@@ -27,11 +27,8 @@ import { propertyService, subscribeUserProperties, propertyLocationHaystack } fr
 // ╚══════════════════════════════════════════════════════════════════════════╝
 import { GoogleMap, OverlayView, OverlayViewF, useJsApiLoader } from "@react-google-maps/api";
 
-// Pull the API key from whichever bundler the host project uses. The literal
-// below is a LAST-RESORT fallback so the interactive map keeps working even if
-// the build's env var is missing. This key is restricted in Google Cloud
-// (locked to our domains + Maps JavaScript API only), so exposing it here is
-// low-risk — a Maps JS key is public in the browser bundle regardless.
+// Pull the API key from whichever bundler the host project uses. Comment the
+// line that does NOT match your build tool — the other line stays.
 const GOOGLE_MAPS_API_KEY =
 	(typeof import.meta !== "undefined" && import.meta?.env?.VITE_GOOGLE_MAPS_API_KEY) ||
 	(typeof process !== "undefined" && process?.env?.REACT_APP_GOOGLE_MAPS_API_KEY) ||
@@ -404,20 +401,23 @@ const MapView = ({ properties, highlightedId, onMarkerHover, onMarkerHoverEnd, o
 	const onLoad = useCallback((map) => setMapInstance(map), []);
 	const onUnmount = useCallback(() => setMapInstance(null), []);
 
-	// ── Fallback: no API key → static placeholder (NO Google embed iframe) ────
-	// We intentionally do NOT use a `google.com/maps?...&output=embed` iframe
-	// here: that embed page loads its OWN Maps JS internally (Google's default
-	// key + callback=onApiLoad), which surfaces a "NoApiKeys" console warning
-	// and a second Maps load we can't control. A plain placeholder avoids it.
+	// ── Fallback: no API key → public iframe embed (no key required) ──────────
+	// Lets the page keep rendering before the key is provisioned.
 	if (!GOOGLE_MAPS_API_KEY) {
 		return (
-			<div className="relative w-full h-full rounded-[2rem] overflow-hidden bg-gray-50 flex items-center justify-center" style={{ minHeight: 400 }}>
-				<div className="text-center px-6">
-					<div className="w-12 h-12 mx-auto rounded-full bg-gray-100 flex items-center justify-center mb-3">
-						<MapPin size={20} className="text-gray-400" />
-					</div>
-					<p className="text-sm font-black text-gray-900 mb-1">Map unavailable</p>
-					<p className="text-xs font-bold text-gray-500">Set VITE_GOOGLE_MAPS_API_KEY to enable the interactive map.</p>
+			<div className="relative w-full h-full rounded-[2rem] overflow-hidden bg-gray-100">
+				<iframe
+					title="Properties map"
+					src={`https://www.google.com/maps?q=${defaultCenter.lat},${defaultCenter.lng}&hl=en&z=${defaultZoom}&output=embed`}
+					width="100%"
+					height="100%"
+					loading="lazy"
+					referrerPolicy="no-referrer-when-downgrade"
+					style={{ border: "none", minHeight: 400 }}
+					allowFullScreen
+				/>
+				<div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-md px-3 py-1.5 rounded-lg text-[10px] font-bold text-gray-600 shadow-sm border border-gray-100">
+					Add VITE_GOOGLE_MAPS_API_KEY to enable interactive markers
 				</div>
 			</div>
 		);
@@ -702,6 +702,7 @@ const PropertyListing = () => {
 	// floor.
 	const [minPrice, setMinPrice] = useState(0);
 	const [maxPrice, setMaxPrice] = useState(300000);
+	const [selectedIntent, setSelectedIntent] = useState("");
 	const [selectedTypes, setSelectedTypes] = useState([]);
 	const [selectedCategories, setSelectedCategories] = useState([]);
 	const [selectedBeds, setSelectedBeds] = useState("any");
@@ -731,7 +732,7 @@ const PropertyListing = () => {
 			}
 			try {
 				const list = await propertyService.getProperties(
-					{ activeDivision, searchArea: debouncedSearch, nearMeLabel: t.nearMe || "Nearby Location" },
+					{ activeDivision, searchArea: debouncedSearch, nearMeLabel: t.nearMe || "Nearby Location", intent: selectedIntent, selectedCategories, selectedTypes, minPrice, maxPrice },
 					sortBy,
 				);
 				if (!cancelled) setProperties(Array.isArray(list) ? list : []);
@@ -747,7 +748,7 @@ const PropertyListing = () => {
 		load();
 		const unsub = subscribeUserProperties(load);
 		return () => { cancelled = true; unsub && unsub(); };
-	}, [activeDivision, debouncedSearch, propertyRefreshTick]);
+	}, [activeDivision, debouncedSearch, selectedIntent, selectedCategories, selectedTypes, minPrice, maxPrice, propertyRefreshTick, sortBy, t.nearMe]);
 
 	// ── LANDLORD LOOKUP FOR INQUIRY ─────────────────────────────────────────────
 	// Look up the landlord lazily when the inquiry modal opens so we don't issue
@@ -775,6 +776,16 @@ const PropertyListing = () => {
 		else if (initialBudget && initialBudget.includes("-")) {
 			const [mn, mx] = initialBudget.split("-").map(Number);
 			if (!isNaN(mn) && !isNaN(mx)) { setMinPrice(mn); setMaxPrice(mx); }
+		}
+
+		// ── Intent / Purpose ──────────────────────────────────────────────────────
+		const initialPurpose = searchParams.get("purpose");
+		if (initialPurpose === 'buy') {
+			setSelectedIntent('buy');
+		} else if (initialPurpose === 'rent') {
+			setSelectedIntent('rent');
+		} else if (initialPurpose === 'commercial') {
+			setSelectedIntent('commercial');
 		}
 
 		// ── Property Type (prop.type: apartment / studio / duplex …) ─────────────
@@ -1064,10 +1075,6 @@ const PropertyListing = () => {
 							{searchArea ? searchArea.charAt(0).toUpperCase() + searchArea.slice(1) : formattedDivision} {t.properties || "Properties"}
 						</span>
 						<div className="flex items-center gap-2 shrink-0">
-							<button onClick={() => setViewMode((v) => (v === "map" ? "list" : "map"))} className={`flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-black transition-all active:scale-95 ${isMapMode ? "bg-brandRed text-white shadow-md" : "bg-gray-100 text-gray-700 hover:bg-red-50 hover:text-brandRed"}`}>
-								{isMapMode ? <List size={14} /> : <Map size={14} />}
-								{isMapMode ? "List" : "Map"}
-							</button>
 							<button onClick={() => setIsMobileFilterOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-gray-100 rounded-full text-sm font-bold text-gray-700 active:scale-95 transition-transform">
 								<Filter size={16} /> {t.filtersBtn || "Filters"}
 							</button>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TO-LET PRO app icon.
+  ───────────────────────────────────────────────────────────────────────────
+  Brand red rounded square + white building glyph (matches the in-app logo).
+
+  ► TO CHANGE THE LOGO LATER:
+    The icon is just two parts below — the red background <rect> and the white
+    building <g id="building">. Either:
+      (a) tweak BRAND_RED below + the building paths, then regenerate the PNGs
+          with the project's icon-generation step, OR
+      (b) replace the generated PNGs in /public/icons and /public/apple-touch-icon.png
+          and /public/splash with your own artwork (keep the same filenames/sizes).
+    BRAND_RED is currently #ba0036 — change it in ONE place here (the rect fill)
+    and in manifest.json (theme_color) to recolour everything.
+-->
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Red rounded-square background. ~22% corner radius matches an iOS-style squircle look. -->
+  <rect x="0" y="0" width="512" height="512" rx="112" ry="112" fill="#ba0036"/>
+
+  <!-- White building glyph, centred. Simple flat shapes so it stays crisp at every size. -->
+  <g id="building" fill="#ffffff">
+    <!-- Main tower body -->
+    <rect x="176" y="150" width="160" height="226" rx="10"/>
+    <!-- Little roof cap / antenna base -->
+    <rect x="232" y="120" width="48" height="36" rx="8"/>
+    <!-- Door at the base -->
+    <rect x="236" y="320" width="40" height="56" rx="6" fill="#ba0036"/>
+    <!-- Windows: two columns, three rows (punched out in red) -->
+    <g fill="#ba0036">
+      <rect x="200" y="182" width="34" height="30" rx="5"/>
+      <rect x="278" y="182" width="34" height="30" rx="5"/>
+      <rect x="200" y="232" width="34" height="30" rx="5"/>
+      <rect x="278" y="232" width="34" height="30" rx="5"/>
+      <rect x="200" y="282" width="34" height="30" rx="5"/>
+      <rect x="278" y="282" width="34" height="30" rx="5"/>
+    </g>
+  </g>
+</svg>

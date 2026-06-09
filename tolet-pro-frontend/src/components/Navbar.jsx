@@ -374,6 +374,69 @@ useEffect(() => {
     </button>
   );
 
+  const [liveSuggestions, setLiveSuggestions] = useState([]);
+  const [mobileLiveSuggestions, setMobileLiveSuggestions] = useState([]);
+
+  useEffect(() => {
+    const raw = navLoc.trim();
+    if (raw.length < 2) {
+      setLiveSuggestions([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
+        const res = await fetch(`${API}/properties/suggestions?q=${encodeURIComponent(raw)}`);
+        if (res.ok) {
+          const data = await res.json();
+          setLiveSuggestions(data.suggestions || []);
+        }
+      } catch (err) {
+        console.error('Navbar autocomplete fetch error:', err);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [navLoc]);
+
+  useEffect(() => {
+    const raw = mobileNavLoc.trim();
+    if (raw.length < 2) {
+      setMobileLiveSuggestions([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
+        const res = await fetch(`${API}/properties/suggestions?q=${encodeURIComponent(raw)}`);
+        if (res.ok) {
+          const data = await res.json();
+          setMobileLiveSuggestions(data.suggestions || []);
+        }
+      } catch (err) {
+        console.error('Mobile Navbar autocomplete fetch error:', err);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [mobileNavLoc]);
+
+  const getFilteredSuggestions = (q, liveData) => {
+    const staticMatches = allSuggestions.filter(s => s.title.toLowerCase().includes(q));
+    const dynMatches = liveData.flatMap(p => {
+      const entries = [];
+      if (p?.location && p.location.toLowerCase().includes(q))
+        entries.push({ id: `nloc-${p.id}`, title: p.location, type: 'Property Area', category: 'area' });
+      if (p?.area && p.area.toLowerCase().includes(q))
+        entries.push({ id: `narea-${p.id}`, title: p.area, type: 'Area', category: 'area' });
+      if (p?.title && p.title.toLowerCase().includes(q))
+        entries.push({ id: `ntitle-${p.id}`, title: p.title, type: 'Property', category: 'search' });
+      return entries;
+    });
+
+    return [...staticMatches, ...dynMatches].filter(
+      (s, i, arr) => arr.findIndex(x => x.title.toLowerCase() === s.title.toLowerCase()) === i
+    );
+  };
+
   return (
     <>
       {/* z-[60] keeps this global header (and its city dropdowns) ABOVE every
@@ -438,7 +501,7 @@ useEffect(() => {
                     )}
                     {navLoc && (() => {
                       const q = navLoc.trim().toLowerCase();
-                      const matches = allSuggestions.filter(s => s.title.toLowerCase().includes(q));
+                      const matches = getFilteredSuggestions(q, liveSuggestions);
                       const results = matches.length > 0 ? matches.slice(0, 7) : [
                         { id: `dyn-${q}`, title: navLoc.trim(), type: 'Search Anywhere', category: 'search' },
                         { id: `dyn-bd-${q}`, title: `${navLoc.trim()}, Bangladesh`, type: 'Location', category: 'city' },
@@ -747,7 +810,7 @@ useEffect(() => {
                   )}
                   {mobileNavLoc && (() => {
                     const q = mobileNavLoc.trim().toLowerCase();
-                    const matches = allSuggestions.filter(s => s.title.toLowerCase().includes(q));
+                    const matches = getFilteredSuggestions(q, mobileLiveSuggestions);
                     const results = matches.length > 0 ? matches.slice(0, 6) : [
                       { id: `mdyn-${q}`, title: mobileNavLoc.trim(), type: 'Search Anywhere', category: 'search' },
                       { id: `mdyn-bd-${q}`, title: `${mobileNavLoc.trim()}, Bangladesh`, type: 'Location', category: 'city' },

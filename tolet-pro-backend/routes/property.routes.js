@@ -12,6 +12,7 @@ const router = express.Router();
 // Anyone can browse properties — no auth needed. Search + filters come in via
 // querystring, validated inside the controller.
 router.get('/',    ctl.getProperties);
+router.get('/suggestions', ctl.getSuggestions);
 router.get('/:id', ctl.getPropertyById);
 
 // ─── Host-scoped writes ────────────────────────────────────────────────────
