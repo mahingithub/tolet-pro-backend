@@ -32,11 +32,11 @@ MessageSchema.set('toJSON', {
 
 const SupportTicketSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, indexed: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     userName: { type: String, required: true },
     userPhone: { type: String, required: true },
     subject: { type: String, required: true },
-    status: { type: String, enum: ['open', 'pending_user', 'resolved', 'closed'], default: 'open', indexed: true },
+    status: { type: String, enum: ['open', 'pending_user', 'resolved', 'closed'], default: 'open', index: true },
     priority: { type: String, enum: ['low', 'normal', 'urgent'], default: 'normal' },
     
     assignedAdminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
