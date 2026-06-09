@@ -267,9 +267,11 @@ const UserSchema = new mongoose.Schema(
     // dead tokens are pruned automatically when FCM reports them invalid.
     deviceTokens: [
       {
-        token:    { type: String, required: true },
-        platform: { type: String, default: 'web', maxlength: 20 },
-        addedAt:  { type: Date, default: Date.now },
+        token:      { type: String, required: true, index: true },
+        platform:   { type: String, default: 'web', maxlength: 20 },
+        userAgent:  { type: String, maxlength: 256 },
+        addedAt:    { type: Date, default: Date.now },
+        lastSeenAt: { type: Date, default: Date.now },
       }
     ],
     pendingDeletion: {
