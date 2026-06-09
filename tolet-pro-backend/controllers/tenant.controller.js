@@ -91,7 +91,6 @@ async function getTenant(req, res, next) {
         photo:              !!v.photo,
         nidFront:           !!v.nidFront,
         nidBack:            !!v.nidBack,
-        professionProof:    !!v.professionProof,
         submittedForReview: !!v.submittedForReview,
         status:             v.status || 'unverified',
       },

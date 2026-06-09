@@ -46,11 +46,9 @@ function computeTenantTrust(profile = {}, parentDoc = {}) {
     // Phone OTP — trustworthy without admin review (Firebase did it).
     { pts: 20, done: !!parentDoc.phone },
     // Profile photo — user-uploaded, not claimed to be govt-verified.
-    { pts: 20, done: !!v.photo },
+    { pts: 30, done: !!v.photo },
     // NID — admin must have approved. Uploaded-but-pending = 0 pts.
-    { pts: 30, done: adminApproved && !!(v.nidFront && v.nidBack) },
-    // Profession proof — admin-approved, OR self-declared "other".
-    { pts: 30, done: adminApproved && (!!v.professionProof || profile.professionType === 'other') },
+    { pts: 50, done: adminApproved && !!(v.nidFront && v.nidBack) },
   ];
   const score = items.reduce((s, i) => (i.done ? s + i.pts : s), 0);
   return { score, tier: tierFor(score) };
@@ -70,18 +68,24 @@ function computeTenantTrust(profile = {}, parentDoc = {}) {
 // blueprint's "soft trust" idea for landlord listings.
 function computeLandlordTrust(user = {}) {
   const lp = user.landlordProfile || {};
-  const v = (user.tenantProfile && user.tenantProfile.verification) || {};
-  const adminApproved = v.status === 'verified';
+  const tp = user.tenantProfile || {};
+  
+  const vLandlord = lp.verification || {};
+  const vTenant = tp.verification || {};
+  
+  const isLandlordVerified = vLandlord.status === 'verified';
+  const isTenantVerified = vTenant.status === 'verified';
+  const adminApproved = isLandlordVerified || isTenantVerified;
+
   const items = [
     // Phone OTP
     { pts: 20, done: !!user.phone },
     // Avatar uploaded
     { pts: 10, done: !!user.avatar },
-    // Verification photo (selfie) — landlords share the same verification
-    // sub-document as tenants for now.
-    { pts: 20, done: !!v.photo },
+    // Verification photo (selfie)
+    { pts: 20, done: !!vLandlord.photo || !!vTenant.photo },
     // NID admin-approved
-    { pts: 25, done: adminApproved && !!(v.nidFront && v.nidBack) },
+    { pts: 25, done: adminApproved && (!!(vLandlord.nidFront && vLandlord.nidBack) || !!(vTenant.nidFront && vTenant.nidBack)) },
     // Landlord Preferences
     { pts: 5, done: (lp.preferredTenants || []).length > 0 },
     { pts: 5, done: (lp.communication || []).length > 0 },

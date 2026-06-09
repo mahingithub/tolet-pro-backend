@@ -29,12 +29,10 @@ const DOC_KINDS = {
   photo:           { field: 'photo',           publicId: 'profile_photo' },
   nidFront:        { field: 'nidFront',        publicId: 'nid_front' },
   nidBack:         { field: 'nidBack',         publicId: 'nid_back' },
-  professionProof: { field: 'professionProof', publicId: 'profession_proof' },
 };
 
-// Allowed mime types — PDF accepted for profession proof (offer letters etc.).
+// Allowed mime types.
 const ALLOWED_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const ALLOWED_ANY_MIMES   = new Set([...ALLOWED_IMAGE_MIMES, 'application/pdf']);
 const MAX_BYTES = 5 * 1024 * 1024; // 5 MB — matches the Cloudinary preset cap
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -55,12 +53,10 @@ exports.uploadDoc = asyncH(async (req, res) => {
   if (req.file.size > MAX_BYTES) {
     throw ApiError.badRequest('File is too large. Maximum size is 5 MB.');
   }
-  const allowed = kind === 'professionProof' ? ALLOWED_ANY_MIMES : ALLOWED_IMAGE_MIMES;
+  const allowed = ALLOWED_IMAGE_MIMES;
   if (!allowed.has(req.file.mimetype)) {
     throw ApiError.badRequest(
-      `Unsupported file type: ${req.file.mimetype}. Use JPG, PNG, WEBP${
-        kind === 'professionProof' ? ' or PDF' : ''
-      }.`,
+      `Unsupported file type: ${req.file.mimetype}. Use JPG, PNG, or WEBP.`,
     );
   }
 
@@ -74,7 +70,7 @@ exports.uploadDoc = asyncH(async (req, res) => {
   const previousPublicId = verif[`${slot.field}PublicId`];
   if (previousPublicId) {
     await cloud.destroy(previousPublicId, {
-      resourceType: kind === 'professionProof' ? 'auto' : 'image',
+      resourceType: 'image',
     });
   }
 
@@ -83,7 +79,7 @@ exports.uploadDoc = asyncH(async (req, res) => {
   const result = await cloud.uploadBuffer(req.file.buffer, {
     folder,
     publicId: slot.publicId,
-    resourceType: kind === 'professionProof' ? 'auto' : 'image',
+    resourceType: 'image',
   });
 
   // ─── Persist on the user doc ──────────────────────────────────────────
@@ -131,7 +127,7 @@ exports.deleteDoc = asyncH(async (req, res) => {
   const publicId = verif[`${slot.field}PublicId`];
   if (publicId) {
     await cloud.destroy(publicId, {
-      resourceType: kind === 'professionProof' ? 'auto' : 'image',
+      resourceType: 'image',
     });
   }
 

@@ -104,7 +104,6 @@ async function getLandlord(req, res, next) {
         status:                identityStatus,
         photoVerified:         !!tv.photo           && identityStatus === 'verified',
         nidVerified:           !!(tv.nidFront && tv.nidBack) && identityStatus === 'verified',
-        professionVerified:    !!tv.professionProof && identityStatus === 'verified',
       },
       landlord: {
         status:                propertyStatus,
