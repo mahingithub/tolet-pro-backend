@@ -120,16 +120,33 @@ function buildSearchHaystack(doc) {
     .replace(/\s+/g, ' ');
 }
 
+// ─── Media validation (audit 4.4) ──────────────────────────────────────────
+// Real photos/videos must be uploaded (Cloudinary) and stored as https URLs.
+// Inline base64 (data: URIs) bloats documents — big listings blew past memory
+// on list queries and pushed docs toward Mongo's 16MB limit. A tiny data: URI
+// (e.g. a placeholder pixel) is tolerated, but anything larger is rejected so a
+// full base64 image/video can never be persisted again. Hosted URLs always pass.
+const MAX_INLINE_MEDIA = 4 * 1024; // 4KB — tiny threshold; real media is far larger
+function rejectInlineMedia(v) {
+  if (!v) return true; // empty / optional is fine
+  if (/^\s*data:/i.test(v) && v.length > MAX_INLINE_MEDIA) return false;
+  return true;
+}
+const inlineMediaValidator = {
+  validator: rejectInlineMedia,
+  message: 'Inline base64 media is not allowed — upload the file and save its URL instead.',
+};
+
 // ─── SUB-SCHEMAS ───────────────────────────────────────────────────────────
 const RoomPhotoSchema = new mongoose.Schema(
   {
     room: { type: String, trim: true, default: 'other', maxlength: 40 },
-    // Either a data: URL (base64 inline) or an https URL. We cap the length
-    // so an oversized upload can't blow up the document past Mongo's 16MB
-    // doc limit on its own.
-    url:  { type: String, trim: true, required: true, maxlength: 4_000_000 },
+    // Hosted (https) URL only — uploaded to Cloudinary by the client. Inline
+    // base64 is rejected by inlineMediaValidator (audit 4.4); the short maxlength
+    // is a second guard so an oversized payload can't bloat the document.
+    url:  { type: String, trim: true, required: true, maxlength: 8192, validate: inlineMediaValidator },
     // Optional compressed/card-sized version. Detail pages still read `url`.
-    thumbUrl: { type: String, trim: true, default: '', maxlength: 1_000_000 },
+    thumbUrl: { type: String, trim: true, default: '', maxlength: 8192, validate: inlineMediaValidator },
   },
   { _id: false }
 );
@@ -168,21 +185,20 @@ const PropertySchema = new mongoose.Schema(
     furnishing:  { type: String, enum: FURNISHINGS, default: 'Unfurnished' },
 
     amenities:   { type: [String], default: [] },
-    // Inline image storage — either base64 data URL or http URL. Mirrors the
-    // shape the wizard already builds (`form.coverPhoto.preview`) so the
-    // frontend doesn't need to change to talk to the API.
-    coverPhoto:  { type: String, trim: true, default: '', maxlength: 4_000_000 },
+    // Hosted (https) cover image URL — uploaded to Cloudinary by the wizard.
+    // Inline base64 is rejected (audit 4.4); short maxlength is a second guard.
+    coverPhoto:  { type: String, trim: true, default: '', maxlength: 8192, validate: inlineMediaValidator },
     // Optional card-sized cover image used only by listing/dashboard payloads.
-    coverPhotoThumb: { type: String, trim: true, default: '', maxlength: 1_000_000 },
+    coverPhotoThumb: { type: String, trim: true, default: '', maxlength: 8192, validate: inlineMediaValidator },
     roomPhotos:  { type: [RoomPhotoSchema], default: [] },
     // YouTube ID (e.g. 'O-P_J_gvALE'). Optional second video source.
     videoId:     { type: String, trim: true, default: '', maxlength: 200 },
-    // Locally-uploaded video walkthrough (data: URL OR https URL). Sits
-    // alongside videoId so a host can attach a raw clip even when no
-    // YouTube version exists — video walkthroughs are now the primary
-    // listing media per the design brief ("video walkthroughs prioritised
-    // over photos in initial listing views").
-    videoUrl:    { type: String, trim: true, default: '', maxlength: 25_000_000 },
+    // Locally-recorded video walkthrough — uploaded to Cloudinary, stored as an
+    // https URL. Sits alongside videoId so a host can attach a raw clip even
+    // when no YouTube version exists — video walkthroughs are now the primary
+    // listing media per the design brief ("video walkthroughs prioritised over
+    // photos in initial listing views"). Inline base64 is rejected (audit 4.4).
+    videoUrl:    { type: String, trim: true, default: '', maxlength: 8192, validate: inlineMediaValidator },
 
     // Which floor the unit sits on ("On which floor is this property located?")
     // — 0 = ground, negative = basement levels.
