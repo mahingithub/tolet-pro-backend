@@ -39,12 +39,13 @@ async function getLandlord(req, res, next) {
     // ── Derive cheap aggregates from their property list. We intentionally
     // skip ratings / reviews aggregates for now — pending the rating
     // pipeline. The frontend already handles missing values.
-    const properties = await Property.find({
+    // Only the COUNT is needed for the public card — never load the full
+    // (potentially media-heavy) property documents just to read `.length`
+    // off them (audit 5.3).
+    const totalProperties = await Property.countDocuments({
       ownerUserId: user._id,
       status: 'active',
-    }).lean();
-
-    const totalProperties = properties.length;
+    });
     const createdAt       = user.createdAt || new Date();
     const memberSince     = createdAt.getFullYear ? createdAt.getFullYear().toString()
                                                   : new Date(createdAt).getFullYear().toString();
@@ -104,7 +105,6 @@ async function getLandlord(req, res, next) {
         status:                identityStatus,
         photoVerified:         !!tv.photo           && identityStatus === 'verified',
         nidVerified:           !!(tv.nidFront && tv.nidBack) && identityStatus === 'verified',
-        professionVerified:    !!tv.professionProof && identityStatus === 'verified',
       },
       landlord: {
         status:                propertyStatus,

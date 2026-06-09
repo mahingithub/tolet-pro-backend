@@ -179,6 +179,20 @@ async function resetPassword({ resetToken, password }) {
   }
   const user = await User.findById(decoded.sub).select('+password');
   if (!user) throw ApiError.notFound('অ্যাকাউন্ট পাওয়া যায়নি।');
+
+  // One-time use (audit 5.7): a reset token is only accepted if it was issued
+  // at or after the user's most recent password change. The moment this token
+  // is consumed below, `passwordChangedAt` jumps forward — so the same token
+  // (and any other token minted before this change) can no longer be replayed.
+  const changedAtSec = user.passwordChangedAt
+    ? Math.floor(new Date(user.passwordChangedAt).getTime() / 1000)
+    : 0;
+  if (typeof decoded.iat === 'number' && decoded.iat < changedAtSec) {
+    throw ApiError.unauthorized('এই রিসেট লিংকটি আর বৈধ নয়। নতুন করে রিসেট করুন।', {
+      code: 'reset_token_used',
+    });
+  }
+
   user.password = await bcrypt.hash(password, env.bcryptRounds);
   user.passwordChangedAt = new Date();
   user.loginAttempts = 0;
