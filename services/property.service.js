@@ -28,6 +28,16 @@ function normaliseRoomPhotos(input) {
     .filter((p) => p.url);
 }
 
+// Intent-specific details are an open-shaped bag (Mixed in the model). The v1
+// guard is deliberately loose (Option B): accept a plain object as-is, and
+// collapse anything that isn't one (array / string / number / null / undefined)
+// to {}. The SHAPE of the fields inside — tenantPreference, landMeasurement,
+// gasLine, etc. — is owned by the wizard per intent+type and is NOT validated
+// here. This keeps a malformed bag from ever blocking a submission.
+function normaliseSpecificDetails(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
 // ─── LIST-RESPONSE BASE64 GUARD ──────────────────────────────────────────────
 // Older listings (created before the Cloudinary migration) stored cover/room
 // images as base64 `data:` URLs — `coverPhotoThumb` alone could be ~1MB. When a
@@ -108,6 +118,11 @@ const LIST_CARD_PROJECT = {
   slug: 1,
   createdAt: 1,
   updatedAt: 1,
+  // NOTE: specificDetails is intentionally NOT projected onto list cards — it
+  // keeps the feed payload lean. The detail endpoint (getPropertyById → toJSON)
+  // returns the full bag. `intent` IS on the card so the tab UI can render
+  // intent-aware card layouts without an extra fetch. If a particular card ever
+  // needs one specific field (e.g. land size), add just that path here.
 };
 
 function gpsFromBody(body) {
@@ -162,6 +177,9 @@ async function createProperty({ body, user }) {
     coverPhotoThumb: normaliseThumbnail(body.coverPhotoThumb),
     videoId:     body.videoId     || '',
     videoUrl:    body.videoUrl    || '',
+    // Intent-specific details bag (rent/sale/commercial fields). Sanitised to a
+    // plain object; the model stores it as Mixed. undefined/garbage → {}.
+    specificDetails: normaliseSpecificDetails(body.specificDetails),
     price:       body.price,
     originalPrice: body.price,
     status:      body.status      || 'active',
@@ -297,6 +315,17 @@ async function updateProperty({ idOrSlug, body, user }) {
   if (Object.prototype.hasOwnProperty.call(body, 'roomPhotos')) {
     doc.roomPhotos = normaliseRoomPhotos(body.roomPhotos);
   }
+  // specificDetails is a Mixed bag — REPLACE it wholesale when (and only when)
+  // the caller sends it. The wizard re-bundles the complete object on every
+  // edit, so a merge would strand stale keys when a host switches intent/type
+  // (e.g. rent→sale should drop the rent-only fields, not keep them). Guarding
+  // on hasOwnProperty means a partial update (e.g. just `price`) never wipes it.
+  // Mongoose cannot auto-detect in-place Mixed changes, so markModified is
+  // MANDATORY here — without it, save() is a silent no-op for this field.
+  if (Object.prototype.hasOwnProperty.call(body, 'specificDetails')) {
+    doc.specificDetails = normaliseSpecificDetails(body.specificDetails);
+    doc.markModified('specificDetails');
+  }
   if (body.gpsLat !== undefined || body.gpsLng !== undefined || body.gpsAddress !== undefined) {
     doc.gps = {
       lat: body.gpsLat !== undefined
@@ -352,5 +381,5 @@ module.exports = {
   updateProperty,
   deleteProperty,
   // Exported for tests / future controllers.
-  _internal: { normaliseRoomPhotos, gpsFromBody, findIdOrSlug },
+  _internal: { normaliseRoomPhotos, normaliseSpecificDetails, gpsFromBody, findIdOrSlug },
 };

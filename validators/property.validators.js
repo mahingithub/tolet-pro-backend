@@ -21,6 +21,15 @@ const categorySchema   = z.enum(ENUMS.CATEGORIES).default('family');
 const furnishingSchema = z.enum(ENUMS.FURNISHINGS).default('Unfurnished');
 const statusSchema     = z.enum(ENUMS.STATUSES).default('active');
 
+// Intent-specific details bag. v1 contract is deliberately LOOSE (Option B):
+// we only assert the SHAPE is a JSON object (z.record rejects arrays/strings/
+// null), not the keys inside it — those depend on intent+type and are owned by
+// the wizard. No `.default({})` here on purpose: defaulting would make the key
+// always "present", and on a PATCH that the caller never intended to touch, the
+// service would then overwrite the stored bag with {}. We let the service apply
+// the {} default on create and skip the field entirely on an absent PATCH.
+const specificDetailsSchema = z.record(z.any());
+
 // Accept numeric inputs as either real numbers or numeric strings (the wizard
 // sometimes sends "1200" instead of 1200) — coerce on the way in.
 const numField = (min, max) =>
@@ -95,6 +104,8 @@ module.exports = {
     videoUrl:    z.union([videoUrlSchema, z.literal('')]).optional().default(''),
     // "On which floor is this property located?" — new wizard field.
     floorNumber: numField(-5, 200).optional().default(0),
+    // Intent-specific details (rent/sale/commercial). Loose object — see schema.
+    specificDetails: specificDetailsSchema.optional(),
   }),
 
   // PATCH bodies — every field optional. We still validate types/enums.
@@ -125,6 +136,9 @@ module.exports = {
     videoId:     z.string().trim().max(200).optional(),
     videoUrl:    z.union([videoUrlSchema, z.literal('')]).optional(),
     floorNumber: numField(-5, 200).optional(),
+    // Intent-specific details. MUST be declared here too — updateProperty is
+    // .strict(), so an undeclared key would be rejected outright on edit.
+    specificDetails: specificDetailsSchema.optional(),
   }).strict().refine(
     (obj) => Object.keys(obj).length > 0,
     'আপডেট করার মতো কোনো তথ্য পাওয়া যায়নি।'
