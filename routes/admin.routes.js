@@ -43,11 +43,14 @@ router.post('/users/:id/reject-landlord',            ctl.rejectLandlord);
 // ─── Account moderation ────────────────────────────────────────────────────
 router.post('/users/:id/ban',               ctl.banUser);
 router.post('/users/:id/unban',             ctl.unbanUser);
+router.delete('/users/:id',                 ctl.deleteUser);
 
 // ─── Property moderation ───────────────────────────────────────────────────
 // /api/admin/properties               — list all listings (filterable)
 // /api/admin/properties/:id/moderate  — { action: 'approve'|'reject'|'remove' }
+// /api/admin/properties/:id           — DELETE permanently
 router.get ('/properties',                  ctl.listAllProperties);
 router.post('/properties/:id/moderate',     ctl.moderateProperty);
+router.delete('/properties/:id',            ctl.deleteProperty);
 
 module.exports = router;
