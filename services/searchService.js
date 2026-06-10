@@ -28,6 +28,19 @@ function escapeRegex(s) {
 const MAX_SEARCH_TOKENS = 8;
 const MAX_TOKEN_LENGTH  = 64;
 
+// Listing-intent aliases. Canonical values are 'rent' / 'sale' / 'commercial'.
+// 'sell' / 'buy' / 'purchase' are legacy spellings that the Property model's
+// pre('validate') hook already collapses to 'sale' on WRITE, and the one-time
+// backfill migration rewrites in existing docs. We mirror that mapping HERE on
+// the read/query side so a stale value — an old bookmarked '?intent=sell' link,
+// a third-party API caller — still resolves to the right listings instead of
+// matching zero docs. Keep this in lockstep with the model's normaliser.
+const INTENT_ALIASES = { sell: 'sale', buy: 'sale', purchase: 'sale' };
+function normaliseIntent(raw) {
+  const v = String(raw || '').toLowerCase().trim();
+  return INTENT_ALIASES[v] || v;
+}
+
 // Split a query into meaningful tokens, dropping noise like commas / dashes.
 function tokenize(q) {
   return String(q || '')
@@ -61,7 +74,8 @@ function buildSearchFilter(rawFilters = {}) {
   }
   if (rawFilters.type)      filter.type      = rawFilters.type;
   if (rawFilters.category)  filter.category  = rawFilters.category;
-  if (rawFilters.intent)    filter.intent    = rawFilters.intent;
+  // Normalise legacy intent spellings to canonical before filtering.
+  if (rawFilters.intent)    filter.intent    = normaliseIntent(rawFilters.intent);
   if (rawFilters.status)    filter.status    = rawFilters.status;
 
   const priceRange = {};
@@ -90,6 +104,7 @@ function buildSortOptions(sortBy = 'newest') {
 module.exports = {
   buildSearchFilter,
   buildSortOptions,
+  normaliseIntent,
   tokenize,
   tokenRegex,
   escapeRegex,
