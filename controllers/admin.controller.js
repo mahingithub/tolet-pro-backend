@@ -479,6 +479,48 @@ async function moderateProperty(req, res, next) {
   }
 }
 
+// ─── DELETE /api/admin/properties/:id ──────────────────────────────────────
+async function deleteProperty(req, res, next) {
+  try {
+    const Property = require('../models/Property');
+    const { id } = req.params;
+
+    const prop = await Property.findByIdAndDelete(id);
+    if (!prop) return res.status(404).json({ message: 'Property not found' });
+
+    return res.json({ message: 'Property permanently deleted', id });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── DELETE /api/admin/users/:id ───────────────────────────────────────────
+async function deleteUser(req, res, next) {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    if (String(user._id) === String(req.user._id)) {
+      return res.status(400).json({ message: "You can't delete yourself." });
+    }
+    if (user.role === 'super_admin') {
+      return res.status(403).json({ message: "Super admins can't be deleted." });
+    }
+
+    // Cascade delete their properties
+    const Property = require('../models/Property');
+    await Property.deleteMany({ ownerId: id });
+
+    // Delete the user
+    await User.findByIdAndDelete(id);
+
+    return res.json({ message: 'User and their properties permanently deleted', id });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   getOverview,
   listUsers,
@@ -492,4 +534,6 @@ module.exports = {
   unbanUser,
   listAllProperties,
   moderateProperty,
+  deleteProperty,
+  deleteUser,
 };

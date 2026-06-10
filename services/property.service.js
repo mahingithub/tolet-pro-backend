@@ -28,7 +28,26 @@ function normaliseRoomPhotos(input) {
     .filter((p) => p.url);
 }
 
-const LIST_ROOM_PHOTO_PROJECT = {
+// ─── LIST-RESPONSE BASE64 GUARD ──────────────────────────────────────────────
+// Older listings (created before the Cloudinary migration) stored cover/room
+// images as base64 `data:` URLs — `coverPhotoThumb` alone could be ~1MB. When a
+// LIST endpoint projected those fields back for 100 docs, the Node process on
+// Render's 512MB instance spiked into OOM and the request died mid-response
+// ("Fetch failed loading" on the client, empty feed). `httpOnly` returns a
+// field ONLY when it is an http(s) URL; any base64 value collapses to '' so the
+// list payload stays small no matter how much legacy base64 sits in MongoDB.
+// Legacy cards just show a placeholder image until those docs are migrated —
+// the page LOADS instead of crashing.
+const httpOnly = (field) => ({
+  $cond: [
+    { $regexMatch: { input: { $ifNull: [field, ''] }, regex: /^https?:\/\//i } },
+    field,
+    '',
+  ],
+});
+
+// Keep only the room photos we actually render on a card, by room category.
+const LIST_ROOM_PHOTO_FILTER = {
   $filter: {
     input: { $ifNull: ['$roomPhotos', []] },
     as: 'photo',
@@ -58,9 +77,22 @@ const LIST_CARD_PROJECT = {
   floorNumber: 1,
   furnishing: 1,
   amenities: 1,
-  coverPhoto: 1,
-  coverPhotoThumb: 1,
-  roomPhotos: LIST_ROOM_PHOTO_PROJECT,
+  // base64 cover → '' so a single legacy doc can't bloat the list payload.
+  coverPhoto: httpOnly('$coverPhoto'),
+  // coverPhotoThumb is intentionally dropped from LIST responses: the frontend
+  // derives a card-size thumbnail from the Cloudinary URL on the fly
+  // (toCloudinaryListingImage), so shipping a separate (often base64) thumb is
+  // pure dead weight and a former OOM source.
+  roomPhotos: {
+    $map: {
+      input: LIST_ROOM_PHOTO_FILTER,
+      as: 'photo',
+      in: {
+        room: '$$photo.room',
+        url:  httpOnly('$$photo.url'),  // base64 url → ''; thumbUrl never sent
+      },
+    },
+  },
   videoId: 1,
   price: 1,
   originalPrice: 1,
@@ -201,6 +233,11 @@ async function listProperties(query) {
     .then(async (idDocs) => {
       const ids = idDocs.map(d => d._id);
       if (ids.length === 0) return [];
+      // Re-fetch the page WITH card fields — but LIST_CARD_PROJECT now strips
+      // any base64 cover/room image (httpOnly) and never returns coverPhotoThumb
+      // or roomPhotos[].thumbUrl, so the response payload stays small even when
+      // legacy base64 docs are in the result set. This is the fix for the
+      // GET /api/properties OOM ("Fetch failed loading" / empty feed).
       const unsortedItems = await Property.aggregate([
         { $match: { _id: { $in: ids } } },
         { $project: LIST_CARD_PROJECT },

@@ -21,13 +21,20 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Bound the worst-case cost of a single search. Each token becomes its own
+// unanchored $regex clause, so an attacker sending a query with dozens of long
+// tokens could force an expensive multi-regex scan. Real searches are a handful
+// of short words, so these caps never affect normal use (audit 5.4 hardening).
+const MAX_SEARCH_TOKENS = 8;
+const MAX_TOKEN_LENGTH  = 64;
+
 // Split a query into meaningful tokens, dropping noise like commas / dashes.
 function tokenize(q) {
   return String(q || '')
     .toLowerCase()
     .split(/[\s,;]+/)
     .map((t) => t.replace(/^[-_/]+|[-_/]+$/g, ''))
-    .filter((t) => t.length > 0);
+    .filter((t) => t.length > 0 && t.length <= MAX_TOKEN_LENGTH);
 }
 
 // Build a single Mongo regex that matches a token allowing flexible
@@ -43,7 +50,7 @@ function buildSearchFilter(rawFilters = {}) {
   const ands = [];
 
   if (rawFilters.q) {
-    const tokens = tokenize(rawFilters.q);
+    const tokens = tokenize(rawFilters.q).slice(0, MAX_SEARCH_TOKENS);
     for (const t of tokens) {
       ands.push({ searchHaystack: { $regex: tokenRegex(t) } });
     }

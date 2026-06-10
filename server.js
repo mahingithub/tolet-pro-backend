@@ -36,6 +36,8 @@ app.use(
     origin: (origin, cb) => {
       if (!origin) return cb(null, true); // server-to-server / curl
       if (env.corsOrigins.includes(origin)) return cb(null, true);
+      // Allow Vercel preview deployments dynamically
+      if (origin.endsWith('.vercel.app')) return cb(null, true);
       cb(new Error(`CORS: origin "${origin}" not allowed`));
     },
     credentials: true,
