@@ -9,7 +9,7 @@ const DIVISIONS = [
   'khulna', 'barishal', 'rangpur', 'mymensingh',
 ];
 
-// Property types span all three listing intents (rent / purchase / commercial).
+// Property types span all three listing intents (rent / sale / commercial).
 // 'flat' is the new canonical replacement for 'apartment' per the design-system
 // vocabulary shift; 'apartment' is kept ONLY as a read-time alias for legacy
 // records and is normalised away on write (see `pre('validate')` below).
@@ -31,7 +31,14 @@ const CATEGORIES = [
   'corporate', 'startup', 'retail', 'warehouse',
 ];
 
-const INTENTS = ['rent', 'sell', 'buy', 'purchase', 'commercial'];
+// Listing intent. 'rent' / 'sale' / 'commercial' are the CANONICAL values the
+// wizard and the mode-switcher tabs use — the DB only ever stores one of these
+// three. 'sell' / 'buy' / 'purchase' are kept ONLY as accepted aliases for
+// legacy callers and are normalised to 'sale' on write (see `pre('validate')`).
+// They stay in the enum so Zod (`z.enum(ENUMS.INTENTS)`) accepts the old wire
+// values long enough for the hook to rewrite them — exactly how 'apartment'
+// is accepted and rewritten to 'flat'.
+const INTENTS = ['rent', 'sale', 'commercial', 'sell', 'buy', 'purchase'];
 
 const FURNISHINGS = ['Furnished', 'Semi-Furnished', 'Unfurnished'];
 
@@ -204,6 +211,17 @@ const PropertySchema = new mongoose.Schema(
     // — 0 = ground, negative = basement levels.
     floorNumber: { type: Number, default: 0, min: -5, max: 200 },
 
+    // ─── Intent-specific details (Dynamic Tab Architecture) ──────────────────
+    // Open-shaped bag whose fields depend on intent + type (subCategory):
+    //   rent       → tenantPreference, floorLevel, utilities …
+    //   sale       → landMeasurement, frontRoadWidth, khatian (CS/RS) …
+    //   commercial → gasLine, ducting/exhaust, fireSafety …
+    // Stored as Mixed because the shape is intentionally open per the design.
+    // IMPORTANT: Mongoose does NOT auto-detect in-place edits to Mixed fields.
+    // The property service MUST call `doc.markModified('specificDetails')`
+    // before `save()` on update, or the change is silently dropped.
+    specificDetails: { type: mongoose.Schema.Types.Mixed, default: {} },
+
     price:         { type: Number, required: true, min: 0, max: 1_000_000_000 },
     originalPrice: { type: Number, default: null, min: 0, max: 1_000_000_000 },
 
@@ -248,12 +266,24 @@ PropertySchema.index({ searchHaystack: 'text' });
 // page's "Newest in Dhaka" feed and the "active only" homepage.
 PropertySchema.index({ division: 1, status: 1, createdAt: -1 });
 
+// Mode-switcher feed — intent + status + createdAt. The tab UI always filters
+// by intent first, so this keeps "Newest for Sale" / "Newest Commercial"
+// pages off a collection scan.
+PropertySchema.index({ intent: 1, status: 1, createdAt: -1 });
+
 // ─── Auto-build slug + haystack on save ────────────────────────────────────
 PropertySchema.pre('validate', function preValidate(next) {
   // Vocabulary shift — "apartment" is now spelled "flat" everywhere on the
   // wire. Any legacy or third-party caller that still sends 'apartment' is
   // silently normalised so the DB only ever stores the canonical value.
   if (this.type === 'apartment') this.type = 'flat';
+
+  // Listing-intent vocabulary — 'sale' is the canonical word the wizard uses.
+  // Collapse the legacy 'sell' / 'buy' / 'purchase' aliases so the DB only
+  // ever stores rent / sale / commercial.
+  if (this.intent === 'sell' || this.intent === 'buy' || this.intent === 'purchase') {
+    this.intent = 'sale';
+  }
 
   // Keep the legacy `floor` column in lockstep with the new
   // `floorNumber` wizard input. Whichever side the caller wrote, mirror
