@@ -1,4 +1,4 @@
-const { GoogleGenAI } = require("@google/genai");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const ApiError = require("../utils/ApiError");
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -8,10 +8,10 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 let ai = null;
 try {
 	if (process.env.GEMINI_API_KEY) {
-		ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+		ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 	}
 } catch (err) {
-	console.error("Failed to initialize GoogleGenAI. Is GEMINI_API_KEY set?", err);
+	console.error("Failed to initialize GoogleGenerativeAI. Is GEMINI_API_KEY set?", err);
 }
 
 // @desc    Ask a question to Gemini AI
@@ -21,7 +21,7 @@ exports.askGemini = asyncH(async (req, res) => {
 	if (!ai) {
 		// Attempt lazy initialization if env was set late
 		if (process.env.GEMINI_API_KEY) {
-			ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+			ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 		} else {
 			return res.status(503).json({
 				message: "AI service is currently unavailable. (Missing API Key)",
@@ -79,16 +79,19 @@ exports.askGemini = asyncH(async (req, res) => {
 	Please format your responses in plain text or simple markdown.`;
 
 	try {
-		const response = await ai.models.generateContent({
+		const model = ai.getGenerativeModel({
 			model: 'gemini-2.5-flash',
-			contents: formattedHistory,
-			config: {
-				systemInstruction: systemInstruction,
+			systemInstruction: systemInstruction,
+			generationConfig: {
 				temperature: 0.7,
 			}
 		});
 
-		const replyText = response.text || "I'm sorry, I couldn't process that request.";
+		const result = await model.generateContent({
+			contents: formattedHistory
+		});
+
+		const replyText = result.response.text() || "I'm sorry, I couldn't process that request.";
 
 		res.status(200).json({
 			text: replyText
