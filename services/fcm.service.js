@@ -105,8 +105,8 @@ async function sendIncomingCall(tokens, call) {
   }
 
   const { callId, callerId, callerName, callerAvatar, type, roomId, receiverId } = call;
-  const title = `${callerName || 'Someone'} is calling`;
-  const body = type === 'video' ? 'Incoming video call' : 'Incoming voice call';
+  const title = `📞 ${callerName} কল করছেন`;
+  const body = type === 'video' ? 'To Let Pro — ইনকামিং ভিডিও কল' : 'To Let Pro — ইনকামিং কল';
   const apiBaseUrl = publicApiBaseUrl();
   const callActionToken = callId && receiverId
     ? createCallActionToken({ callId, receiverId, ttlSeconds: 90 })
@@ -150,8 +150,8 @@ async function sendIncomingCall(tokens, call) {
         renotify: true,
         vibrate: [250, 100, 250, 100, 250],
         actions: [
-          { action: 'accept', title: 'Receive' },
-          { action: 'decline', title: 'Reject' },
+          { action: 'accept', title: '✅ রিসিভ করুন' },
+          { action: 'decline', title: '❌ কাটুন' },
         ],
         data: notificationData,
       },
@@ -192,8 +192,8 @@ async function sendMissedCall(tokens, call) {
   }
 
   const { callId, callerId, callerName, callerAvatar, type, roomId, receiverId } = call;
-  const title = `Missed call from ${callerName || 'Someone'}`;
-  const body = type === 'video' ? 'You missed a video call' : 'You missed a voice call';
+  const title = `${callerName} থেকে মিসড কল`;
+  const body = type === 'video' ? 'আপনি একটি ভিডিও কল মিস করেছেন' : 'আপনি একটি ভয়েস কল মিস করেছেন';
   const apiBaseUrl = publicApiBaseUrl();
   const notificationData = {
     kind: 'missed_call',

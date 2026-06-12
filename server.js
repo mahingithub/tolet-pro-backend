@@ -31,6 +31,11 @@ app.set('trust proxy', 1);
 
 // ─── Security middleware ────────────────────────────────────────────────────
 app.use(helmet());
+// Fix for ERR_QUIC_PROTOCOL_ERROR on Render
+app.use((req, res, next) => {
+  res.setHeader('Alt-Svc', 'clear');
+  next();
+});
 app.use(
   cors({
     origin: (origin, cb) => {

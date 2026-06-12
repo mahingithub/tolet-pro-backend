@@ -300,7 +300,7 @@ function initSocket(httpServer) {
           } catch (err) {
             console.error('[socket] missed-call timer error:', err.message);
           }
-        }, 30_000);
+        }, 45_000); // 45 second timeout for missed call
 
         ringTimers.set(String(callId), timer);
       } catch (err) {
