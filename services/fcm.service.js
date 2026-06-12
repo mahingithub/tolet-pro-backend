@@ -125,6 +125,7 @@ async function sendIncomingCall(tokens, call) {
     click_action: 'INCOMING_CALL',
     callActionToken: String(callActionToken || ''),
     callActionUrl: `${apiBaseUrl}/calls/push-action`,
+    url: callLaunchUrl('open', call),
     apiBaseUrl,
     sentAt: String(Date.now()),
   };
@@ -139,7 +140,7 @@ async function sendIncomingCall(tokens, call) {
     android: { priority: 'high' },
     // Web push: high urgency + short TTL because ringing calls expire quickly.
     webpush: {
-      headers: { Urgency: 'high', TTL: '60' },
+      headers: { Urgency: 'high', TTL: '45' },
       notification: {
         title,
         body,

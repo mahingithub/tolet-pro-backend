@@ -464,10 +464,28 @@ function initSocket(httpServer) {
     });
 
     // ── Disconnect ────────────────────────────────────────────────────────
-    socket.on('disconnect', (reason) => {
-      // No manual cleanup needed: Socket.IO removes the socket from its rooms
-      // automatically. We keep this purely for observability.
+    socket.on('disconnect', async (reason) => {
       console.log(`[socket] user ${userId} disconnected (${socket.id}) — ${reason}`);
+      try {
+        const activeCall = await Call.findOne({
+          callerId: userId,
+          status: { $in: ['ringing', 'active'] }
+        });
+        if (activeCall) {
+          activeCall.status = 'ended';
+          activeCall.endedAt = new Date();
+          await activeCall.save();
+          
+          clearRingTimer(activeCall.callId);
+
+          emitToUser(io, activeCall.receiverId, 'CALL_ENDED', {
+            callId: activeCall.callId,
+            reason: 'caller_disconnected'
+          });
+        }
+      } catch (err) {
+        console.error('[socket] disconnect call cleanup error:', err.message);
+      }
     });
   });
 
