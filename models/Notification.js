@@ -26,7 +26,10 @@ const NotificationSchema = new mongoose.Schema(
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     type:   {
       type: String,
-      enum: ['inquiry_new', 'inquiry_status', 'message_new', 'system', 'rent_receipt', 'rent_invoice', 'rent_overdue'],
+      enum: [
+        'inquiry_new', 'inquiry_status', 'message_new', 'system', 'rent_receipt', 'rent_invoice', 'rent_overdue',
+        'message', 'inquiry', 'booking', 'payment', 'receipt', 'property', 'review'
+      ],
       required: true,
     },
     title:  { type: String, trim: true, default: '', maxlength: 160 },

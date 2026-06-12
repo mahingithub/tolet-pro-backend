@@ -162,10 +162,16 @@ async function sendMessage({ id, body, user }) {
   // Fire-and-forget notification to the peer.
   notifications.emit({
     userId: peerId,
-    type:   'message_new',
+    type:   'message',
     title:  user.name || 'New message',
     body:   text.slice(0, 140),
-    data:   { conversationId: String(convo._id), messageId: String(msg._id) },
+    data:   { 
+      targetId: String(convo._id), 
+      peerId: String(user._id), 
+      peerName: user.name, 
+      peerAvatar: user.avatar,
+      messageId: String(msg._id) 
+    },
   }).catch(() => { /* already swallowed inside emit */ });
 
   // Emit real-time socket event for global toasts and active chat
@@ -287,10 +293,16 @@ async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = ''
 
   notifications.emit({
     userId: peerId,
-    type:   'message_new',
+    type:   'message',
     title:  user.name || 'New message',
     body:   preview,
-    data:   { conversationId: String(convo._id), messageId: String(msg._id) },
+    data:   { 
+      targetId: String(convo._id), 
+      peerId: String(user._id), 
+      peerName: user.name, 
+      peerAvatar: user.avatar,
+      messageId: String(msg._id) 
+    },
   }).catch(() => {});
 
   const io = getIo();

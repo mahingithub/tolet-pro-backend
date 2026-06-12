@@ -14,13 +14,31 @@ const ApiError     = require('../utils/ApiError');
 async function emit({ userId, type, title, body, data }) {
   if (!userId) return null;
   try {
-    return await Notification.create({
+    const doc = await Notification.create({
       userId,
       type,
       title: title || '',
       body:  body  || '',
       data:  data  || {},
     });
+    
+    // Broadcast real-time to the user's active sockets
+    const { getIo, emitToUser } = require('../socket');
+    const io = getIo();
+    if (io) {
+      emitToUser(io, userId, 'new_notification', {
+        id: doc._id,
+        userId: doc.userId,
+        type: doc.type,
+        title: doc.title,
+        body: doc.body,
+        data: doc.data,
+        read: doc.read,
+        createdAt: doc.createdAt
+      });
+    }
+    
+    return doc;
   } catch (err) {
     console.warn('[notif] emit failed:', err.message);
     return null;

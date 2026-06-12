@@ -52,15 +52,16 @@ async function createInquiry({ body, user }) {
   // Fire-and-forget notification to the landlord.
   notifications.emit({
     userId: property.ownerUserId,
-    type:   'inquiry_new',
+    type:   'inquiry',
     title:  `New inquiry from ${user.name || 'a tenant'}`,
     body:   (body.message || '').slice(0, 140),
     data:   {
-      inquiryId:    String(doc._id),
-      propertyId:   String(property._id),
+      targetId:    String(doc._id),
+      peerId:      String(user._id),
+      peerName:    user.name || '',
+      peerAvatar:  user.avatar || '',
+      propertyId:  String(property._id),
       propertyTitle: property.title || '',
-      inquirerUserId: String(user._id),
-      inquirerName:   user.name || '',
     },
   });
 
@@ -93,12 +94,15 @@ async function updateInquiryStatus({ id, body, user }) {
   if (doc.inquirerUserId && body.status !== prevStatus) {
     notifications.emit({
       userId: doc.inquirerUserId,
-      type:   'inquiry_status',
+      type:   'inquiry',
       title:  `Your inquiry was marked ${body.status}`,
       body:   doc.propTitle ? `Re: ${doc.propTitle}` : '',
       data:   {
-        inquiryId:    String(doc._id),
-        propertyId:   String(doc.propertyId),
+        targetId:      String(doc._id),
+        peerId:        String(user._id),
+        peerName:      user.name || '',
+        peerAvatar:    user.avatar || '',
+        propertyId:    String(doc.propertyId),
         propertyTitle: doc.propTitle,
         status:        body.status,
       },

@@ -60,10 +60,10 @@ async function generateMonthlyInvoices() {
     if (booking.tenantId) {
       notifications.emit({
         userId: booking.tenantId,
-        type:   'rent_invoice',
+        type:   'payment',
         title:  `নতুন ভাড়ার বিল — ${booking.property || 'Property'}`,
         body:   `${monthLabel(monthKey)} এর ভাড়া ৳${Number(booking.monthlyRent) || 0} পরিশোধের জন্য প্রস্তুত।`,
-        data:   { bookingId: String(booking._id), monthKey },
+        data:   { targetId: String(booking._id), bookingId: String(booking._id), monthKey },
       });
     }
   }
@@ -114,10 +114,10 @@ async function enforceLateFees() {
     if (booking.tenantId) {
       notifications.emit({
         userId: booking.tenantId,
-        type:   'rent_overdue',
+        type:   'payment',
         title:  `⚠️ ভাড়া বকেয়া — ${booking.property || 'Property'}`,
         body:   `${monthLabel(monthKey)} এর ভাড়া বকেয়া। ৳${lateFee} লেট ফি যোগ হয়েছে — মোট বকেয়া ৳${rent + lateFee}।`,
-        data:   { bookingId: String(booking._id), monthKey },
+        data:   { targetId: String(booking._id), bookingId: String(booking._id), monthKey },
       });
     }
   }

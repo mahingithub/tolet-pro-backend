@@ -56,7 +56,7 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
 
   if (PAID_STATUSES.includes(status)) {
     // Receipt upsert — denormalized so dashboards don't JOIN every render.
-    await Receipt.findOneAndUpdate(
+    const receiptDoc = await Receipt.findOneAndUpdate(
       { bookingId: booking._id, monthKey },
       {
         $set: {
@@ -84,10 +84,10 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
     if (booking.tenantId) {
       notifications.emit({
         userId: booking.tenantId,
-        type:   'rent_receipt',
+        type:   'receipt',
         title:  `ভাড়া রিসিট — ${booking.property || 'Property'}`,
         body:   `${payment.monthLabel || monthKey} এর ${status === 'full' ? 'সম্পূর্ণ' : 'আংশিক'} ভাড়া রিসিট পাওয়া গেছে।`,
-        data:   { bookingId: String(booking._id), monthKey },
+        data:   { targetId: String(receiptDoc._id), bookingId: String(booking._id), monthKey },
       });
     }
   } else {
