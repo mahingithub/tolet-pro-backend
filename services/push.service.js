@@ -2,11 +2,15 @@ const webpush = require('web-push');
 const PushSubscription = require('../models/PushSubscription');
 require('dotenv').config();
 
-webpush.setVapidDetails(
-  'mailto:support@toletpro.com',
-  process.env.VAPID_PUBLIC_KEY || '',
-  process.env.VAPID_PRIVATE_KEY || ''
-);
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    'mailto:support@toletpro.com',
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+} else {
+  console.warn('[push.service] Missing VAPID keys. Web push notifications will be disabled.');
+}
 
 exports.saveSubscription = async (userId, subscription) => {
   return await PushSubscription.findOneAndUpdate(
@@ -21,6 +25,9 @@ exports.removeSubscription = async (endpoint) => {
 };
 
 exports.sendPushNotification = async (userId, payload) => {
+  if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+    return;
+  }
   try {
     const subscriptions = await PushSubscription.find({ userId });
     if (!subscriptions || subscriptions.length === 0) return;
