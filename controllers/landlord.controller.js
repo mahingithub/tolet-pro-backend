@@ -15,6 +15,25 @@
 const mongoose = require('mongoose');
 const User     = require('../models/User');
 const Property = require('../models/Property');
+const Inquiry  = require('../models/Inquiry');
+
+function isObjectId(v) {
+  return mongoose.Types.ObjectId.isValid(String(v));
+}
+
+// Decide whether `callerId` is allowed to see private fields of landlord `targetId`.
+async function callerHasUnlockLink(callerId, targetId) {
+  if (!callerId) return false;
+  if (String(callerId) === String(targetId)) return true;
+
+  const link = await Inquiry.findOne({
+    inquirerUserId:   callerId,
+    propertyOwnerId:  targetId,
+    status:           { $in: ['new', 'active', 'converted'] },
+  }).lean();
+
+  return !!link;
+}
 
 function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
@@ -125,7 +144,7 @@ async function getLandlord(req, res, next) {
     const landlordTrust = user.landlordProfile?.trustScore ?? 0;
     const tenantTrust   = user.tenantProfile?.trustScore   ?? 0;
 
-    return res.json({
+    const payload = {
       landlord: {
         id:              String(user._id),
         name:            user.name,
@@ -159,7 +178,16 @@ async function getLandlord(req, res, next) {
         tenantTrustScore:   tenantTrust,
         landlordTrustScore: landlordTrust,
       },
-    });
+    };
+
+    const callerId = req.user?._id || null;
+    const unlocked = await callerHasUnlockLink(callerId, user._id);
+    if (unlocked) {
+      payload.landlord.phoneNumber = user.phone || '';
+      payload.landlord.email = user.email || '';
+    }
+
+    return res.json(payload);
   } catch (err) {
     return next(err);
   }
