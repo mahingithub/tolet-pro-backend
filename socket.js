@@ -29,6 +29,7 @@ const env = require('./config/env');
 const Call = require('./models/Call');
 // Phase Call-6: push notifications when the receiver's app is closed.
 const User = require('./models/User');
+const Message = require('./models/Message');
 const fcm = require('./services/fcm.service');
 
 // callId → TimeoutHandle (for missed-call detection)
@@ -431,6 +432,37 @@ function initSocket(httpServer) {
       });
     });
 
+    // ── Chat Read Receipts & Typing Indicator ─────────────────────────────
+    
+    socket.on('MARK_SEEN', async ({ messageIds, senderId }) => {
+      if (!messageIds || !messageIds.length || !senderId) return;
+      try {
+        await Message.updateMany(
+          { _id: { $in: messageIds }, senderId },
+          { $addToSet: { readBy: userId } }
+        );
+        emitToUser(io, senderId, 'MESSAGE_SEEN', { messageIds, readerId: userId });
+      } catch (err) {
+        console.error('[socket] MARK_SEEN error:', err.message);
+      }
+    });
+
+    let typingTimer = null;
+    socket.on('TYPING_START', ({ receiverId }) => {
+      if (!receiverId) return;
+      emitToUser(io, receiverId, 'USER_TYPING', { senderId: userId });
+      if (typingTimer) clearTimeout(typingTimer);
+      typingTimer = setTimeout(() => {
+        emitToUser(io, receiverId, 'USER_STOPPED_TYPING', { senderId: userId });
+      }, 3000);
+    });
+
+    socket.on('TYPING_STOP', ({ receiverId }) => {
+      if (!receiverId) return;
+      if (typingTimer) clearTimeout(typingTimer);
+      emitToUser(io, receiverId, 'USER_STOPPED_TYPING', { senderId: userId });
+    });
+
     // ── Disconnect ────────────────────────────────────────────────────────
     socket.on('disconnect', (reason) => {
       // No manual cleanup needed: Socket.IO removes the socket from its rooms
@@ -442,4 +474,6 @@ function initSocket(httpServer) {
   return io;
 }
 
-module.exports = { initSocket, getSocketsForUser, emitToUser, notifyCallRejected, clearRingTimer };
+function getIo() { return ioInstance; }
+
+module.exports = { initSocket, getIo, getSocketsForUser, emitToUser, notifyCallRejected, clearRingTimer, roomFor };

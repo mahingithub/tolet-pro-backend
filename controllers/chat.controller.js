@@ -60,3 +60,11 @@ exports.sendMedia = asyncH(async (req, res) => {
   });
   res.status(201).json({ message: msg.toJSON() });
 });
+
+exports.getMissedMessagesCount = asyncH(async (req, res) => {
+  const result = await svc.getMissedMessagesCount({
+    user: req.user,
+    since: req.query.since,
+  });
+  res.json(result);
+});

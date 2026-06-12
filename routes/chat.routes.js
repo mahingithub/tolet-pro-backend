@@ -12,6 +12,8 @@ router.use(requireAuth);
 router.get ('/',                  ctl.listConversations);
 router.post('/open',              ctl.openConversation);
 
+router.get ('/messages/missed',  ctl.getMissedMessagesCount);
+
 router.get ('/:id/messages',      ctl.listMessages);
 router.post('/:id/messages',      ctl.sendMessage);
 router.post('/:id/media',         uploadSingle, ctl.sendMedia);

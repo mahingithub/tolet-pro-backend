@@ -20,6 +20,8 @@ const Property      = require('../models/Property');
 const ApiError      = require('../utils/ApiError');
 const notifications = require('./notification.service');
 const cloudinary    = require('./cloudinary.service');
+const pushService   = require('./push.service');
+const { getIo, emitToUser, roomFor } = require('../socket');
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 
@@ -166,6 +168,35 @@ async function sendMessage({ id, body, user }) {
     data:   { conversationId: String(convo._id), messageId: String(msg._id) },
   }).catch(() => { /* already swallowed inside emit */ });
 
+  // Emit real-time socket event for global toasts and active chat
+  const io = getIo();
+  if (io) {
+    io.to(roomFor(peerId)).timeout(5000).emit('RECEIVE_MESSAGE', {
+      conversationId: String(convo._id),
+      message: msg.toJSON(),
+      senderName: user.name || 'User',
+      senderAvatar: user.avatar || user.avatarUrl || user.tenantProfile?.avatar || user.landlordProfile?.avatar || null,
+    }, (err, responses) => {
+      // If at least one device acknowledged, emit delivered
+      if (responses && responses.length > 0) {
+        io.to(roomFor(user._id)).emit('MESSAGE_DELIVERED', { messageId: String(msg._id) });
+      } else {
+        // Send push notification if offline or no response
+        pushService.sendPushNotification(peerId, {
+          title: user.name || 'New message',
+          body: text.slice(0, 140),
+          data: { url: `/smart-alerts` }
+        });
+      }
+    });
+  } else {
+    pushService.sendPushNotification(peerId, {
+      title: user.name || 'New message',
+      body: text.slice(0, 140),
+      data: { url: `/smart-alerts` }
+    });
+  }
+
   return msg;
 }
 
@@ -262,6 +293,32 @@ async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = ''
     data:   { conversationId: String(convo._id), messageId: String(msg._id) },
   }).catch(() => {});
 
+  const io = getIo();
+  if (io) {
+    io.to(roomFor(peerId)).timeout(5000).emit('RECEIVE_MESSAGE', {
+      conversationId: String(convo._id),
+      message: msg.toJSON(),
+      senderName: user.name || 'User',
+      senderAvatar: user.avatar || user.avatarUrl || user.tenantProfile?.avatar || user.landlordProfile?.avatar || null,
+    }, (err, responses) => {
+      if (responses && responses.length > 0) {
+        io.to(roomFor(user._id)).emit('MESSAGE_DELIVERED', { messageId: String(msg._id) });
+      } else {
+        pushService.sendPushNotification(peerId, {
+          title: user.name || 'New message',
+          body: preview,
+          data: { url: `/smart-alerts` }
+        });
+      }
+    });
+  } else {
+    pushService.sendPushNotification(peerId, {
+      title: user.name || 'New message',
+      body: preview,
+      data: { url: `/smart-alerts` }
+    });
+  }
+
   return msg;
 }
 
@@ -279,6 +336,23 @@ async function markRead({ id, user }) {
   );
   return { ok: true };
 }
+async function getMissedMessagesCount({ user, since }) {
+  if (!since) return { count: 0 };
+  const d = new Date(since);
+  if (isNaN(d.getTime())) return { count: 0 };
+
+  const convos = await Conversation.find({ participants: user._id }).select('_id').lean();
+  const convoIds = convos.map(c => c._id);
+
+  const count = await Message.countDocuments({
+    conversationId: { $in: convoIds },
+    senderId: { $ne: user._id },
+    readBy: { $ne: user._id },
+    createdAt: { $gt: d },
+  });
+
+  return { count };
+}
 
 module.exports = {
   openConversation,
@@ -287,4 +361,5 @@ module.exports = {
   sendMessage,
   sendMediaMessage,
   markRead,
+  getMissedMessagesCount,
 };
