@@ -5,14 +5,19 @@ const requireAdmin = require("../middleware/requireAdmin");
 
 const {
 	getAIGuides,
+	getWelcomeGuides,
 	getAllAIGuidesForAdmin,
 	createAIGuide,
 	updateAIGuide,
 	deleteAIGuide,
 } = require("../controllers/aiGuideController");
 
-// Public route for users fetching active guides
+// Public route for users fetching active guides (AI Assistant)
 router.get("/", getAIGuides);
+
+// Public route for the post-login Welcome Robot to fetch its video(s).
+// Declared before any "/:id" route so the literal path always wins.
+router.get("/welcome", getWelcomeGuides);
 
 // Admin routes for managing guides
 router.get("/admin", requireAuth, requireAdmin, getAllAIGuidesForAdmin);
