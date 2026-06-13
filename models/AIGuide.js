@@ -25,6 +25,24 @@ const aiGuideSchema = new mongoose.Schema(
 			type: Number,
 			default: 0,
 		},
+		// Where this guide is shown.
+		//  'assistant' = the floating AI Assistant's suggestion list. This is
+		//                the DEFAULT, so every guide that already exists keeps
+		//                showing in the Assistant exactly as before — no data
+		//                migration needed.
+		//  'welcome'   = the post-login Welcome Robot popup.
+		placement: {
+			type: String,
+			enum: ["assistant", "welcome"],
+			default: "assistant",
+		},
+		// Who the guide targets. Used mainly by 'welcome' placement so the robot
+		// can pick the right video per role. 'all' shows to both roles.
+		audience: {
+			type: String,
+			enum: ["tenant", "landlord", "all"],
+			default: "all",
+		},
 	},
 	{
 		timestamps: true,
