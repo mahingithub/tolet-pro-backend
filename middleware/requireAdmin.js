@@ -14,8 +14,14 @@
 const ADMIN_ROLES = new Set(['support_agent', 'moderator', 'super_admin']);
 
 function requireAdmin(req, res, next) {
-  const role = req.user?.role;
-  if (!role || !ADMIN_ROLES.has(role)) {
+  const primaryRole = req.user?.role;
+  const roles = Array.isArray(req.user?.roles) && req.user.roles.length 
+    ? req.user.roles 
+    : (primaryRole ? [primaryRole] : []);
+  
+  const hasAdminRole = roles.some(r => ADMIN_ROLES.has(r));
+
+  if (!hasAdminRole) {
     return res.status(403).json({
       message: 'Admin access required.',
       code: 'admin_required',
