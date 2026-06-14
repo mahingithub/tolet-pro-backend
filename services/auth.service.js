@@ -82,6 +82,11 @@ async function verifySignup({ idToken }) {
   // Create session
   const crypto = require('crypto');
   const sessionId = crypto.randomUUID();
+  
+  // Cap sessions to prevent infinite growth
+  while (user.sessions.length >= 10) {
+    user.sessions.shift();
+  }
   user.sessions.push({ sessionId, device: 'New Device', ipAddress: '0.0.0.0' });
 
   await user.save();
@@ -126,6 +131,11 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
   // Create session
   const crypto = require('crypto');
   const sessionId = crypto.randomUUID();
+  
+  // Cap sessions to prevent infinite growth
+  while (user.sessions.length >= 10) {
+    user.sessions.shift();
+  }
   user.sessions.push({ sessionId, device, ipAddress });
   
   await user.save();
