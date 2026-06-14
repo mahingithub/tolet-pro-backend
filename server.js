@@ -125,6 +125,18 @@ async function start() {
   try {
     await mongoose.connect(env.mongoUri);
     console.log('[mongo] connected');
+    
+    // TEMPORARY FIX: Prune massive sessions arrays across the entire database to fix OOM / Event Loop blocking
+    try {
+      const User = require('./models/User');
+      await User.updateMany(
+        { 'sessions.10': { $exists: true } },
+        { $push: { sessions: { $each: [], $slice: -9 } } }
+      );
+      console.log('[mongo] pruned bloated sessions arrays');
+    } catch (e) {
+      console.error('[mongo] array prune failed:', e.message);
+    }
   } catch (err) {
     console.error('[mongo] connection failed:', err.message);
     process.exit(1);
