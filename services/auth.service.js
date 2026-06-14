@@ -79,6 +79,10 @@ async function verifySignup({ idToken }) {
     user.passwordChangedAt = new Date();
   }
 
+  // Cap sessions to prevent infinite growth
+  if (user.sessions.length >= 10) {
+    user.sessions.splice(0, user.sessions.length - 9);
+  }
   // Create session
   const crypto = require('crypto');
   const sessionId = crypto.randomUUID();
@@ -134,6 +138,10 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
   user.lockUntil = null;
   user.lastLoginAt = new Date();
 
+  // Cap sessions to prevent infinite growth
+  if (user.sessions.length >= 10) {
+    user.sessions.splice(0, user.sessions.length - 9);
+  }
   // Create session
   const crypto = require('crypto');
   const sessionId = crypto.randomUUID();
