@@ -84,8 +84,8 @@ async function verifySignup({ idToken }) {
   const sessionId = crypto.randomUUID();
   
   // Cap sessions to prevent infinite growth
-  while (user.sessions.length >= 10) {
-    user.sessions.shift();
+  if (user.sessions.length >= 10) {
+    user.sessions.splice(0, user.sessions.length - 9);
   }
   user.sessions.push({ sessionId, device: 'New Device', ipAddress: '0.0.0.0' });
 
@@ -102,6 +102,12 @@ async function verifySignup({ idToken }) {
  * "wrong password" to prevent phone enumeration.
  */
 async function login({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
+  // Prune sessions directly in the DB to avoid OOM or Event Loop blocking for affected users
+  await User.updateOne(
+    { phone },
+    { $push: { sessions: { $each: [], $slice: -9 } } }
+  );
+
   const user = await User.findOne({ phone }).select('+password +loginAttempts +lockUntil');
   if (!user || !user.phoneVerified) {
     // Don't reveal whether the phone exists; hash a dummy password to keep
@@ -133,8 +139,8 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
   const sessionId = crypto.randomUUID();
   
   // Cap sessions to prevent infinite growth
-  while (user.sessions.length >= 10) {
-    user.sessions.shift();
+  if (user.sessions.length >= 10) {
+    user.sessions.splice(0, user.sessions.length - 9);
   }
   user.sessions.push({ sessionId, device, ipAddress });
   
