@@ -48,12 +48,10 @@ async function openConversation({ user, body }) {
 
   const participants = sortParticipants(user._id, peer._id);
 
-  // Find existing thread first (scoped to property if provided).
+  // Find existing thread first (ONE thread per peer).
   const filter = { participants };
-  if (propertyId) filter.propertyId = oid(propertyId);
-  else            filter.propertyId = null;
 
-  let convo = await Conversation.findOne(filter);
+  let convo = await Conversation.findOne(filter).sort({ createdAt: -1 });
   if (!convo) {
     convo = await Conversation.create({
       participants,
@@ -64,6 +62,10 @@ async function openConversation({ user, body }) {
         [String(peer._id), 0],
       ]),
     });
+  } else if (propertyId && !convo.propertyId) {
+    // Optionally update propertyId if it was null
+    convo.propertyId = oid(propertyId);
+    await convo.save();
   }
   return convo;
 }
@@ -73,10 +75,22 @@ async function listConversations({ user }) {
     .sort({ lastMessageAt: -1, updatedAt: -1, _id: -1 })
     .lean();
 
+  // Deduplicate by peerId so we only return ONE thread per peer (the most recent one)
+  const uniqueItemsMap = new Map();
+  for (const c of items) {
+    const peerId = c.participants.find((p) => String(p) !== String(user._id));
+    if (!peerId) continue;
+    const key = String(peerId);
+    if (!uniqueItemsMap.has(key)) {
+      uniqueItemsMap.set(key, c);
+    }
+  }
+  const uniqueItems = Array.from(uniqueItemsMap.values());
+
   // Hydrate peer name/avatar for the sidebar without forcing the frontend
   // to do N round-trips. Keep it minimal — name + avatar + role.
   const peerIds = new Set();
-  for (const c of items) {
+  for (const c of uniqueItems) {
     for (const pid of c.participants || []) {
       if (String(pid) !== String(user._id)) peerIds.add(String(pid));
     }
@@ -86,7 +100,7 @@ async function listConversations({ user }) {
     .lean();
   const userMap = new Map(users.map((u) => [String(u._id), u]));
 
-  return items.map((c) => {
+  return uniqueItems.map((c) => {
     const peerId = c.participants.find((p) => String(p) !== String(user._id));
     const peer   = userMap.get(String(peerId)) || null;
     const unread = (c.unreadCounts || {})[String(user._id)] || 0;
