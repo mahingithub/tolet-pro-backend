@@ -88,7 +88,7 @@ async function listMyInquiries({ user }) {
   // httpOnly $cond collapses any legacy base64 coverPhoto to '' INSIDE Mongo —
   // the base64 never loads into Node memory (same OOM-guard as property.service).
   const propertyIds = [...new Set(
-    inquiries.map((i) => String(i.propertyId)).filter(Boolean),
+    inquiries.map((i) => i.propertyId ? String(i.propertyId) : null).filter(Boolean),
   )].map((id) => new mongoose.Types.ObjectId(id));
 
   const props = propertyIds.length
