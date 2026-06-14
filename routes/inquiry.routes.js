@@ -15,7 +15,12 @@ router.post('/', requireAuth, validate(v.createInquiry), ctl.createInquiry);
 // Tenant lists inquiries they've sent — useful for an "Inquiries" tab.
 router.get('/mine', requireAuth, ctl.getMyInquiries);
 
-// Host updates inquiry status: new → seen → replied → closed.
+// Host actions on inquiries
+router.post('/:id/accept', requireAuth, ctl.acceptInquiry);
+router.post('/:id/reject', requireAuth, ctl.rejectInquiry);
+router.post('/:id/deal', requireAuth, ctl.confirmDeal);
+
+// Also keep the existing patch just in case, but map it to our new status flow if needed
 router.patch('/:id/status', requireAuth, validate(v.updateInquiry), ctl.updateInquiryStatus);
 
 // Host deletes inquiry entirely

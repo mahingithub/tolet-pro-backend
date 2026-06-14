@@ -15,6 +15,7 @@ const mongoose = require('mongoose');
 const authRoutes     = require('./routes/auth.routes');
 const propertyRoutes = require('./routes/property.routes');
 const inquiryRoutes  = require('./routes/inquiry.routes');
+const visitScheduleRoutes = require('./routes/visitSchedule.routes');
 const hostRoutes     = require('./routes/host.routes');
 // 🟢 Public landlord + tenant profile routes — added by roadmap-v2 / tenant roadmap.
 const landlordRoutes = require('./routes/landlord.routes');
@@ -79,6 +80,7 @@ app.use('/api/properties', propertyRoutes);
 app.use('/api/geo',        require('./routes/geo.routes'));
 // MEDIUM limiter on inquiry creation (spam-prone).
 app.use('/api/inquiries',  writeLimiter, inquiryRoutes);
+app.use('/api/visit-schedule', visitScheduleRoutes);
 app.use('/api/host',       hostRoutes);
 app.use('/api/host-stats', require('./routes/hostStats.routes')); // real host performance metrics
 app.use('/api/landlords',  landlordRoutes);

@@ -238,6 +238,10 @@ async function listProperties(query) {
   if (!isIdLookup && !filter.status) {
     filter.status = 'active';
   }
+  
+  if (!isIdLookup && !filter.availabilityStatus) {
+    filter.availabilityStatus = 'available';
+  }
 
   const sort   = searchService.buildSortOptions(query.sort);
   const page   = isIdLookup ? 1 : (query.page  || 1);

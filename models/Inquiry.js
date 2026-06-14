@@ -46,10 +46,17 @@ const InquirySchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ['new', 'pending', 'accepted', 'rejected', 'archived', 'converted', 'active'],
-      default: 'new',
+      enum: ['sent', 'delivered', 'viewed', 'replied', 'accepted', 'rejected'],
+      default: 'sent',
       index: true,
     },
+    statusHistory: [
+      {
+        status: String,
+        changedAt: { type: Date, default: Date.now },
+        changedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      },
+    ],
   },
   { timestamps: true },
 );

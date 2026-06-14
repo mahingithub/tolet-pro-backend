@@ -226,6 +226,12 @@ const PropertySchema = new mongoose.Schema(
     originalPrice: { type: Number, default: null, min: 0, max: 1_000_000_000 },
 
     status:        { type: String, enum: STATUSES, default: 'active', index: true },
+    availabilityStatus: {
+      type: String,
+      enum: ['available', 'booked', 'rented'],
+      default: 'available',
+      index: true,
+    },
 
     // ─── Ownership snapshot ──────────────────────────────────────────────
     // ownerUserId is the canonical link; ownerName + ownerPhone are stored as

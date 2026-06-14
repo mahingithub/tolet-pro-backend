@@ -73,7 +73,34 @@ async function createInquiry({ body, user }) {
 async function listHostInquiries({ user, status }) {
   const filter = { propertyOwnerId: user._id };
   if (status) filter.status = status;
-  return Inquiry.find(filter).sort({ createdAt: -1, _id: -1 });
+  
+  const inquiries = await Inquiry.find(filter).sort({ createdAt: -1, _id: -1 }).lean();
+  if (inquiries.length === 0) return [];
+
+  const propertyIds = [...new Set(inquiries.map(i => String(i.propertyId)))].filter(id => mongoose.Types.ObjectId.isValid(id)).map(id => new mongoose.Types.ObjectId(id));
+  const inquiryIds = inquiries.map(i => i._id);
+
+  const [props, visits] = await Promise.all([
+    Property.find({ _id: { $in: propertyIds } }, { availabilityStatus: 1 }).lean(),
+    mongoose.model('VisitSchedule').find({ inquiryId: { $in: inquiryIds } }).lean()
+  ]);
+
+  const propMap = {};
+  props.forEach(p => { propMap[String(p._id)] = p; });
+
+  const visitMap = {};
+  visits.forEach(v => { visitMap[String(v.inquiryId)] = v; });
+
+  return inquiries.map(i => {
+    const p = propMap[String(i.propertyId)] || {};
+    const v = visitMap[String(i._id)] || null;
+    return {
+      ...i,
+      id: String(i._id),
+      propAvailabilityStatus: p.availabilityStatus || 'available',
+      visitSchedule: v,
+    };
+  });
 }
 
 async function listMyInquiries({ user }) {
@@ -103,7 +130,7 @@ async function listMyInquiries({ user }) {
                 '',
               ],
             },
-            location: 1, area: 1, district: 1, price: 1, ownerPhone: 1, ownerName: 1,
+            location: 1, area: 1, district: 1, price: 1, ownerPhone: 1, ownerName: 1, availabilityStatus: 1,
           },
         },
       ])
@@ -112,8 +139,14 @@ async function listMyInquiries({ user }) {
   const propMap = {};
   props.forEach((p) => { propMap[String(p._id)] = p; });
 
+  const inquiryIds = inquiries.map(i => i._id);
+  const visits = await mongoose.model('VisitSchedule').find({ inquiryId: { $in: inquiryIds } }).lean();
+  const visitMap = {};
+  visits.forEach(v => { visitMap[String(v.inquiryId)] = v; });
+
   return inquiries.map((i) => {
     const p = propMap[String(i.propertyId)] || {};
+    const v = visitMap[String(i._id)] || null;
     return {
       ...i,
       id:            String(i._id),
@@ -122,6 +155,8 @@ async function listMyInquiries({ user }) {
       propPrice:     p.price ?? null,
       landlordPhone: p.ownerPhone || '',
       landlordName:  p.ownerName  || '',
+      propAvailabilityStatus: p.availabilityStatus || 'available',
+      visitSchedule: v,
     };
   });
 }
