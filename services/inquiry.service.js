@@ -55,8 +55,8 @@ async function createInquiry({ body, user }) {
   notifications.emit({
     userId: property.ownerUserId,
     type:   'inquiry',
-    title:  `New inquiry from ${user.name || 'a tenant'}`,
-    body:   (body.message || '').slice(0, 140),
+    title:  'নতুন ইনকোয়ারি',
+    body:   `নতুন ইনকোয়ারি এসেছে ${user.name || 'ভাড়াটিয়া'} থেকে`,
     data:   {
       targetId:    String(doc._id),
       peerId:      String(user._id),
@@ -175,10 +175,15 @@ async function updateInquiryStatus({ id, body, user }) {
 
   // Fire-and-forget notification to the tenant who originally inquired.
   if (doc.inquirerUserId && body.status !== prevStatus) {
+    let titleMsg = `Your inquiry was marked ${body.status}`;
+    if (body.status === 'viewed') titleMsg = 'আপনার ইনকোয়ারি দেখা হয়েছে';
+    else if (body.status === 'accepted') titleMsg = 'আপনার ইনকোয়ারি গ্রহণ করা হয়েছে! ভিজিট শিডিউল করুন।';
+    else if (body.status === 'rejected') titleMsg = 'দুঃখিত, আপনার ইনকোয়ারি প্রত্যাখ্যান করা হয়েছে।';
+
     notifications.emit({
       userId: doc.inquirerUserId,
       type:   'inquiry',
-      title:  `Your inquiry was marked ${body.status}`,
+      title:  titleMsg,
       body:   doc.propTitle ? `Re: ${doc.propTitle}` : '',
       data:   {
         targetId:      String(doc._id),
@@ -190,6 +195,16 @@ async function updateInquiryStatus({ id, body, user }) {
         status:        body.status,
       },
     });
+
+    try {
+      const { getIo } = require('../socket');
+      const io = getIo();
+      if (io) {
+        io.to(String(doc.inquirerUserId)).emit('inquiry:status_updated', { inquiryId: String(doc._id), status: body.status });
+      }
+    } catch (err) {
+      console.warn('[socket] emit error in updateInquiryStatus:', err.message);
+    }
   }
 
   return doc;

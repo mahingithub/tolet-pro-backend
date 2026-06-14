@@ -207,6 +207,29 @@ async function updateBooking(req, res, next) {
     }
 
     await booking.save();
+
+    // Notify Tenant about rent/booking update
+    if (booking.tenantId) {
+      try {
+        const { getIo } = require('../socket');
+        const io = getIo();
+        if (io) {
+          io.to(String(booking.tenantId)).emit('rent:updated', { bookingId: String(booking._id) });
+        }
+      } catch (err) {
+        console.warn('[socket] emit error in updateBooking:', err.message);
+      }
+
+      const notifications = require('../services/notification.service');
+      notifications.emit({
+        userId: booking.tenantId,
+        type:   'rent_updated',
+        title:  'আপনার ভাড়ার তথ্য আপডেট করা হয়েছে।',
+        body:   'ল্যান্ডলর্ড আপনার ভাড়ার তথ্য আপডেট করেছেন।',
+        data:   { bookingId: String(booking._id) },
+      });
+    }
+
     return res.json({ booking });
   } catch (err) {
     return next(err);

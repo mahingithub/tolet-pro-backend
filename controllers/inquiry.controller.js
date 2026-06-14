@@ -64,7 +64,7 @@ exports.acceptInquiry = asyncH(async (req, res) => {
   if (inquiry.inquirerUserId) {
     await Notification.create({
       userId: inquiry.inquirerUserId,
-      title: 'আপনার ইনকোয়ারি গ্রহণ করা হয়েছে',
+      title: 'আপনার ইনকোয়ারি গ্রহণ করা হয়েছে! ভিজিট শিডিউল করুন।',
       body: 'Your inquiry has been accepted by the landlord.',
       type: 'inquiry_accepted',
       metadata: { inquiryId: inquiry._id, propertyId: inquiry.propertyId }

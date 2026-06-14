@@ -43,7 +43,7 @@ exports.createVisitSchedule = asyncH(async (req, res) => {
     }
   }
 
-  const notifMsg = `ভিজিট: ${new Date(scheduledDate).toLocaleDateString()} ${scheduledTime} — ${location || 'প্রপার্টি'}`;
+  const notifMsg = `ভিজিট শিডিউল: ${new Date(scheduledDate).toLocaleDateString()} ${scheduledTime} — ${location || 'প্রপার্টি'}`;
   
   // Notify Tenant
   if (inquiry.inquirerUserId) {
@@ -112,7 +112,7 @@ exports.approveVisitRequest = asyncH(async (req, res) => {
     io.to(String(schedule.tenantId)).emit('visit:scheduled', { scheduleId: schedule._id });
   }
 
-  const notifMsg = `ভিজিট: ${new Date(schedule.scheduledDate).toLocaleDateString()} ${schedule.scheduledTime} — ${schedule.location || 'প্রপার্টি'}`;
+  const notifMsg = `ভিজিট শিডিউল: ${new Date(schedule.scheduledDate).toLocaleDateString()} ${schedule.scheduledTime} — ${schedule.location || 'প্রপার্টি'}`;
   await Notification.create({
     userId: schedule.tenantId,
     title: 'ভিজিট শিডিউল অনুমোদিত',
@@ -151,7 +151,7 @@ exports.cancelVisit = asyncH(async (req, res) => {
   }
 
   const cancelDate = schedule.scheduledDate ? new Date(schedule.scheduledDate).toLocaleDateString() : 'আপনার';
-  const msg = `${cancelDate} তারিখের ভিজিট বাতিল হয়েছে`;
+  const msg = `${cancelDate} তারিখের ভিজিট বাতিল করা হয়েছে।`;
   
   await Notification.create({
     userId: String(schedule.landlordId) === String(req.user._id) ? schedule.tenantId : schedule.landlordId,
