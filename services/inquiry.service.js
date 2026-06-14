@@ -89,7 +89,7 @@ async function listMyInquiries({ user }) {
   // the base64 never loads into Node memory (same OOM-guard as property.service).
   const propertyIds = [...new Set(
     inquiries.map((i) => i.propertyId ? String(i.propertyId) : null).filter(Boolean),
-  )].map((id) => new mongoose.Types.ObjectId(id));
+  )].filter(id => mongoose.Types.ObjectId.isValid(id)).map((id) => new mongoose.Types.ObjectId(id));
 
   const props = propertyIds.length
     ? await Property.aggregate([
