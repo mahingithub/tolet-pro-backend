@@ -14,7 +14,7 @@ exports.getHostInquiries = asyncH(async (req, res) => {
     user: req.user,
     status: req.query.status,
   });
-  res.json({ inquiries: items.map((d) => d.toJSON()) });
+  res.json({ inquiries: items });
 });
 
 exports.getMyInquiries = asyncH(async (req, res) => {

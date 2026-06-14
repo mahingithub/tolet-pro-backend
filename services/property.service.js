@@ -240,7 +240,9 @@ async function listProperties(query) {
   }
   
   if (!isIdLookup && !filter.availabilityStatus) {
-    filter.availabilityStatus = 'available';
+    // Legacy properties might not have this field set. By using $nin,
+    // we match 'available' as well as documents where the field is missing.
+    filter.availabilityStatus = { $nin: ['rented', 'booked'] };
   }
 
   const sort   = searchService.buildSortOptions(query.sort);
