@@ -1,5 +1,7 @@
 'use strict';
 
+const mongoose = require('mongoose');
+
 /**
  * Pure helpers for property search + filter Mongo query construction. Kept
  * separate from the controller so the same logic can be reused by future
@@ -61,6 +63,26 @@ function tokenRegex(token) {
 function buildSearchFilter(rawFilters = {}) {
   const filter = {};
   const ands = [];
+
+  // Multi-id lookup (saved-list sync). The client sends a comma-separated list
+  // of property ids and wants the CURRENT server state of exactly those docs in
+  // one request, so it can drop any that no longer exist from the user's saved
+  // favourites. We validate each id and build an $in on _id. Garbage ids (stale
+  // localStorage cruft, partially-typed values) are dropped SILENTLY rather than
+  // thrown as a CastError that would 500 the whole request. If none are valid we
+  // leave a guaranteed-empty match ($in: []) so the endpoint returns [] cleanly.
+  // NOTE: the caller (listProperties) detects this _id.$in and deliberately
+  // skips the default status='active' filter + lifts the page limit, so a saved
+  // listing that's merely been rented/paused still comes back instead of looking
+  // "deleted" to the client.
+  if (rawFilters.ids != null && rawFilters.ids !== '') {
+    const validIds = String(rawFilters.ids)
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => mongoose.Types.ObjectId.isValid(s))
+      .map((s) => new mongoose.Types.ObjectId(s));
+    filter._id = validIds.length ? { $in: validIds } : { $in: [] };
+  }
 
   if (rawFilters.q) {
     const tokens = tokenize(rawFilters.q).slice(0, MAX_SEARCH_TOKENS);

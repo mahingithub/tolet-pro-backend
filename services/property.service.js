@@ -7,6 +7,9 @@ const ApiError = require('../utils/ApiError');
 const Booking = require('../models/Booking');
 const Inquiry = require('../models/Inquiry');
 const Receipt  = require('../models/Receipt');
+const Conversation = require('../models/Conversation');
+const Message = require('../models/Message');
+const Notification = require('../models/Notification');
 const searchService = require('./searchService');
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -218,19 +221,31 @@ async function getSuggestions(q) {
 async function listProperties(query) {
   const filter = searchService.buildSearchFilter(query);
 
+  // Detect a by-id lookup (saved-list sync): the client asked for specific
+  // property ids via ?ids=. In that mode we must NOT apply the default
+  // status='active' filter and we must NOT paginate — a saved listing that
+  // has since been rented or paused still EXISTS and has to come back, else
+  // the client wrongly treats it as deleted and drops it from favourites.
+  const isIdLookup = Boolean(filter._id && filter._id.$in);
+
   // Public listing endpoint: only surface listings that are actively
   // available to rent. A landlord pausing or renting a listing should
   // remove it from search immediately. (Internal endpoints like
   // /api/host/properties continue to bypass this filter — they call
   // listMyProperties below.) If the caller explicitly passed a status
-  // we respect it (used by the admin moderation queue).
-  if (!filter.status) {
+  // we respect it (used by the admin moderation queue). A by-id lookup is
+  // exempt for the reason explained above.
+  if (!isIdLookup && !filter.status) {
     filter.status = 'active';
   }
 
   const sort   = searchService.buildSortOptions(query.sort);
-  const page   = query.page  || 1;
-  const limit  = query.limit || 50;
+  const page   = isIdLookup ? 1 : (query.page  || 1);
+  // For an id lookup, return every requested doc in one page (no cutoff when a
+  // user has more saved than the default 50). Otherwise keep normal paging.
+  const limit  = isIdLookup
+    ? Math.max(filter._id.$in.length, 1)
+    : (query.limit || 50);
   const skip   = (page - 1) * limit;
 
   const [items, total] = await Promise.all([
@@ -351,24 +366,76 @@ async function deleteProperty({ idOrSlug, user }) {
   }
 
 
-  // ── Cascade-delete related documents ───────────────────────────────────
-  const relatedBookings = await Booking.find({ propertyId: doc._id }).select('_id');
-  const bookingIds = relatedBookings.map((b) => b._id);
+  const propertyId = doc._id;
 
-  const [delBookings, delInquiries, delReceipts] = await Promise.all([
-    Booking.deleteMany({ propertyId: doc._id }),
-    Inquiry.deleteMany({ propertyId: doc._id }),
-    bookingIds.length > 0
-      ? Receipt.deleteMany({ bookingId: { $in: bookingIds } })
+  // ── Collect every related id BEFORE deleting anything ──────────────────
+  // We gather inquiry / booking / conversation (and then receipt) ids up front
+  // so we can delete their child docs (messages, receipts) AND sweep every
+  // notification that deep-links to any of them. Ordering is deliberate:
+  // gather → delete children & parents → delete the Property LAST (below). If
+  // anything throws midway, the Property still exists, so the whole delete can
+  // simply be retried rather than leaving a half-deleted listing with no anchor.
+  const [relatedInquiries, relatedBookings, relatedConversations] = await Promise.all([
+    Inquiry.find({ propertyId }).select('_id'),
+    Booking.find({ propertyId }).select('_id'),
+    Conversation.find({ propertyId }).select('_id'),
+  ]);
+
+  const inquiryIds      = relatedInquiries.map((d) => d._id);
+  const bookingIds      = relatedBookings.map((d) => d._id);
+  const conversationIds = relatedConversations.map((d) => d._id);
+
+  // Receipts hang off bookings.
+  const relatedReceipts = bookingIds.length
+    ? await Receipt.find({ bookingId: { $in: bookingIds } }).select('_id')
+    : [];
+  const receiptIds = relatedReceipts.map((d) => d._id);
+
+  // ── Build the notification sweep ───────────────────────────────────────
+  // Notification.data is a free-form Mixed bag; depending on the event it
+  // carries one of propertyId / inquiryId / bookingId / conversationId /
+  // receiptId. We OR across every key + id-set we just gathered so NO orphaned
+  // bell item survives, regardless of which deep-link key a given notification
+  // used. Clauses for empty id-sets are skipped so we never build a `$in: []`
+  // that matches nothing-but-costs-a-scan.
+  const notifClauses = [{ 'data.propertyId': propertyId }];
+  if (inquiryIds.length)      notifClauses.push({ 'data.inquiryId':      { $in: inquiryIds } });
+  if (bookingIds.length)      notifClauses.push({ 'data.bookingId':      { $in: bookingIds } });
+  if (conversationIds.length) notifClauses.push({ 'data.conversationId': { $in: conversationIds } });
+  if (receiptIds.length)      notifClauses.push({ 'data.receiptId':      { $in: receiptIds } });
+
+  // ── Delete children + parents (Property removed last, below) ───────────
+  const [
+    delMessages,
+    delReceipts,
+    delInquiries,
+    delBookings,
+    delConversations,
+    delNotifications,
+  ] = await Promise.all([
+    conversationIds.length
+      ? Message.deleteMany({ conversationId: { $in: conversationIds } })
       : Promise.resolve({ deletedCount: 0 }),
+    receiptIds.length
+      ? Receipt.deleteMany({ _id: { $in: receiptIds } })
+      : Promise.resolve({ deletedCount: 0 }),
+    Inquiry.deleteMany({ propertyId }),
+    Booking.deleteMany({ propertyId }),
+    conversationIds.length
+      ? Conversation.deleteMany({ _id: { $in: conversationIds } })
+      : Promise.resolve({ deletedCount: 0 }),
+    Notification.deleteMany({ $or: notifClauses }),
   ]);
 
   await doc.deleteOne();
   return {
-    id: String(doc._id),
-    deletedBookings:  delBookings.deletedCount,
-    deletedInquiries: delInquiries.deletedCount,
-    deletedReceipts:  delReceipts.deletedCount,
+    id: String(propertyId),
+    deletedInquiries:     delInquiries.deletedCount,
+    deletedBookings:      delBookings.deletedCount,
+    deletedReceipts:      delReceipts.deletedCount,
+    deletedConversations: delConversations.deletedCount,
+    deletedMessages:      delMessages.deletedCount,
+    deletedNotifications: delNotifications.deletedCount,
   };
 }
 
