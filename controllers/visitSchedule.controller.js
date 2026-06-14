@@ -30,9 +30,9 @@ exports.createVisitSchedule = asyncH(async (req, res) => {
     status: 'confirmed',
   });
   
-  // Also make sure inquiry is 'accepted' since visit is scheduled
-  if (inquiry.status !== 'accepted') {
-    await inquiryHelper.updateInquiryStatus(inquiryId, 'accepted', req.user._id);
+  // Also make sure inquiry is 'visit_scheduled' since visit is scheduled
+  if (inquiry.status !== 'visit_scheduled') {
+    await inquiryHelper.updateInquiryStatus(inquiryId, 'visit_scheduled', req.user._id);
   }
 
   const io = getIo(req);
@@ -99,6 +99,12 @@ exports.approveVisitRequest = asyncH(async (req, res) => {
   if (location) schedule.location = location;
   
   await schedule.save();
+
+  // Also make sure inquiry is 'visit_scheduled' since visit is scheduled
+  const inquiry = await Inquiry.findById(schedule.inquiryId);
+  if (inquiry && inquiry.status !== 'visit_scheduled') {
+    await inquiryHelper.updateInquiryStatus(schedule.inquiryId, 'visit_scheduled', req.user._id);
+  }
 
   const io = getIo(req);
   if (io) {

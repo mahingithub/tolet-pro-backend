@@ -63,7 +63,8 @@ async function createBooking(req, res, next) {
 
     // If converted from an inquiry, mark it.
     if (inquiryId && isObjectId(inquiryId)) {
-      await Inquiry.findByIdAndUpdate(inquiryId, { status: 'converted' }).catch(() => {});
+      const inquiryHelper = require('../services/inquiry.helper');
+      await inquiryHelper.updateInquiryStatus(inquiryId, 'final_booking', req.user._id).catch(() => {});
     }
 
     return res.status(201).json({ booking });
