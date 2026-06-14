@@ -46,8 +46,8 @@ const InquirySchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ['new', 'pending', 'accepted', 'rejected', 'archived', 'converted', 'active'],
-      default: 'new',
+      enum: ['sent', 'delivered', 'viewed', 'accepted', 'rejected', 'visit_scheduled', 'final_booking'],
+      default: 'sent',
       index: true,
     },
     statusHistory: [

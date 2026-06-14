@@ -29,7 +29,7 @@ async function callerHasUnlockLink(callerId, targetId) {
   const link = await Inquiry.findOne({
     inquirerUserId:   callerId,
     propertyOwnerId:  targetId,
-    status:           { $in: ['new', 'active', 'converted'] },
+    status:           { $ne: 'rejected' },
   }).lean();
 
   return !!link;
