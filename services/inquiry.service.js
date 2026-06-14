@@ -116,6 +116,7 @@ async function listMyInquiries({ user }) {
     const p = propMap[String(i.propertyId)] || {};
     return {
       ...i,
+      id:            String(i._id),
       propCover:     p.coverPhoto || '',
       propLocation:  [p.location, p.area, p.district].filter(Boolean)[0] || '',
       propPrice:     p.price ?? null,

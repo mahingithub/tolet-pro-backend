@@ -19,7 +19,7 @@ exports.getHostInquiries = asyncH(async (req, res) => {
 
 exports.getMyInquiries = asyncH(async (req, res) => {
   const items = await inquiryService.listMyInquiries({ user: req.user });
-  res.json({ inquiries: items.map((d) => d.toJSON()) });
+  res.json({ inquiries: items });
 });
 
 exports.updateInquiryStatus = asyncH(async (req, res) => {
