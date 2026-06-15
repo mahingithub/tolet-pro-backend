@@ -40,10 +40,10 @@ exports.deleteInquiry = asyncH(async (req, res) => {
 });
 
 const inquiryHelper = require('../services/inquiry.helper');
+const notifications = require('../services/notification.service');
 const Property = require('../models/Property');
 const Inquiry = require('../models/Inquiry');
 const Booking = require('../models/Booking');
-const Notification = require('../models/Notification');
 // Assuming socket io can be imported like this, I will check if socket is available.
 // If socket io is not easily importable from a file, we might have to use req.app.get('io')
 // We will assume a hypothetical io getter or use req.app.get('io') inside the route.
@@ -62,12 +62,20 @@ exports.acceptInquiry = asyncH(async (req, res) => {
     io.to(String(inquiry.inquirerUserId)).emit('inquiry:status_updated', { inquiryId: inquiry._id, status: 'accepted' });
   }
   if (inquiry.inquirerUserId) {
-    await Notification.create({
+    // Non-fatal + uses the shared notification service so the tenant also gets
+    // an FCM push. type 'inquiry' + data.targetId match the rest of the app
+    // (raw Notification.create with type:'inquiry_accepted'/metadata used to
+    // THROW — that value isn't in the schema enum and `metadata` isn't a field).
+    notifications.emit({
       userId: inquiry.inquirerUserId,
-      title: 'আপনার ইনকোয়ারি গ্রহণ করা হয়েছে! ভিজিট শিডিউল করুন।',
-      body: 'Your inquiry has been accepted by the landlord.',
-      type: 'inquiry_accepted',
-      metadata: { inquiryId: inquiry._id, propertyId: inquiry.propertyId }
+      type:   'inquiry',
+      title:  'আপনার ইনকোয়ারি গ্রহণ করা হয়েছে! ভিজিট শিডিউল করুন।',
+      body:   'Your inquiry has been accepted by the landlord.',
+      data:   {
+        targetId:   String(inquiry._id),
+        propertyId: String(inquiry.propertyId),
+        status:     'accepted',
+      },
     });
   }
 
@@ -88,12 +96,16 @@ exports.rejectInquiry = asyncH(async (req, res) => {
     io.to(String(inquiry.inquirerUserId)).emit('inquiry:status_updated', { inquiryId: inquiry._id, status: 'rejected' });
   }
   if (inquiry.inquirerUserId) {
-    await Notification.create({
+    notifications.emit({
       userId: inquiry.inquirerUserId,
-      title: 'দুঃখিত, আপনার ইনকোয়ারি প্রত্যাখ্যান করা হয়েছে',
-      body: 'Your inquiry has been rejected by the landlord.',
-      type: 'inquiry_rejected',
-      metadata: { inquiryId: inquiry._id, propertyId: inquiry.propertyId }
+      type:   'inquiry',
+      title:  'দুঃখিত, আপনার ইনকোয়ারি প্রত্যাখ্যান করা হয়েছে',
+      body:   'Your inquiry has been rejected by the landlord.',
+      data:   {
+        targetId:   String(inquiry._id),
+        propertyId: String(inquiry.propertyId),
+        status:     'rejected',
+      },
     });
   }
   
@@ -109,6 +121,10 @@ exports.confirmDeal = asyncH(async (req, res) => {
   // Update property
   const property = await Property.findById(inquiry.propertyId);
   if (property) {
+    // `status` is what search/listing filters on (default query is status:'active'),
+    // so flip it to 'rented' to actually remove the unit from public results.
+    // `availabilityStatus` is the separate availability indicator. Set both.
+    property.status = 'rented';
     property.availabilityStatus = 'rented';
     await property.save();
   }
@@ -134,12 +150,16 @@ exports.confirmDeal = asyncH(async (req, res) => {
     io.to(String(inquiry.inquirerUserId)).emit('rent:updated', { propertyId: inquiry.propertyId });
   }
   if (inquiry.inquirerUserId) {
-    await Notification.create({
+    notifications.emit({
       userId: inquiry.inquirerUserId,
-      title: `অভিনন্দন! ${property ? property.title : 'প্রপার্টি'} এর ডিল নিশ্চিত হয়েছে`,
-      body: 'Your deal has been confirmed.',
-      type: 'deal_confirmed',
-      metadata: { inquiryId: inquiry._id, propertyId: inquiry.propertyId }
+      type:   'inquiry',
+      title:  `অভিনন্দন! ${property ? property.title : 'প্রপার্টি'} এর ডিল নিশ্চিত হয়েছে`,
+      body:   'Your deal has been confirmed.',
+      data:   {
+        targetId:   String(inquiry._id),
+        propertyId: String(inquiry.propertyId),
+        status:     'final_booking',
+      },
     });
   }
 

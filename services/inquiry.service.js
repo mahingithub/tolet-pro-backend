@@ -43,7 +43,7 @@ async function createInquiry({ body, user }) {
     msg:             body.message,
     leaseStart:      body.leaseStart || null,
     leaseEnd:        body.leaseEnd   || null,
-    status:          'sent',
+    status:          'new',
   });
 
   // Lazy counter bump so the property card's "X inquiries" badge stays
@@ -55,8 +55,8 @@ async function createInquiry({ body, user }) {
   notifications.emit({
     userId: property.ownerUserId,
     type:   'inquiry',
-    title:  'নতুন ইনকোয়ারি',
-    body:   `নতুন ইনকোয়ারি এসেছে ${user.name || 'ভাড়াটিয়া'} থেকে`,
+    title:  `New inquiry from ${user.name || 'a tenant'}`,
+    body:   (body.message || '').slice(0, 140),
     data:   {
       targetId:    String(doc._id),
       peerId:      String(user._id),
@@ -73,34 +73,7 @@ async function createInquiry({ body, user }) {
 async function listHostInquiries({ user, status }) {
   const filter = { propertyOwnerId: user._id };
   if (status) filter.status = status;
-  
-  const inquiries = await Inquiry.find(filter).sort({ createdAt: -1, _id: -1 }).lean();
-  if (inquiries.length === 0) return [];
-
-  const propertyIds = [...new Set(inquiries.map(i => String(i.propertyId)))].filter(id => mongoose.Types.ObjectId.isValid(id)).map(id => new mongoose.Types.ObjectId(id));
-  const inquiryIds = inquiries.map(i => i._id);
-
-  const [props, visits] = await Promise.all([
-    Property.find({ _id: { $in: propertyIds } }, { availabilityStatus: 1 }).lean(),
-    mongoose.model('VisitSchedule').find({ inquiryId: { $in: inquiryIds } }).lean()
-  ]);
-
-  const propMap = {};
-  props.forEach(p => { propMap[String(p._id)] = p; });
-
-  const visitMap = {};
-  visits.forEach(v => { visitMap[String(v.inquiryId)] = v; });
-
-  return inquiries.map(i => {
-    const p = propMap[String(i.propertyId)] || {};
-    const v = visitMap[String(i._id)] || null;
-    return {
-      ...i,
-      id: String(i._id),
-      propAvailabilityStatus: p.availabilityStatus || 'available',
-      visitSchedule: v,
-    };
-  });
+  return Inquiry.find(filter).sort({ createdAt: -1, _id: -1 });
 }
 
 async function listMyInquiries({ user }) {
@@ -115,8 +88,8 @@ async function listMyInquiries({ user }) {
   // httpOnly $cond collapses any legacy base64 coverPhoto to '' INSIDE Mongo —
   // the base64 never loads into Node memory (same OOM-guard as property.service).
   const propertyIds = [...new Set(
-    inquiries.map((i) => i.propertyId ? String(i.propertyId) : null).filter(Boolean),
-  )].filter(id => mongoose.Types.ObjectId.isValid(id)).map((id) => new mongoose.Types.ObjectId(id));
+    inquiries.map((i) => String(i.propertyId)).filter(Boolean),
+  )].map((id) => new mongoose.Types.ObjectId(id));
 
   const props = propertyIds.length
     ? await Property.aggregate([
@@ -130,7 +103,7 @@ async function listMyInquiries({ user }) {
                 '',
               ],
             },
-            location: 1, area: 1, district: 1, price: 1, ownerPhone: 1, ownerName: 1, availabilityStatus: 1,
+            location: 1, area: 1, district: 1, price: 1, ownerPhone: 1, ownerName: 1,
           },
         },
       ])
@@ -139,24 +112,15 @@ async function listMyInquiries({ user }) {
   const propMap = {};
   props.forEach((p) => { propMap[String(p._id)] = p; });
 
-  const inquiryIds = inquiries.map(i => i._id);
-  const visits = await mongoose.model('VisitSchedule').find({ inquiryId: { $in: inquiryIds } }).lean();
-  const visitMap = {};
-  visits.forEach(v => { visitMap[String(v.inquiryId)] = v; });
-
   return inquiries.map((i) => {
     const p = propMap[String(i.propertyId)] || {};
-    const v = visitMap[String(i._id)] || null;
     return {
       ...i,
-      id:            String(i._id),
       propCover:     p.coverPhoto || '',
       propLocation:  [p.location, p.area, p.district].filter(Boolean)[0] || '',
       propPrice:     p.price ?? null,
       landlordPhone: p.ownerPhone || '',
       landlordName:  p.ownerName  || '',
-      propAvailabilityStatus: p.availabilityStatus || 'available',
-      visitSchedule: v,
     };
   });
 }
@@ -175,15 +139,10 @@ async function updateInquiryStatus({ id, body, user }) {
 
   // Fire-and-forget notification to the tenant who originally inquired.
   if (doc.inquirerUserId && body.status !== prevStatus) {
-    let titleMsg = `Your inquiry was marked ${body.status}`;
-    if (body.status === 'viewed') titleMsg = 'আপনার ইনকোয়ারি দেখা হয়েছে';
-    else if (body.status === 'accepted') titleMsg = 'আপনার ইনকোয়ারি গ্রহণ করা হয়েছে! ভিজিট শিডিউল করুন।';
-    else if (body.status === 'rejected') titleMsg = 'দুঃখিত, আপনার ইনকোয়ারি প্রত্যাখ্যান করা হয়েছে।';
-
     notifications.emit({
       userId: doc.inquirerUserId,
       type:   'inquiry',
-      title:  titleMsg,
+      title:  `Your inquiry was marked ${body.status}`,
       body:   doc.propTitle ? `Re: ${doc.propTitle}` : '',
       data:   {
         targetId:      String(doc._id),
@@ -195,16 +154,6 @@ async function updateInquiryStatus({ id, body, user }) {
         status:        body.status,
       },
     });
-
-    try {
-      const { getIo } = require('../socket');
-      const io = getIo();
-      if (io) {
-        io.to(String(doc.inquirerUserId)).emit('inquiry:status_updated', { inquiryId: String(doc._id), status: body.status });
-      }
-    } catch (err) {
-      console.warn('[socket] emit error in updateInquiryStatus:', err.message);
-    }
   }
 
   return doc;
@@ -226,11 +175,23 @@ async function deleteInquiry({ id, user }) {
   await Inquiry.deleteOne({ _id: id });
 
   // Clean up notifications that deep-link to THIS inquiry so neither party is
-  // left tapping a bell item pointing at a now-deleted record. Inquiry
-  // notifications carry the inquiry id as `data.targetId` (see createInquiry /
-  // updateInquiryStatus above). Fire-and-forget — failure is non-fatal.
-  Notification.deleteMany({ 'data.targetId': String(id) })
-    .catch((err) => console.warn('[inquiry] notification cleanup failed:', err.message));
+  // left tapping a bell item pointing at a now-deleted record. The codebase
+  // emits inquiry notifications in TWO shapes: inquiry.service uses
+  // `data.targetId` (stored as a string), while inquiry.controller's
+  // accept/reject/deal use `metadata.inquiryId` (stored as an ObjectId). We
+  // match both keys, in both string and ObjectId form, so nothing is missed.
+  // Fire-and-forget — failure is non-fatal.
+  const idStr = String(id);
+  let idObj = null;
+  try { idObj = new mongoose.Types.ObjectId(idStr); } catch { /* not a castable id */ }
+  const idForms = idObj ? [idStr, idObj] : [idStr];
+  Notification.deleteMany({
+    $or: [
+      { 'data.targetId':      { $in: idForms } },
+      { 'data.inquiryId':     { $in: idForms } },
+      { 'metadata.inquiryId': { $in: idForms } },
+    ],
+  }).catch((err) => console.warn('[inquiry] notification cleanup failed:', err.message));
 
   // We deliberately DO NOT delete the chat/conversation here: a conversation is
   // a property-level thread between the two users and can outlive any single

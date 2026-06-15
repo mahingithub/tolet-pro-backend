@@ -83,6 +83,25 @@ const chatLimiter = rateLimit({
 });
 
 /**
+ * AI — the Gemini assistant endpoint (/api/ai-chat/ask). UNLIKE every other
+ * limiter here, each call costs REAL MONEY (an LLM request — and one user
+ * message can trigger 2–3 Gemini round-trips when the property-search tool
+ * fires). So this is deliberately TIGHTER than writeLimiter and sits on its own
+ * bucket, so AI spend can't be run up by — and doesn't eat into — normal writes.
+ *
+ * 30 requests / 15 min per IP ≈ ~2 questions/min sustained: comfortable for a
+ * real person genuinely searching, but caps cost/abuse from a logged-out
+ * visitor hammering it. Bump `max` DOWN to cut spend, UP if real users complain.
+ * (For per-user / premium quotas, gate inside the controller once the route is
+ * authed — IP keying is the right backstop for a public endpoint.)
+ */
+const aiLimiter = rateLimit({
+  ...base,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30,
+});
+
+/**
  * LIGHT — global backstop across the whole API. Catches anything not covered
  * above and protects the free-tier server from a flood.
  * 300 requests per minute per IP — very high; a real session (loading
@@ -94,4 +113,4 @@ const apiLimiter = rateLimit({
   max: 300,
 });
 
-module.exports = { authLimiter, writeLimiter, chatLimiter, apiLimiter };
+module.exports = { authLimiter, writeLimiter, chatLimiter, apiLimiter, aiLimiter };
