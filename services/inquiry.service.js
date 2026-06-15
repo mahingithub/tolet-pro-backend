@@ -43,7 +43,7 @@ async function createInquiry({ body, user }) {
     msg:             body.message,
     leaseStart:      body.leaseStart || null,
     leaseEnd:        body.leaseEnd   || null,
-    status:          'new',
+    status:          'sent',
   });
 
   // Lazy counter bump so the property card's "X inquiries" badge stays
