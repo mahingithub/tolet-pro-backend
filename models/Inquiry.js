@@ -49,7 +49,7 @@ const InquirySchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ['sent', 'delivered', 'viewed', 'accepted', 'rejected', 'visit_scheduled', 'final_booking'],
+      enum: ['sent', 'delivered', 'viewed', 'accepted', 'rejected', 'visit_scheduled', 'final_booking', 'rented'],
       default: 'sent',
       index: true,
     },
