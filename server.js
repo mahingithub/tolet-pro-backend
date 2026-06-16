@@ -155,6 +155,20 @@ async function start() {
     console.log(`[server] listening on :${env.port} (${env.nodeEnv})`);
     console.log(`[server] CORS origins: ${env.corsOrigins.join(', ')}`);
   });
+
+  // ─── Visit reminders ───────────────────────────────────────────────────
+  // Always-on server (Render Starter+) runs this in-process — no external
+  // cron / GitHub Action needed. Every 15 min it reminds BOTH the tenant and
+  // the landlord ~2 hours before an accepted visit. NOTE: on the free tier the
+  // server sleeps after 15 min idle, so the window can be missed — upgrade to
+  // an always-on instance for this to be reliable.
+  const { runVisitReminders } = require('./services/visitReminder.service');
+  setTimeout(function bootVisitReminders() {
+    runVisitReminders().catch((e) => console.warn('[visit-reminder] first run failed:', e.message));
+    setInterval(() => {
+      runVisitReminders().catch((e) => console.warn('[visit-reminder] run failed:', e.message));
+    }, 15 * 60 * 1000);
+  }, 15 * 1000);
 }
 
 start();
