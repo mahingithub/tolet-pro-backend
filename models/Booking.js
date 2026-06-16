@@ -66,6 +66,8 @@ const BookingSchema = new mongoose.Schema(
     // Monthly rent ledger — Map of 'YYYY-MM' → LedgerEntry.
     ledger: { type: Map, of: LedgerEntrySchema, default: {} },
 
+    deletedAt:        { type: Date, default: null },
+
     status: {
       type: String,
       enum: ['draft', 'active', 'completed'],

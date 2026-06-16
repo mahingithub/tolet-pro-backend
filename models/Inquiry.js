@@ -41,6 +41,9 @@ const InquirySchema = new mongoose.Schema(
     phone:          { type: String, trim: true, default: '', maxlength: 20 },
 
     msg:        { type: String, trim: true, default: '', maxlength: 2000 },
+    messages:   [{ sender: String, senderId: mongoose.Schema.Types.ObjectId, text: String, createdAt: Date }],
+    visitSchedule: { proposedBy: String, date: String, time: String, location: String, status: String },
+
     leaseStart: { type: Date,   default: null },
     leaseEnd:   { type: Date,   default: null },
 
