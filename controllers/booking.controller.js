@@ -55,6 +55,15 @@ async function createBooking(req, res, next) {
     const rent = Number(monthlyRent);
     if (!rent || rent <= 0) throw ApiError.badRequest('মাসিক ভাড়া ০ এর বেশি হতে হবে।');
 
+    // Dedup: এক inquiry-র জন্য একটাই active booking। আগে convert হয়ে থাকলে
+    // নতুন duplicate না বানিয়ে সেটাই ফেরত দাও।
+    if (inquiryId && isObjectId(inquiryId)) {
+      const existsForInquiry = await Booking.findOne({ inquiryId, status: { $ne: 'cancelled' } });
+      if (existsForInquiry) {
+        return res.status(200).json({ booking: existsForInquiry, deduped: true });
+      }
+    }
+
     const booking = await Booking.create({
       landlordId:       req.user._id,
       tenantId:         tenantId && isObjectId(tenantId) ? tenantId : null,
