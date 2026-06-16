@@ -281,8 +281,7 @@ async function cancelBooking(req, res, next) {
       throw ApiError.forbidden('এই বুকিং আপনার নয়।');
     }
 
-    booking.status = 'cancelled';
-    await booking.save();
+    await Booking.updateOne({ _id: id }, { $set: { status: 'cancelled' } });
 
     // Drop the active card from the tenant's dashboard in realtime.
     notifySocket(booking.tenantId, 'rent:updated', {
