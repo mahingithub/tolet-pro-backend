@@ -13,5 +13,7 @@ router.get('/tenant',                     requireAuth, ctrl.listTenantBookings);
 router.patch('/:id/ledger/:monthKey',     requireAuth, ctrl.updateLedger);
 router.delete('/:id/ledger/:monthKey',    requireAuth, ctrl.undoLedger);
 router.patch('/:id',                      requireAuth, ctrl.updateBooking);
+// "Delete / Exclude" a booking — SOFT delete (status → 'cancelled').
+router.delete('/:id',                     requireAuth, ctrl.cancelBooking);
 
 module.exports = router;

@@ -11,14 +11,28 @@
 const mongoose      = require('mongoose');
 const Booking       = require('../models/Booking');
 const Receipt       = require('../models/Receipt');
-const Inquiry       = require('../models/Inquiry');
 const notifications = require('../services/notification.service');
 const { applyPayment } = require('../services/bookingPayment.service');
 const ApiError      = require('../utils/ApiError');
+const { getIo, emitToUser } = require('../socket');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
+}
+
+// CRITICAL: sockets join room `user:<id>` (socket.js → roomFor). The old code
+// emitted to `io.to(String(userId))` — a raw-id room nobody is in — so tenants
+// never received realtime rent/booking updates. emitToUser() targets the room
+// correctly.
+function notifySocket(userId, event, payload) {
+  if (!userId) return;
+  try {
+    const io = getIo();
+    if (io) emitToUser(io, String(userId), event, payload);
+  } catch (err) {
+    console.warn('[booking] socket emit failed:', err.message);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,10 +75,23 @@ async function createBooking(req, res, next) {
       chatId:           chatId || '',
     });
 
-    // If converted from an inquiry, mark it.
+    // If converted from an inquiry, mark it 'final_booking' AND tell the tenant
+    // in realtime so their timeline flips to "Deal Confirmed 🎉" without a refresh.
     if (inquiryId && isObjectId(inquiryId)) {
       const inquiryHelper = require('../services/inquiry.helper');
-      await inquiryHelper.updateInquiryStatus(inquiryId, 'final_booking', req.user._id).catch(() => {});
+      const updatedInq = await inquiryHelper
+        .updateInquiryStatus(inquiryId, 'final_booking', req.user._id)
+        .catch(() => null);
+
+      if (updatedInq && updatedInq.inquirerUserId) {
+        notifySocket(updatedInq.inquirerUserId, 'inquiry:status_updated', {
+          inquiryId: String(updatedInq._id),
+          status:    'final_booking',
+        });
+        notifySocket(updatedInq.inquirerUserId, 'rent:updated', {
+          bookingId: String(booking._id),
+        });
+      }
     }
 
     return res.status(201).json({ booking });
@@ -74,11 +101,11 @@ async function createBooking(req, res, next) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/bookings/host — landlord's bookings
+// GET /api/bookings/host — landlord's bookings (cancelled excluded)
 // ─────────────────────────────────────────────────────────────────────────────
 async function listHostBookings(req, res, next) {
   try {
-    const bookings = await Booking.find({ landlordId: req.user._id })
+    const bookings = await Booking.find({ landlordId: req.user._id, status: { $ne: 'cancelled' } })
       .sort({ createdAt: -1 })
       .lean();
     bookings.forEach(b => { b.id = String(b._id); delete b._id; });
@@ -97,7 +124,7 @@ async function listTenantBookings(req, res, next) {
     if (req.user.phone) {
       conditions.push({ tenantPhone: req.user.phone });
     }
-    const bookings = await Booking.find({ $or: conditions })
+    const bookings = await Booking.find({ $or: conditions, status: { $ne: 'cancelled' } })
       .sort({ createdAt: -1 })
       .lean();
     bookings.forEach(b => { b.id = String(b._id); delete b._id; });
@@ -208,19 +235,10 @@ async function updateBooking(req, res, next) {
 
     await booking.save();
 
-    // Notify Tenant about rent/booking update
+    // Notify Tenant about rent/booking update (room-correct emit).
     if (booking.tenantId) {
-      try {
-        const { getIo } = require('../socket');
-        const io = getIo();
-        if (io) {
-          io.to(String(booking.tenantId)).emit('rent:updated', { bookingId: String(booking._id) });
-        }
-      } catch (err) {
-        console.warn('[socket] emit error in updateBooking:', err.message);
-      }
+      notifySocket(booking.tenantId, 'rent:updated', { bookingId: String(booking._id) });
 
-      const notifications = require('../services/notification.service');
       notifications.emit({
         userId: booking.tenantId,
         type:   'rent_updated',
@@ -236,6 +254,39 @@ async function updateBooking(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/bookings/:id — landlord "Delete / Exclude" a booking (SOFT delete)
+// ─────────────────────────────────────────────────────────────────────────────
+// We DON'T wipe the row: receipts, disputes, and revenue stats depend on the
+// history. We flip status to 'cancelled' (excluded from host + tenant lists).
+// NOTE: this intentionally does NOT re-list the property — if the host wants
+// the unit back on the market they can re-activate it from the Properties tab.
+async function cancelBooking(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isObjectId(id)) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+
+    const booking = await Booking.findById(id);
+    if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+    if (String(booking.landlordId) !== String(req.user._id)) {
+      throw ApiError.forbidden('এই বুকিং আপনার নয়।');
+    }
+
+    booking.status = 'cancelled';
+    await booking.save();
+
+    // Drop the active card from the tenant's dashboard in realtime.
+    notifySocket(booking.tenantId, 'rent:updated', {
+      bookingId: String(booking._id),
+      status:    'cancelled',
+    });
+
+    return res.json({ success: true, id: String(booking._id) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   createBooking,
   listHostBookings,
@@ -243,4 +294,5 @@ module.exports = {
   updateLedger,
   undoLedger,
   updateBooking,
+  cancelBooking,
 };

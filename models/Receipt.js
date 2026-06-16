@@ -13,6 +13,12 @@
  * Compound unique index on { bookingId, monthKey } ensures at most one
  * receipt per booking per month — the controller uses findOneAndUpdate
  * with upsert so re-marking a month replaces the old receipt atomically.
+ *
+ * RENTING-LIFECYCLE ADDITIONS: the receipt now snapshots the full money
+ * breakdown (monthlyRent + serviceCharge) AND the landlord's profile
+ * (landlordName / landlordPhone) so the tenant's receipt shows "everything
+ * from property name to rent to landlord" without a JOIN. These are written
+ * by bookingPayment.service.applyPayment.
  */
 
 const mongoose = require('mongoose');
@@ -27,13 +33,22 @@ const ReceiptSchema = new mongoose.Schema(
     propertyTitle: { type: String, trim: true, default: '' },
     tenantPhone:   { type: String, trim: true, default: '' },
 
+    // Landlord profile snapshot (so the receipt is self-contained).
+    landlordName:  { type: String, trim: true, default: '' },
+    landlordPhone: { type: String, trim: true, default: '' },
+
     monthKey:   { type: String, required: true, trim: true },   // e.g. '2026-05'
     monthLabel: { type: String, trim: true, default: '' },       // e.g. 'May 2026'
 
     status:    { type: String, enum: ['full', 'partial'], required: true },
-    totalDue:  { type: Number, required: true },
-    totalPaid: { type: Number, required: true },
-    balance:   { type: Number, default: 0 },
+
+    // Money breakdown — base rent + service charge are snapshotted so the
+    // receipt can show the full line items, not just the paid total.
+    monthlyRent:   { type: Number, default: 0 },
+    serviceCharge: { type: Number, default: 0 },
+    totalDue:      { type: Number, required: true },
+    totalPaid:     { type: Number, required: true },
+    balance:       { type: Number, default: 0 },
 
     method: { type: String, trim: true, default: '' },
     txnId:  { type: String, trim: true, default: '' },

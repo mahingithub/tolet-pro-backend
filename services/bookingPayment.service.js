@@ -9,16 +9,13 @@
  *   • Manual host action  → booking.controller.updateLedger
  *   • Payment gateway      → payment.controller webhook (added later)
  *
- * The old inline logic lived in updateLedger; it's been lifted here verbatim
- * (same Receipt fields, same notification) with two fixes:
- *   1) `paid` is now derived ONLY from full/partial (previously `status !== 'due'`,
- *      which wrongly marked the new 'pending'/'overdue'/'scheduled' rows as paid).
- *   2) `paymentSource` ('manual' | 'gateway') is recorded on the ledger entry
- *      (and the receipt, once you add the field to Receipt.js).
+ * The receipt now snapshots monthlyRent + serviceCharge + the landlord's
+ * name/phone so the tenant's receipt is fully self-contained.
  */
 
 const Booking       = require('../models/Booking');
 const Receipt       = require('../models/Receipt');
+const User          = require('../models/User');
 const notifications = require('./notification.service');
 
 // Only these two statuses mean "money actually came in".
@@ -55,6 +52,12 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
   await booking.save();
 
   if (PAID_STATUSES.includes(status)) {
+    // Landlord profile snapshot for the receipt (self-contained, no JOIN at read).
+    const landlord = await User.findById(booking.landlordId)
+      .select('name phone')
+      .lean()
+      .catch(() => null);
+
     // Receipt upsert — denormalized so dashboards don't JOIN every render.
     const receiptDoc = await Receipt.findOneAndUpdate(
       { bookingId: booking._id, monthKey },
@@ -65,15 +68,19 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
           propertyId:    booking.propertyId,
           propertyTitle: booking.property || '',
           tenantPhone:   booking.tenantPhone || null,
+          landlordName:  landlord?.name  || '',
+          landlordPhone: landlord?.phone || '',
           monthLabel:    payment.monthLabel || monthKey,
           status,
+          monthlyRent:   Number(booking.monthlyRent)   || 0,
+          serviceCharge: Number(booking.serviceCharge) || 0,
           totalDue:      Number(payment.totalDue) || Number(booking.monthlyRent) || 0,
           totalPaid:     Number(payment.amount) || 0,
           balance:       Number(payment.balance) || 0,
           method:        payment.method || '',
           txnId:         payment.txnId || '',
           paidOn:        payment.paidOn || '',
-          paymentSource, // add this field to Receipt.js to persist (ignored until then)
+          paymentSource,
           issuedAt:      new Date(),
           read:          false,
         },
