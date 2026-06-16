@@ -1,8 +1,49 @@
 'use strict';
 
 const inquiryService = require('../services/inquiry.service');
+const inquiryHelper  = require('../services/inquiry.helper');
+const notifications  = require('../services/notification.service');
+const Inquiry        = require('../models/Inquiry');
+const { getIo, emitToUser } = require('../socket');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+// ─── Socket helper ──────────────────────────────────────────────────────────
+// CRITICAL: sockets join the room `user:<id>` (see socket.js → roomFor). The
+// old code emitted to `io.to(String(userId))` — a raw-id room nobody is in —
+// so tenants never received realtime updates. emitToUser() targets the room
+// correctly. Always route inquiry emits through here.
+function notifySocket(userId, event, payload) {
+  if (!userId) return;
+  try {
+    const io = getIo();
+    if (io) emitToUser(io, String(userId), event, payload);
+  } catch (err) {
+    console.warn('[inquiry] socket emit failed:', err.message);
+  }
+}
+
+// Serialize a visitSchedule subdoc into a plain socket-safe payload.
+function plainVisit(vs) {
+  if (!vs) return null;
+  return {
+    proposedBy: vs.proposedBy || '',
+    date:       vs.date || '',
+    time:       vs.time || '',
+    location:   vs.location || '',
+    status:     vs.status || 'none',
+  };
+}
+
+function plainMessage(m) {
+  if (!m) return null;
+  return {
+    sender:    m.sender,
+    senderId:  m.senderId ? String(m.senderId) : null,
+    text:      m.text,
+    createdAt: m.createdAt,
+  };
+}
 
 exports.createInquiry = asyncH(async (req, res) => {
   const doc = await inquiryService.createInquiry({ body: req.body, user: req.user });
@@ -28,6 +69,11 @@ exports.updateInquiryStatus = asyncH(async (req, res) => {
     body: req.body,
     user: req.user,
   });
+  // Keep the tenant's timeline in sync in realtime too.
+  notifySocket(doc.inquirerUserId, 'inquiry:status_updated', {
+    inquiryId: String(doc._id),
+    status:    doc.status,
+  });
   res.json({ inquiry: doc.toJSON() });
 });
 
@@ -39,33 +85,20 @@ exports.deleteInquiry = asyncH(async (req, res) => {
   res.json({ success: true });
 });
 
-const inquiryHelper = require('../services/inquiry.helper');
-const notifications = require('../services/notification.service');
-const Property = require('../models/Property');
-const Inquiry = require('../models/Inquiry');
-const Booking = require('../models/Booking');
-// Assuming socket io can be imported like this, I will check if socket is available.
-// If socket io is not easily importable from a file, we might have to use req.app.get('io')
-// We will assume a hypothetical io getter or use req.app.get('io') inside the route.
-
 exports.acceptInquiry = asyncH(async (req, res) => {
   const inquiry = await Inquiry.findById(req.params.id);
   if (!inquiry || String(inquiry.propertyOwnerId) !== String(req.user._id)) {
     return res.status(403).json({ error: 'Unauthorized or not found' });
   }
-  
+
   await inquiryHelper.updateInquiryStatus(req.params.id, 'accepted', req.user._id);
-  
-  // Agent 3 Notifications
-  const io = req.app.get('io');
-  if (io && inquiry.inquirerUserId) {
-    io.to(String(inquiry.inquirerUserId)).emit('inquiry:status_updated', { inquiryId: inquiry._id, status: 'accepted' });
-  }
+
+  notifySocket(inquiry.inquirerUserId, 'inquiry:status_updated', {
+    inquiryId: String(inquiry._id),
+    status:    'accepted',
+  });
+
   if (inquiry.inquirerUserId) {
-    // Non-fatal + uses the shared notification service so the tenant also gets
-    // an FCM push. type 'inquiry' + data.targetId match the rest of the app
-    // (raw Notification.create with type:'inquiry_accepted'/metadata used to
-    // THROW — that value isn't in the schema enum and `metadata` isn't a field).
     notifications.emit({
       userId: inquiry.inquirerUserId,
       type:   'inquiry',
@@ -87,14 +120,14 @@ exports.rejectInquiry = asyncH(async (req, res) => {
   if (!inquiry || String(inquiry.propertyOwnerId) !== String(req.user._id)) {
     return res.status(403).json({ error: 'Unauthorized or not found' });
   }
-  
+
   await inquiryHelper.updateInquiryStatus(req.params.id, 'rejected', req.user._id);
 
-  // Agent 3 Notifications
-  const io = req.app.get('io');
-  if (io && inquiry.inquirerUserId) {
-    io.to(String(inquiry.inquirerUserId)).emit('inquiry:status_updated', { inquiryId: inquiry._id, status: 'rejected' });
-  }
+  notifySocket(inquiry.inquirerUserId, 'inquiry:status_updated', {
+    inquiryId: String(inquiry._id),
+    status:    'rejected',
+  });
+
   if (inquiry.inquirerUserId) {
     notifications.emit({
       userId: inquiry.inquirerUserId,
@@ -108,60 +141,57 @@ exports.rejectInquiry = asyncH(async (req, res) => {
       },
     });
   }
-  
+
   res.json({ success: true, status: 'rejected' });
 });
 
-exports.confirmDeal = asyncH(async (req, res) => {
-  const inquiry = await Inquiry.findById(req.params.id);
-  if (!inquiry || String(inquiry.propertyOwnerId) !== String(req.user._id)) {
-    return res.status(403).json({ error: 'Unauthorized or not found' });
-  }
-  
-  // Update property
-  const property = await Property.findById(inquiry.propertyId);
-  if (property) {
-    // `status` is what search/listing filters on (default query is status:'active'),
-    // so flip it to 'rented' to actually remove the unit from public results.
-    // `availabilityStatus` is the separate availability indicator. Set both.
-    property.status = 'rented';
-    property.availabilityStatus = 'rented';
-    await property.save();
-  }
-  
-  // Update inquiry
-  await inquiryHelper.updateInquiryStatus(req.params.id, 'accepted', req.user._id);
-  
-  // Create Booking
-  if (inquiry.inquirerUserId) {
-    await Booking.create({
-      propertyId: inquiry.propertyId,
-      landlordId: inquiry.propertyOwnerId,
-      tenantId: inquiry.inquirerUserId,
-      inquiryId: inquiry._id,
-      status: 'confirmed',
-    });
-  }
+// ─── Reply: landlord (or tenant) appends a message to the inquiry thread ────
+exports.replyInquiry = asyncH(async (req, res) => {
+  const { inquiry, message, targetUserId } = await inquiryService.replyToInquiry({
+    id: req.params.id,
+    body: req.body,
+    user: req.user,
+  });
 
-  // Agent 3 Notifications
-  const io = req.app.get('io');
-  if (io && inquiry.inquirerUserId) {
-    io.to(String(inquiry.inquirerUserId)).emit('inquiry:status_updated', { inquiryId: inquiry._id, status: 'accepted' });
-    io.to(String(inquiry.inquirerUserId)).emit('rent:updated', { propertyId: inquiry.propertyId });
-  }
-  if (inquiry.inquirerUserId) {
-    notifications.emit({
-      userId: inquiry.inquirerUserId,
-      type:   'inquiry',
-      title:  `অভিনন্দন! ${property ? property.title : 'প্রপার্টি'} এর ডিল নিশ্চিত হয়েছে`,
-      body:   'Your deal has been confirmed.',
-      data:   {
-        targetId:   String(inquiry._id),
-        propertyId: String(inquiry.propertyId),
-        status:     'final_booking',
-      },
-    });
-  }
+  notifySocket(targetUserId, 'inquiry:status_updated', {
+    inquiryId: String(inquiry._id),
+    status:    inquiry.status,
+    message:   plainMessage(message),
+  });
 
-  res.json({ success: true, status: 'accepted' });
+  res.json({ inquiry: inquiry.toJSON(), message: plainMessage(message) });
+});
+
+// ─── Propose a visit (either party) ─────────────────────────────────────────
+exports.proposeVisit = asyncH(async (req, res) => {
+  const { inquiry, targetUserId } = await inquiryService.proposeVisit({
+    id: req.params.id,
+    body: req.body,
+    user: req.user,
+  });
+
+  notifySocket(targetUserId, 'inquiry:status_updated', {
+    inquiryId:     String(inquiry._id),
+    status:        inquiry.status,
+    visitSchedule: plainVisit(inquiry.visitSchedule),
+  });
+
+  res.json({ inquiry: inquiry.toJSON() });
+});
+
+// ─── Accept / reject a pending visit (the OTHER party) ──────────────────────
+exports.respondVisit = asyncH(async (req, res) => {
+  const { inquiry, targetUserId } = await inquiryService.respondToVisit({
+    id: req.params.id,
+    body: req.body,
+    user: req.user,
+  });
+
+  notifySocket(targetUserId, 'inquiry:status_updated', {
+    inquiryId:     String(inquiry._id),
+    status:        inquiry.status,
+    visitSchedule: plainVisit(inquiry.visitSchedule),
+  });
+
+  res.json({ inquiry: inquiry.toJSON() });
 });

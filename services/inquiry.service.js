@@ -3,16 +3,23 @@
 /**
  * inquiry.service.js
  *
- * IMPORTANT: field names here MUST match `models/Inquiry.js`:
- *   - propertyId, propTitle
- *   - propertyOwnerId (required)
- *   - inquirerUserId, user, phone
- *   - msg
- *   - status ∈ {'new','active','archived','converted','rejected'}
+ * IMPORTANT: field names here MUST match `models/Inquiry.js`.
  *
- * The `tenant.controller.js` privacy-unlock query relies on
- *   { inquirerUserId, propertyOwnerId, status ∈ ['new','active','converted'] }
- * so any deviation here breaks the tenant-profile phone/email unlock.
+ * The live status vocabulary is the model enum:
+ *   'sent' | 'delivered' | 'viewed' | 'accepted' | 'rejected'
+ *   | 'visit_scheduled' | 'final_booking'
+ *
+ * (The older `new/active/converted` vocabulary referenced by the tenant
+ * privacy-unlock query is stale — that query needs a separate follow-up so
+ * the phone/email unlock keys off "an inquiry exists between these two
+ * users" or the accepted/visit/booking statuses above.)
+ *
+ * RENTING-LIFECYCLE ADDITIONS:
+ *   • createInquiry now APPENDS to an open thread instead of spawning a new
+ *     row when the same tenant re-inquires on the same property.
+ *   • replyToInquiry  — landlord (or tenant) appends a message to the thread.
+ *   • proposeVisit    — either party proposes a visit slot.
+ *   • respondToVisit  — the OTHER party accepts/rejects → blue tick on accept.
  */
 
 const mongoose      = require('mongoose');
@@ -21,6 +28,8 @@ const Property      = require('../models/Property');
 const Notification  = require('../models/Notification');
 const ApiError      = require('../utils/ApiError');
 const notifications = require('./notification.service');
+
+const TERMINAL_STATUSES = ['rejected', 'final_booking'];
 
 async function createInquiry({ body, user }) {
   const property = await Property.findById(body.propertyId);
@@ -33,6 +42,49 @@ async function createInquiry({ body, user }) {
     });
   }
 
+  const text = String(body.message || '').trim();
+
+  // ── Append-to-thread ──────────────────────────────────────────────────
+  // If this tenant already has an OPEN inquiry on this property, push the
+  // new message into it instead of creating another row (keeps the host
+  // inbox clean). 'rejected' / 'final_booking' are terminal — a fresh ask
+  // after those legitimately starts a new inquiry.
+  const existing = await Inquiry.findOne({
+    propertyId:     property._id,
+    inquirerUserId: user._id,
+    status:         { $nin: TERMINAL_STATUSES },
+  }).sort({ createdAt: -1 });
+
+  if (existing) {
+    if (text) {
+      existing.messages.push({
+        sender:    'tenant',
+        senderId:  user._id,
+        text:      text.slice(0, 2000),
+        createdAt: new Date(),
+      });
+      await existing.save();
+    }
+
+    notifications.emit({
+      userId: property.ownerUserId,
+      type:   'inquiry',
+      title:  `${user.name || 'একজন ভাড়াটিয়া'} আবার মেসেজ পাঠিয়েছেন`,
+      body:   text.slice(0, 140),
+      data:   {
+        targetId:      String(existing._id),
+        peerId:        String(user._id),
+        peerName:      user.name || '',
+        peerAvatar:    user.avatar || '',
+        propertyId:    String(property._id),
+        propertyTitle: property.title || '',
+      },
+    });
+
+    return existing;
+  }
+
+  // ── First inquiry on this property → create a fresh row + seed thread ──
   const doc = await Inquiry.create({
     propertyId:      property._id,
     propTitle:       property.title || '',
@@ -40,7 +92,10 @@ async function createInquiry({ body, user }) {
     inquirerUserId:  user._id,
     user:            user.name  || '',
     phone:           user.phone || '',
-    msg:             body.message,
+    msg:             text,
+    messages:        text
+      ? [{ sender: 'tenant', senderId: user._id, text: text.slice(0, 2000), createdAt: new Date() }]
+      : [],
     leaseStart:      body.leaseStart || null,
     leaseEnd:        body.leaseEnd   || null,
     status:          'sent',
@@ -56,13 +111,13 @@ async function createInquiry({ body, user }) {
     userId: property.ownerUserId,
     type:   'inquiry',
     title:  `New inquiry from ${user.name || 'a tenant'}`,
-    body:   (body.message || '').slice(0, 140),
+    body:   text.slice(0, 140),
     data:   {
-      targetId:    String(doc._id),
-      peerId:      String(user._id),
-      peerName:    user.name || '',
-      peerAvatar:  user.avatar || '',
-      propertyId:  String(property._id),
+      targetId:      String(doc._id),
+      peerId:        String(user._id),
+      peerName:      user.name || '',
+      peerAvatar:    user.avatar || '',
+      propertyId:    String(property._id),
       propertyTitle: property.title || '',
     },
   });
@@ -159,6 +214,127 @@ async function updateInquiryStatus({ id, body, user }) {
   return doc;
 }
 
+// ─── Append a message to a thread (landlord "Reply" OR tenant follow-up) ────
+async function replyToInquiry({ id, body, user }) {
+  const inq = await Inquiry.findById(id);
+  if (!inq) throw ApiError.notFound('Inquiry পাওয়া যায়নি।', { code: 'inquiry_not_found' });
+
+  const isOwner    = String(inq.propertyOwnerId) === String(user._id);
+  const isInquirer = String(inq.inquirerUserId)  === String(user._id);
+  if (!isOwner && !isInquirer) {
+    throw ApiError.forbidden('এই থ্রেডে রিপ্লাই করার অনুমতি নেই।', { code: 'not_allowed' });
+  }
+
+  const text = String(body.text || body.message || '').trim();
+  if (!text) throw ApiError.badRequest('মেসেজ খালি রাখা যাবে না।', { code: 'empty_message' });
+
+  const sender  = isOwner ? 'landlord' : 'tenant';
+  const message = { sender, senderId: user._id, text: text.slice(0, 2000), createdAt: new Date() };
+  inq.messages.push(message);
+
+  // A landlord reply on a brand-new inquiry advances it past "Delivered".
+  if (isOwner && ['sent', 'delivered'].includes(inq.status)) inq.status = 'viewed';
+  await inq.save();
+
+  const targetUserId = isOwner ? inq.inquirerUserId : inq.propertyOwnerId;
+  if (targetUserId) {
+    notifications.emit({
+      userId: targetUserId,
+      type:   'inquiry',
+      title:  isOwner
+        ? 'ল্যান্ডলর্ড আপনার ইনকোয়ারিতে রিপ্লাই দিয়েছেন'
+        : 'ভাড়াটিয়া একটি নতুন মেসেজ পাঠিয়েছেন',
+      body:   text.slice(0, 140),
+      data:   { targetId: String(inq._id), propertyId: String(inq.propertyId), status: inq.status },
+    });
+  }
+
+  return { inquiry: inq, message, targetUserId };
+}
+
+// ─── Propose a visit slot (either party) ────────────────────────────────────
+async function proposeVisit({ id, body, user }) {
+  const inq = await Inquiry.findById(id);
+  if (!inq) throw ApiError.notFound('Inquiry পাওয়া যায়নি।', { code: 'inquiry_not_found' });
+
+  const isOwner    = String(inq.propertyOwnerId) === String(user._id);
+  const isInquirer = String(inq.inquirerUserId)  === String(user._id);
+  if (!isOwner && !isInquirer) {
+    throw ApiError.forbidden('অনুমতি নেই।', { code: 'not_allowed' });
+  }
+
+  const date = String(body.date || body.scheduledDate || '').trim();
+  const time = String(body.time || body.scheduledTime || '').trim();
+  if (!date || !time) {
+    throw ApiError.badRequest('ভিজিটের তারিখ ও সময় দিন।', { code: 'visit_datetime_required' });
+  }
+
+  inq.visitSchedule = {
+    proposedBy: isOwner ? 'landlord' : 'tenant',
+    date,
+    time,
+    location:   String(body.location || '').trim().slice(0, 200),
+    status:     'pending',
+    updatedAt:  new Date(),
+  };
+  await inq.save();
+
+  const targetUserId = isOwner ? inq.inquirerUserId : inq.propertyOwnerId;
+  if (targetUserId) {
+    notifications.emit({
+      userId: targetUserId,
+      type:   'inquiry',
+      title:  'একটি ভিজিট প্রস্তাব করা হয়েছে',
+      body:   `${date} ${time}`.trim(),
+      data:   { targetId: String(inq._id), propertyId: String(inq.propertyId), status: inq.status },
+    });
+  }
+
+  return { inquiry: inq, targetUserId };
+}
+
+// ─── Accept / reject a pending visit (the party who did NOT propose) ────────
+async function respondToVisit({ id, body, user }) {
+  const inq = await Inquiry.findById(id);
+  if (!inq) throw ApiError.notFound('Inquiry পাওয়া যায়নি।', { code: 'inquiry_not_found' });
+
+  const isOwner    = String(inq.propertyOwnerId) === String(user._id);
+  const isInquirer = String(inq.inquirerUserId)  === String(user._id);
+  if (!isOwner && !isInquirer) {
+    throw ApiError.forbidden('অনুমতি নেই।', { code: 'not_allowed' });
+  }
+
+  const vs = inq.visitSchedule;
+  if (!vs || vs.status !== 'pending') {
+    throw ApiError.badRequest('গ্রহণযোগ্য কোনো ভিজিট প্রস্তাব নেই।', { code: 'no_pending_visit' });
+  }
+
+  // Only the OTHER party may respond — you can't accept your own proposal.
+  const mySide = isOwner ? 'landlord' : 'tenant';
+  if (mySide === vs.proposedBy) {
+    throw ApiError.badRequest('নিজের প্রস্তাব নিজে গ্রহণ করা যাবে না।', { code: 'cannot_self_accept' });
+  }
+
+  const accept = body.action === 'accept' || body.accept === true || body.status === 'accepted';
+  inq.visitSchedule.status    = accept ? 'accepted' : 'rejected';
+  inq.visitSchedule.updatedAt = new Date();
+  if (accept) inq.status = 'visit_scheduled';
+  await inq.save();
+
+  const targetUserId = isOwner ? inq.inquirerUserId : inq.propertyOwnerId;
+  if (targetUserId) {
+    notifications.emit({
+      userId: targetUserId,
+      type:   'inquiry',
+      title:  accept ? 'ভিজিট গ্রহণ করা হয়েছে ✓' : 'ভিজিট প্রস্তাব প্রত্যাখ্যান করা হয়েছে',
+      body:   inq.propTitle ? `Re: ${inq.propTitle}` : '',
+      data:   { targetId: String(inq._id), propertyId: String(inq.propertyId), status: inq.status },
+    });
+  }
+
+  return { inquiry: inq, targetUserId, accepted: accept };
+}
+
 async function deleteInquiry({ id, user }) {
   const doc = await Inquiry.findById(id);
   if (!doc) throw ApiError.notFound('Inquiry পাওয়া যায়নি।', { code: 'inquiry_not_found' });
@@ -211,5 +387,8 @@ module.exports = {
   listHostInquiries,
   listMyInquiries,
   updateInquiryStatus,
+  replyToInquiry,
+  proposeVisit,
+  respondToVisit,
   deleteInquiry,
 };
