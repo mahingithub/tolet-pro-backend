@@ -84,6 +84,15 @@ async function createBooking(req, res, next) {
       chatId:           chatId || '',
     });
 
+    // Property-কে rented mark করি যেন public listing থেকে সরে যায় + reload-এও থাকে।
+    if (isObjectId(propertyId)) {
+      const Property = require('../models/Property');
+      await Property.updateOne(
+        { _id: propertyId },
+        { $set: { status: 'rented', availabilityStatus: 'rented' } },
+      ).catch(() => {});
+    }
+
     // If converted from an inquiry, mark it 'final_booking' AND tell the tenant
     // in realtime so their timeline flips to "Deal Confirmed 🎉" without a refresh.
     if (inquiryId && isObjectId(inquiryId)) {
