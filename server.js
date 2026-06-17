@@ -92,6 +92,7 @@ app.use('/api/notifications',  require('./routes/notification.routes'));
 // MEDIUM limiter on bookings (spam-prone).
 app.use('/api/bookings',       writeLimiter, require('./routes/booking.routes'));
 app.use('/api/receipts',       require('./routes/receipt.routes'));
+app.use('/api/documents',      require('./routes/document.routes'));
 app.use('/api/billing',        require('./routes/billing.routes'));
 // MEDIUM limiter on support ticket creation (spam-prone).
 app.use('/api/helpdesk',       writeLimiter, require('./routes/support.routes'));

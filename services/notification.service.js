@@ -11,7 +11,7 @@
 const Notification = require('../models/Notification');
 const ApiError     = require('../utils/ApiError');
 
-async function emit({ userId, type, title, body, data }) {
+async function emit({ userId, type, title, body, data, skipPush }) {
   if (!userId) return null;
   try {
     const doc = await Notification.create({
@@ -36,6 +36,14 @@ async function emit({ userId, type, title, body, data }) {
         read: doc.read,
         createdAt: doc.createdAt
       });
+    }
+
+    // Fan out to the user's phone(s) via FCM — fire-and-forget so a push
+    // failure never blocks the in-app notification. Callers that already send
+    // their own push (e.g. the call ringer) can pass skipPush:true to opt out.
+    if (!skipPush) {
+      const firebaseAdmin = require('./firebaseAdmin');
+      firebaseAdmin.sendToUser(userId, { title, body, data }).catch(() => {});
     }
     
     return doc;
