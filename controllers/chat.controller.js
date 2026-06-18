@@ -55,6 +55,7 @@ exports.sendMedia = asyncH(async (req, res) => {
     buffer:      req.file.buffer,
     mimetype:    req.file.mimetype,
     kind:        req.body.kind,
+    filename:    req.body.filename || req.file.originalname,
     caption:     req.body.caption || '',
     durationSec: req.body.durationSec,
   });

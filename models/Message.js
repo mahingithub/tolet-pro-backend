@@ -25,22 +25,23 @@ const MessageSchema = new mongoose.Schema(
 
     // What kind of message this is. Defaults to 'text' so every existing
     // document (created before this field existed) reads back as a text message.
-    type: { type: String, enum: ['text', 'image', 'audio'], default: 'text', index: true },
+    type: { type: String, enum: ['text', 'image', 'audio', 'document'], default: 'text', index: true },
 
     // Text body (or optional caption for media). Not required — an image or
     // voice message can stand on its own.
     text: { type: String, trim: true, default: '', maxlength: 4000 },
 
-    // ── Media fields (only set for type 'image' / 'audio') ──────────────────
+    // ── Media fields (only set for type 'image' / 'audio' / 'document') ──────────────────
     mediaUrl:      { type: String, default: null }, // Cloudinary secure_url
     mediaPublicId: { type: String, default: null }, // Cloudinary public_id (for deletion)
     mediaMeta: {
       // Small grab-bag of useful client-side hints. All optional.
+      originalName: { type: String, default: null }, // original filename (for documents)
       durationSec: { type: Number, default: null }, // voice message length
       width:       { type: Number, default: null }, // image width
       height:      { type: Number, default: null }, // image height
       bytes:       { type: Number, default: null },
-      format:      { type: String, default: null }, // 'jpg', 'webm', etc.
+      format:      { type: String, default: null }, // 'jpg', 'webm', 'pdf' etc.
     },
 
     // userIds who have already read this message (used for the "read" tick).

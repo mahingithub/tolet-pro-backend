@@ -277,6 +277,12 @@ PropertySchema.index({ division: 1, status: 1, createdAt: -1 });
 // pages off a collection scan.
 PropertySchema.index({ intent: 1, status: 1, createdAt: -1 });
 
+// ─── Compound indexes for AI Insights aggregations ─────────────────────────
+// Market opportunity comparisons: find comparable properties by area + type.
+PropertySchema.index({ area: 1, type: 1, price: 1 });
+// Host property lookups: list a host's active properties efficiently.
+PropertySchema.index({ ownerUserId: 1, status: 1 });
+
 // ─── Auto-build slug + haystack on save ────────────────────────────────────
 PropertySchema.pre('validate', function preValidate(next) {
   // Vocabulary shift — "apartment" is now spelled "flat" everywhere on the

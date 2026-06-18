@@ -95,4 +95,10 @@ BookingSchema.set('toJSON', {
   },
 });
 
+// ─── Compound indexes for AI Insights aggregations ─────────────────────────
+// Revenue queries filter by landlordId + sort by createdAt descending.
+BookingSchema.index({ landlordId: 1, createdAt: -1 });
+// Occupancy / property-scoped queries filter by propertyId + status.
+BookingSchema.index({ propertyId: 1, status: 1 });
+
 module.exports = mongoose.model('Booking', BookingSchema);

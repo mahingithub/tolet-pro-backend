@@ -235,24 +235,29 @@ async function sendMessage({ id, body, user }) {
  * @param {string=} args.caption optional text caption (image only, usually '')
  * @param {number=} args.durationSec optional voice length
  */
-async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = '', durationSec = null }) {
+async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = '', durationSec = null, filename = null }) {
   const convo = await getConversationOr403({ id, user });
 
   if (!buffer || !buffer.length) {
     throw ApiError.badRequest('কোনো ফাইল পাওয়া যায়নি।', { code: 'no_file' });
   }
-  if (kind !== 'image' && kind !== 'audio') {
+  if (kind !== 'image' && kind !== 'audio' && kind !== 'document') {
     throw ApiError.badRequest('অজানা মিডিয়া টাইপ।', { code: 'bad_kind' });
   }
 
   // Mime allow-list per kind.
   const okImage = /^image\/(jpe?g|png|webp|gif|heic|heif)$/i.test(mimetype || '');
   const okAudio = /^audio\/(webm|ogg|mpeg|mp3|mp4|m4a|aac|wav|x-m4a)$/i.test(mimetype || '');
+  const okPdf = mimetype === 'application/pdf';
+  
   if (kind === 'image' && !okImage) {
     throw ApiError.badRequest('শুধু ছবি পাঠানো যাবে।', { code: 'bad_image_mime' });
   }
   if (kind === 'audio' && !okAudio) {
     throw ApiError.badRequest('শুধু অডিও পাঠানো যাবে।', { code: 'bad_audio_mime' });
+  }
+  if (kind === 'document' && !okPdf) {
+    throw ApiError.badRequest('শুধু PDF পাঠানো যাবে।', { code: 'bad_document_mime' });
   }
 
   // Hard size cap (5 MB) — multer lets 8 MB through so we can give a clean error.
@@ -261,8 +266,8 @@ async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = ''
   }
 
   // Cloudinary: images as 'image', audio as 'video' (Cloudinary stores audio
-  // under the video resource type).
-  const resourceType = kind === 'image' ? 'image' : 'video';
+  // under the video resource type), documents as 'raw'.
+  const resourceType = kind === 'image' ? 'image' : kind === 'audio' ? 'video' : 'raw';
   const folder = `tolet-pro/chat/${String(convo._id)}`;
 
   let up;
@@ -287,12 +292,13 @@ async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = ''
       durationSec: durationSec != null ? Number(durationSec) : null,
       bytes:       up.bytes || buffer.length,
       format:      up.format || null,
+      originalName: filename,
     },
     readBy: [user._id],
   });
 
   // Denormalised preview text shown in the sidebar.
-  const preview = kind === 'image' ? '📷 Photo' : '🎤 Voice message';
+  const preview = kind === 'image' ? '📷 Photo' : kind === 'audio' ? '🎤 Voice message' : '📄 Document';
 
   const peerId  = convo.participants.find((p) => String(p) !== String(user._id));
   const peerKey = String(peerId);

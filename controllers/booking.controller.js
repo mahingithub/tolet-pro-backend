@@ -15,6 +15,7 @@ const notifications = require('../services/notification.service');
 const { applyPayment } = require('../services/bookingPayment.service');
 const ApiError      = require('../utils/ApiError');
 const { getIo, emitToUser } = require('../socket');
+const { invalidateInsightsCache } = require('../services/insights.service');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 function isObjectId(v) {
@@ -111,6 +112,9 @@ async function createBooking(req, res, next) {
         });
       }
     }
+
+    // Invalidate insights cache so the host sees fresh analytics.
+    invalidateInsightsCache(req.user._id);
 
     return res.status(201).json({ booking });
   } catch (err) {
