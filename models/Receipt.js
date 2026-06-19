@@ -31,6 +31,7 @@ const ReceiptSchema = new mongoose.Schema(
     propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true },
 
     propertyTitle: { type: String, trim: true, default: '' },
+    propertyImage: { type: String, trim: true, default: '' },
     tenantPhone:   { type: String, trim: true, default: '' },
 
     // Landlord profile snapshot (so the receipt is self-contained).

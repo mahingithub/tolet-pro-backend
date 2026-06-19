@@ -58,6 +58,11 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
       .lean()
       .catch(() => null);
 
+    const property = await require('../models/Property').findById(booking.propertyId)
+      .select('coverPhoto')
+      .lean()
+      .catch(() => null);
+
     // Receipt upsert — denormalized so dashboards don't JOIN every render.
     const receiptDoc = await Receipt.findOneAndUpdate(
       { bookingId: booking._id, monthKey },
@@ -67,14 +72,15 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
           tenantId:      booking.tenantId,
           propertyId:    booking.propertyId,
           propertyTitle: booking.property || '',
-          tenantPhone:   booking.tenantPhone || null,
+          propertyImage: property?.coverPhoto || '',
+          tenantPhone:   booking.tenantPhone || '',
           landlordName:  landlord?.name  || '',
           landlordPhone: landlord?.phone || '',
           monthLabel:    payment.monthLabel || monthKey,
           status,
           monthlyRent:   Number(booking.monthlyRent)   || 0,
           serviceCharge: Number(booking.serviceCharge) || 0,
-          totalDue:      Number(payment.totalDue) || Number(booking.monthlyRent) || 0,
+          totalDue:      Number(payment.totalDue) || (Number(booking.monthlyRent) + Number(booking.serviceCharge)) || 0,
           totalPaid:     Number(payment.amount) || 0,
           balance:       Number(payment.balance) || 0,
           method:        payment.method || '',
@@ -85,7 +91,7 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
           read:          false,
         },
       },
-      { upsert: true, new: true },
+      { upsert: true, new: true, runValidators: true },
     );
 
     if (booking.tenantId) {
