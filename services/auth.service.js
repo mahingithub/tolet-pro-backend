@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const SignupIntent = require('../models/SignupIntent');
@@ -10,6 +11,30 @@ const otpService = require('./otp.service');
 const tokenService = require('./token.service');
 
 const GENERIC_LOGIN_ERROR = 'ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে।';
+
+// Hard cap on how many sessions we keep per user. This is THE root-cause fix
+// for the historical "sessions array grows forever → OOM" bug: every place
+// that adds a session goes through addSession(), which trims first. Because
+// the cap lives here at the source, the boot-time prune script in server.js
+// is no longer needed to hold back the flood.
+const MAX_SESSIONS = 10;
+
+/**
+ * Append a new session to `user`, keeping only the most recent MAX_SESSIONS.
+ * Trims BEFORE pushing so the array can never exceed the cap. Mutates `user`
+ * in memory and returns the new sessionId — the caller is responsible for
+ * `user.save()`.
+ */
+function addSession(user, { device = 'Unknown device', ipAddress = '0.0.0.0' } = {}) {
+  if (!Array.isArray(user.sessions)) user.sessions = [];
+  // Leave room for the one we're about to add: keep the newest (MAX-1).
+  if (user.sessions.length >= MAX_SESSIONS) {
+    user.sessions.splice(0, user.sessions.length - (MAX_SESSIONS - 1));
+  }
+  const sessionId = crypto.randomUUID();
+  user.sessions.push({ sessionId, device, ipAddress });
+  return sessionId;
+}
 
 /**
  * Step 1 of signup: persist (name, hashedPassword, role) as a SignupIntent
@@ -79,19 +104,7 @@ async function verifySignup({ idToken }) {
     user.passwordChangedAt = new Date();
   }
 
-  // Cap sessions to prevent infinite growth
-  if (user.sessions.length >= 10) {
-    user.sessions.splice(0, user.sessions.length - 9);
-  }
-  // Create session
-  const crypto = require('crypto');
-  const sessionId = crypto.randomUUID();
-  
-  // Cap sessions to prevent infinite growth
-  if (user.sessions.length >= 10) {
-    user.sessions.splice(0, user.sessions.length - 9);
-  }
-  user.sessions.push({ sessionId, device: 'New Device', ipAddress: '0.0.0.0' });
+  const sessionId = addSession(user, { device: 'New Device', ipAddress: '0.0.0.0' });
 
   await user.save();
   await SignupIntent.deleteOne({ phone });
@@ -106,10 +119,14 @@ async function verifySignup({ idToken }) {
  * "wrong password" to prevent phone enumeration.
  */
 async function login({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
-  // Prune sessions directly in the DB to avoid OOM or Event Loop blocking for affected users
+  // OOM guard: trim any legacy-bloated sessions array in the DB BEFORE we load
+  // the document. A doc that accumulated thousands of sessions under the old
+  // (pre-cap) code could otherwise blow up memory the moment findOne pulls it
+  // into RAM. New growth is already bounded by addSession() below — this is
+  // purely to keep the *read* safe for accounts that bloated before the fix.
   await User.updateOne(
     { phone },
-    { $push: { sessions: { $each: [], $slice: -9 } } }
+    { $push: { sessions: { $each: [], $slice: -(MAX_SESSIONS - 1) } } }
   );
 
   const user = await User.findOne({ phone }).select('+password +loginAttempts +lockUntil');
@@ -138,20 +155,8 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
   user.lockUntil = null;
   user.lastLoginAt = new Date();
 
-  // Cap sessions to prevent infinite growth
-  if (user.sessions.length >= 10) {
-    user.sessions.splice(0, user.sessions.length - 9);
-  }
-  // Create session
-  const crypto = require('crypto');
-  const sessionId = crypto.randomUUID();
-  
-  // Cap sessions to prevent infinite growth
-  if (user.sessions.length >= 10) {
-    user.sessions.splice(0, user.sessions.length - 9);
-  }
-  user.sessions.push({ sessionId, device, ipAddress });
-  
+  const sessionId = addSession(user, { device, ipAddress });
+
   await user.save();
 
   const token = tokenService.signAccessToken(user, sessionId);

@@ -37,14 +37,27 @@ app.use((req, res, next) => {
   res.setHeader('Alt-Svc', 'clear');
   next();
 });
+// Native app origins (Capacitor WebView). These are fixed values baked into
+// the app binary and can't be spoofed by a phishing site the way a web origin
+// can, so they're always allowed. Android (Capacitor 5+) serves from
+// https://localhost; iOS uses capacitor://localhost.
+const NATIVE_APP_ORIGINS = new Set([
+  'capacitor://localhost',
+  'ionic://localhost',
+  'http://localhost',
+  'https://localhost',
+]);
+
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // server-to-server / curl
+      if (!origin) return cb(null, true); // server-to-server / curl / native fetch
+      if (NATIVE_APP_ORIGINS.has(origin)) return cb(null, true);
       if (env.corsOrigins.includes(origin)) return cb(null, true);
-      // Allow Vercel preview deployments dynamically
-      if (origin.endsWith('.vercel.app')) return cb(null, true);
-      cb(new Error(`CORS: origin "${origin}" not allowed`));
+      // The old `.vercel.app` wildcard was removed — it let ANY site on
+      // *.vercel.app (including an attacker's) make credentialed requests.
+      // Put your exact production URL(s) in the CORS_ORIGINS env var instead.
+      return cb(new Error(`CORS: origin "${origin}" not allowed`));
     },
     credentials: true,
   })
@@ -100,7 +113,7 @@ app.use('/api/users/me',       require('./routes/privacy.routes')); // Phase 7
 app.use('/api/calls',          require('./routes/calls.routes')); // Phase 8
 app.use('/api/admin/helpdesk', require('./routes/admin.support.routes'));
 app.use('/api/ai-guides',     require('./routes/aiGuideRoutes'));
-app.use('/api/ai-chat',       require('./routes/aiChatRoutes'));
+app.use('/api/ai-chat',       chatLimiter, require('./routes/aiChatRoutes'));
 app.use('/api/push',          require('./routes/push.routes'));
 
 // 404
@@ -128,18 +141,6 @@ async function start() {
   try {
     await mongoose.connect(env.mongoUri);
     console.log('[mongo] connected');
-    
-    // TEMPORARY FIX: Prune massive sessions arrays across the entire database to fix OOM / Event Loop blocking
-    try {
-      const User = require('./models/User');
-      await User.updateMany(
-        { 'sessions.10': { $exists: true } },
-        { $push: { sessions: { $each: [], $slice: -9 } } }
-      );
-      console.log('[mongo] pruned bloated sessions arrays');
-    } catch (e) {
-      console.error('[mongo] array prune failed:', e.message);
-    }
   } catch (err) {
     console.error('[mongo] connection failed:', err.message);
     process.exit(1);
