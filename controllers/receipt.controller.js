@@ -32,6 +32,12 @@ async function listTenantReceipts(req, res, next) {
     const receipts = await Receipt.find({ $or: conditions })
       .sort({ issuedAt: -1 })
       .lean();
+    receipts.forEach(r => {
+      r.id = String(r._id);
+      delete r._id;
+      // Provide a fallback 'date' string for the frontend, which expects r.date
+      r.date = r.paidOn ? new Date(r.paidOn).toLocaleDateString() : (r.issuedAt ? new Date(r.issuedAt).toLocaleDateString() : '');
+    });
     return res.json({ receipts });
   } catch (err) {
     return next(err);
@@ -46,6 +52,11 @@ async function listHostReceipts(req, res, next) {
     const receipts = await Receipt.find({ landlordId: req.user._id })
       .sort({ issuedAt: -1 })
       .lean();
+    receipts.forEach(r => {
+      r.id = String(r._id);
+      delete r._id;
+      r.date = r.paidOn ? new Date(r.paidOn).toLocaleDateString() : (r.issuedAt ? new Date(r.issuedAt).toLocaleDateString() : '');
+    });
     return res.json({ receipts });
   } catch (err) {
     return next(err);

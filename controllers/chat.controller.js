@@ -47,7 +47,7 @@ exports.markRead = asyncH(async (req, res) => {
 // multipart body.
 exports.sendMedia = asyncH(async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ message: 'কোনো ফাইল পাওয়া যায়নি।', code: 'no_file' });
+    return res.status(400).json({ message: 'No file received.', code: 'no_file' });
   }
   const msg = await svc.sendMediaMessage({
     id:          req.params.id,

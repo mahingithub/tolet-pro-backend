@@ -7,7 +7,8 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 exports.signupStart = asyncH(async (req, res) => {
   const out = await authService.startSignup(req.body);
   res.status(202).json({
-    message: 'OTP পাঠানো হয়েছে। ফোনে চেক করুন।',
+    code: 'OTP_SENT_SUCCESS',
+    message: 'OTP sent. Please check your phone.',
     expiresAt: out.expiresAt,
   });
 });
@@ -15,7 +16,8 @@ exports.signupStart = asyncH(async (req, res) => {
 exports.signupVerify = asyncH(async (req, res) => {
   const { token, user } = await authService.verifySignup(req.body);
   res.status(201).json({
-    message: 'অ্যাকাউন্ট তৈরি সফল হয়েছে!',
+    code: 'ACCOUNT_CREATED_SUCCESS',
+    message: 'Account created successfully!',
     token,
     user,
   });
@@ -34,7 +36,7 @@ exports.login = asyncH(async (req, res) => {
 exports.forgotStart = asyncH(async (req, res) => {
   await authService.startForgotPassword(req.body);
   // Constant response — never reveal whether the account exists.
-  res.status(202).json({ message: 'যদি অ্যাকাউন্ট থাকে, OTP পাঠানো হয়েছে।' });
+  res.status(202).json({ code: 'FORGOT_OTP_SENT', message: 'If the account exists, an OTP has been sent.' });
 });
 
 exports.forgotVerify = asyncH(async (req, res) => {
@@ -44,7 +46,7 @@ exports.forgotVerify = asyncH(async (req, res) => {
 
 exports.resetPassword = asyncH(async (req, res) => {
   await authService.resetPassword(req.body);
-  res.json({ message: 'পাসওয়ার্ড পরিবর্তন সফল হয়েছে। আবার লগইন করুন।' });
+  res.json({ code: 'PASSWORD_RESET_SUCCESS', message: 'Password reset successful. Please log in again.' });
 });
 
 exports.me = asyncH(async (req, res) => {
