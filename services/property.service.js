@@ -11,6 +11,7 @@ const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
 const Notification = require('../models/Notification');
 const searchService = require('./searchService');
+const { postToFacebookPage } = require('./facebook.service');
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 const MAX_THUMBNAIL_CHARS = 1_000_000;
@@ -191,6 +192,11 @@ async function createProperty({ body, user }) {
     ownerPhone:  user.phone || '',
   });
   await doc.save();
+
+  // Fire-and-forget: post to Facebook Page in background.
+  // Errors are caught inside — never blocks or fails property creation.
+  postToFacebookPage(doc).catch(() => {});
+
   return doc;
 }
 
