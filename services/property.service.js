@@ -91,6 +91,7 @@ const LIST_CARD_PROJECT = {
   floorNumber: 1,
   furnishing: 1,
   amenities: 1,
+  specificDetails: 1,
   // base64 cover → '' so a single legacy doc can't bloat the list payload.
   coverPhoto: httpOnly('$coverPhoto'),
   // coverPhotoThumb is intentionally dropped from LIST responses: the frontend
