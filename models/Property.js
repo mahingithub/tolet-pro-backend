@@ -23,12 +23,29 @@ const PROPERTY_TYPES = [
 ];
 
 const CATEGORIES = [
-  // Rental
-  'family', 'bachelor_male', 'bachelor_female', 'sublet', 'student',
-  // Purchase
+  // Rental – apartments / sublet / single_room
+  'family', 'bachelor_male', 'bachelor_female', 'sublet',
+  'student', 'student_male', 'student_female',
+  // Rental – hostel
+  'working_professional', 'co_ed',
+  // Purchase – flat
   'ready_flat', 'used', 'new_project', 'investment',
-  // Commercial
-  'corporate', 'startup', 'retail', 'warehouse',
+  // Purchase – house
+  'duplex', 'triplex', 'single_story',
+  // Purchase – land
+  'residential', 'commercial', 'agricultural', 'road_side',
+  // Purchase – building
+  'commercial_building', 'residential_building',
+  // Commercial & Purchase – shop
+  'retail', 'wholesale', 'showroom',
+  // Commercial & Purchase – restaurant
+  'fast_food', 'dine_in', 'cafe', 'fine_dining',
+  // Commercial – office
+  'corporate', 'startup', 'co_working',
+  // Commercial – showroom
+  'brand_outlet', 'vehicle_showroom',
+  // Commercial – warehouse (legacy)
+  'warehouse',
 ];
 
 // Listing intent. 'rent' / 'sale' / 'commercial' are the CANONICAL values the
@@ -88,19 +105,41 @@ function buildSearchHaystack(doc) {
     restaurant:   'restaurant cafe',
   };
   const categoryAliases = {
-    family:           'family',
-    bachelor_male:    'bachelor male bachelors',
-    bachelor_female:  'bachelor female bachelors',
-    sublet:           'sublet room',
-    student:          'student',
-    ready_flat:       'ready flat',
-    used:             'used resale',
-    new_project:      'new project',
-    investment:       'investment',
-    corporate:        'corporate office',
-    startup:          'startup',
-    retail:           'retail shop',
-    warehouse:        'warehouse godown',
+    family:                'family paribarik',
+    bachelor_male:         'bachelor male bachelors',
+    bachelor_female:       'bachelor female bachelors',
+    sublet:                'sublet room',
+    student:               'student',
+    student_male:          'student male ছাত্র',
+    student_female:        'student female ছাত্রী',
+    working_professional:  'working professional job চাকরিজীবী',
+    co_ed:                 'mixed co-ed all',
+    ready_flat:            'ready flat',
+    used:                  'used resale',
+    new_project:           'new project',
+    investment:            'investment',
+    duplex:                'duplex',
+    triplex:               'triplex',
+    single_story:          'single story one floor',
+    residential:           'residential আবাসিক',
+    commercial:            'commercial বাণিজ্যিক',
+    agricultural:          'agricultural কৃষি',
+    road_side:             'road side main road',
+    commercial_building:   'commercial building',
+    residential_building:  'residential building',
+    retail:                'retail shop',
+    wholesale:             'wholesale পাইকারি',
+    showroom:              'showroom',
+    fast_food:             'fast food',
+    dine_in:               'dine in restaurant',
+    cafe:                  'cafe coffee',
+    fine_dining:           'fine dining',
+    corporate:             'corporate office',
+    startup:               'startup',
+    co_working:            'co-working coworking shared workspace',
+    brand_outlet:          'brand outlet',
+    vehicle_showroom:      'vehicle showroom car',
+    warehouse:             'warehouse godown',
   };
   const parts = [
     doc.title,
