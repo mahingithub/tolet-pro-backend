@@ -111,6 +111,16 @@ async function markAllRead({ user }) {
   return { modified: res.modifiedCount || 0 };
 }
 
+async function remove({ id, user }) {
+  const doc = await Notification.findById(id);
+  if (!doc) throw ApiError.notFound('Notification পাওয়া যায়নি।', { code: 'notif_not_found' });
+  if (String(doc.userId) !== String(user._id)) {
+    throw ApiError.forbidden('আপনার নোটিফিকেশন নয়।', { code: 'not_owner' });
+  }
+  await Notification.deleteOne({ _id: id });
+  return { id };
+}
+
 module.exports = {
   emit,
   emitToAdmins,
@@ -118,4 +128,5 @@ module.exports = {
   countUnread,
   markRead,
   markAllRead,
+  remove,
 };

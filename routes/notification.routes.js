@@ -16,5 +16,6 @@ router.post('/register-device',   ctl.registerDevice);
 router.post('/unregister-device', ctl.unregisterDevice);
 router.post('/call-pref',         ctl.setCallNotifications);
 router.post('/:id/read',     ctl.markRead);
+router.delete('/:id',        ctl.remove);
 
 module.exports = router;

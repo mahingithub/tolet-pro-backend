@@ -29,6 +29,11 @@ exports.markAllRead = asyncH(async (req, res) => {
   res.json(r);
 });
 
+exports.remove = asyncH(async (req, res) => {
+  const r = await svc.remove({ id: req.params.id, user: req.user });
+  res.json(r);
+});
+
 // ─── Phase Call-6: FCM device-token management ──────────────────────────────
 const User = require('../models/User');
 
