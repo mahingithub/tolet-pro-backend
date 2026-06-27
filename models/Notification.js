@@ -28,7 +28,8 @@ const NotificationSchema = new mongoose.Schema(
       type: String,
       enum: [
         'inquiry_new', 'inquiry_status', 'message_new', 'system', 'rent_receipt', 'rent_invoice', 'rent_overdue',
-        'message', 'inquiry', 'booking', 'payment', 'receipt', 'property', 'review'
+        'message', 'inquiry', 'booking', 'payment', 'receipt', 'property', 'review',
+        'support_ticket', 'support_message', 'kyc_tenant', 'kyc_landlord'
       ],
       required: true,
     },
