@@ -395,6 +395,47 @@ async function unbanUser(req, res, next) {
   }
 }
 
+// ─── PUT /api/admin/users/:id/role ──────────────────────────────────────────
+async function updateUserRole(req, res, next) {
+  try {
+    if (!req.user || !req.user.roles.includes('super_admin')) {
+      return res.status(403).json({ message: 'Only super admins can change user roles.' });
+    }
+
+    const { id } = req.params;
+    const { role } = req.body;
+    if (!role) {
+      return res.status(400).json({ message: 'Role is required.' });
+    }
+
+    const validRoles = ['tenant', 'landlord', 'support_agent', 'moderator', 'super_admin'];
+    if (!validRoles.includes(role)) {
+      return res.status(400).json({ message: 'Invalid role specified.' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user.role = role;
+    const newRoles = ['tenant'];
+    if (user.landlordProfile && user.landlordProfile.fullName) {
+      newRoles.push('landlord');
+    }
+    if (['support_agent', 'moderator', 'super_admin'].includes(role)) {
+      newRoles.push(role);
+    } else if (role === 'landlord' && !newRoles.includes('landlord')) {
+      newRoles.push('landlord');
+    }
+    
+    user.roles = [...new Set(newRoles)];
+    await user.save();
+
+    return res.json({ user: pickPublicUser(user) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // ─── GET /api/admin/properties ─────────────────────────────────────────────
 // Property moderation queue. Without a dedicated "pending" status on
 // listings (the model defaults straight to 'active'), this acts as the
@@ -532,6 +573,7 @@ module.exports = {
   rejectLandlord,
   banUser,
   unbanUser,
+  updateUserRole,
   listAllProperties,
   moderateProperty,
   deleteProperty,

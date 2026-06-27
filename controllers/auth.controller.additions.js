@@ -16,6 +16,7 @@ const User = require('../models/User');
 // Path may differ in your repo — adjust if cloudinary.service.js is
 // at a different location (commonly `../services/` or `../utils/`).
 const cloudinary = require('../services/cloudinary.service');
+const notificationService = require('../services/notification.service');
 
 // ─── Whitelisted top-level fields ──────────────────────────────────────────
 const PATCH_ME_TOP_LEVEL = ['name', 'email', 'dateOfBirth', 'avatar'];
@@ -243,6 +244,15 @@ async function submitVerification(req, res, next) {
     // admin.controller.js. We intentionally do not auto-promote here.
 
     await me.save();
+    
+    // Notify admins
+    notificationService.emitToAdmins({
+      type: 'kyc_tenant',
+      title: 'New Tenant Verification',
+      body: `${me.name} has submitted documents for tenant identity verification.`,
+      data: { userId: me._id, path: '/admin?tab=pending' }
+    });
+
     return res.json({ user: me.toJSON() });
   } catch (err) {
     return next(err);
@@ -477,6 +487,15 @@ async function submitLandlordVerification(req, res, next) {
     }
 
     await me.save();
+    
+    // Notify admins
+    notificationService.emitToAdmins({
+      type: 'kyc_landlord',
+      title: 'New Landlord Verification',
+      body: `${me.name} has submitted documents for landlord verification.`,
+      data: { userId: me._id, path: '/admin?tab=pending-landlord' }
+    });
+
     return res.json({
       user: me.toJSON(),
       path: isAlreadyTenantVerified ? 'A' : 'B',

@@ -43,6 +43,7 @@ router.post('/users/:id/reject-landlord',            ctl.rejectLandlord);
 // ─── Account moderation ────────────────────────────────────────────────────
 router.post('/users/:id/ban',               ctl.banUser);
 router.post('/users/:id/unban',             ctl.unbanUser);
+router.put ('/users/:id/role',              ctl.updateUserRole);
 router.delete('/users/:id',                 ctl.deleteUser);
 
 // ─── Property moderation ───────────────────────────────────────────────────

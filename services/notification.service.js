@@ -53,6 +53,28 @@ async function emit({ userId, type, title, body, data, skipPush }) {
   }
 }
 
+async function emitToAdmins({ type, title, body, data, skipPush }) {
+  try {
+    const User = require('../models/User');
+    // Find all users with any admin-level role
+    const admins = await User.find({ 
+      roles: { $in: ['super_admin', 'moderator', 'support_agent'] } 
+    }).select('_id');
+    
+    const promises = admins.map(admin => emit({
+      userId: admin._id,
+      type: type || 'system',
+      title,
+      body,
+      data,
+      skipPush
+    }));
+    await Promise.allSettled(promises);
+  } catch (err) {
+    console.warn('[notif] emitToAdmins failed:', err.message);
+  }
+}
+
 async function listForUser({ user, unreadOnly, limit }) {
   const filter = { userId: user._id };
   if (unreadOnly) filter.read = false;
@@ -88,6 +110,7 @@ async function markAllRead({ user }) {
 
 module.exports = {
   emit,
+  emitToAdmins,
   listForUser,
   countUnread,
   markRead,

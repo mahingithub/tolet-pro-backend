@@ -8,6 +8,7 @@
 
 const SupportTicket = require('../models/SupportTicket');
 const ApiError = require('../utils/ApiError');
+const notificationService = require('../services/notification.service');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -56,6 +57,13 @@ exports.openTicket = asyncH(async (req, res) => {
       aiTranscript: aiTranscript || [],
     },
     messages: seedMessages
+  });
+
+  notificationService.emitToAdmins({
+    type: 'support_ticket',
+    title: 'New Support Ticket',
+    body: `${req.user.name} opened a ticket: "${ticket.subject}"`,
+    data: { ticketId: ticket._id, path: '/admin?tab=support' }
   });
 
   res.status(201).json({ ticket: ticket.toJSON() });
@@ -112,6 +120,14 @@ exports.sendMessage = asyncH(async (req, res) => {
 
   // Return the newly added message
   const newMessage = ticket.messages[ticket.messages.length - 1];
+
+  notificationService.emitToAdmins({
+    type: 'support_message',
+    title: 'New Message on Support Ticket',
+    body: `${req.user.name} sent a message on ticket "${ticket.subject}"`,
+    data: { ticketId: ticket._id, path: '/admin?tab=support' }
+  });
+
   res.json({ message: newMessage.toJSON() });
 });
 
