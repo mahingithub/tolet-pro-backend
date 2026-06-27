@@ -250,7 +250,7 @@ async function submitVerification(req, res, next) {
       type: 'kyc_tenant',
       title: 'New Tenant Verification',
       body: `${me.name} has submitted documents for tenant identity verification.`,
-      data: { userId: me._id, path: '/admin?tab=pending' }
+      data: { userId: me._id, path: '/admin/users?tab=pending' }
     });
 
     return res.json({ user: me.toJSON() });
@@ -493,7 +493,7 @@ async function submitLandlordVerification(req, res, next) {
       type: 'kyc_landlord',
       title: 'New Landlord Verification',
       body: `${me.name} has submitted documents for landlord verification.`,
-      data: { userId: me._id, path: '/admin?tab=pending-landlord' }
+      data: { userId: me._id, path: '/admin/users?tab=pending-landlord' }
     });
 
     return res.json({
