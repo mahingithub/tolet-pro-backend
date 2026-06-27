@@ -63,7 +63,7 @@ exports.openTicket = asyncH(async (req, res) => {
     type: 'support_ticket',
     title: 'New Support Ticket',
     body: `${req.user.name} opened a ticket: "${ticket.subject}"`,
-    data: { ticketId: ticket._id, path: '/admin?tab=support' }
+    data: { ticketId: ticket._id, path: '/admin/support' }
   });
 
   res.status(201).json({ ticket: ticket.toJSON() });
@@ -125,7 +125,7 @@ exports.sendMessage = asyncH(async (req, res) => {
     type: 'support_message',
     title: 'New Message on Support Ticket',
     body: `${req.user.name} sent a message on ticket "${ticket.subject}"`,
-    data: { ticketId: ticket._id, path: '/admin?tab=support' }
+    data: { ticketId: ticket._id, path: '/admin/support' }
   });
 
   res.json({ message: newMessage.toJSON() });

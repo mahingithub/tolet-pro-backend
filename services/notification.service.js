@@ -58,7 +58,10 @@ async function emitToAdmins({ type, title, body, data, skipPush }) {
     const User = require('../models/User');
     // Find all users with any admin-level role
     const admins = await User.find({ 
-      roles: { $in: ['super_admin', 'moderator', 'support_agent'] } 
+      $or: [
+        { roles: { $in: ['super_admin', 'moderator', 'support_agent'] } },
+        { role: { $in: ['super_admin', 'moderator', 'support_agent'] } }
+      ]
     }).select('_id');
     
     const promises = admins.map(admin => emit({
