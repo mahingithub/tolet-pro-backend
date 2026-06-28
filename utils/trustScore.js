@@ -42,13 +42,16 @@ function tierFor(score) {
 function computeTenantTrust(profile = {}, parentDoc = {}) {
   const v = profile.verification || {};
   const adminApproved = v.status === 'verified';
+  const isFilled = (val) => Array.isArray(val) ? val.length > 0 : val !== '' && val != null;
+
   const items = [
-    // Phone OTP — trustworthy without admin review (Firebase did it).
-    { pts: 20, done: !!parentDoc.phone },
-    // Profile photo — user-uploaded, not claimed to be govt-verified.
-    { pts: 30, done: !!v.photo },
-    // NID — admin must have approved. Uploaded-but-pending = 0 pts.
-    { pts: 50, done: adminApproved && !!(v.nidFront && v.nidBack) },
+    { pts: 15, done: !!parentDoc.phone },
+    { pts: 15, done: !!v.photo },
+    { pts: 30, done: adminApproved && !!(v.nidFront && v.nidBack) },
+    { pts: 10, done: isFilled(profile.professionType) },
+    { pts: 10, done: isFilled(profile.workPlace) },
+    { pts: 5,  done: isFilled(profile.familySize) },
+    { pts: 15, done: !!(profile.emergencyContact && profile.emergencyContact.phone) },
   ];
   const score = items.reduce((s, i) => (i.done ? s + i.pts : s), 0);
   return { score, tier: tierFor(score) };
