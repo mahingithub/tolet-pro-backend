@@ -68,12 +68,12 @@ function formatLeanProperty(p) {
   ret.id              = String(ret._id);
   ret.landlordId      = ret.ownerUserId ? String(ret.ownerUserId) : null;
   ret.landlordName    = ret.ownerName  || '';
-  ret.landlordPhone   = ret.ownerPhone || '';
   ret.gpsLat          = ret.gps && ret.gps.lat ? ret.gps.lat : null;
   ret.gpsLng          = ret.gps && ret.gps.lng ? ret.gps.lng : null;
   ret.gpsAddress      = ret.gps && ret.gps.address ? ret.gps.address : '';
   ret.rentalCategory  = ret.category;
   delete ret.searchHaystack;
+  delete ret.ownerPhone;
   delete ret._id;
   return ret;
 }

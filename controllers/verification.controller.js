@@ -80,6 +80,8 @@ exports.uploadDoc = asyncH(async (req, res) => {
     folder,
     publicId: slot.publicId,
     resourceType: 'image',
+    access_mode: 'authenticated',
+    type: 'private',
   });
 
   // ─── Persist on the user doc ──────────────────────────────────────────

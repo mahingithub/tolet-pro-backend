@@ -3,7 +3,7 @@ const multer = require("multer");
 const router = express.Router();
 const { askGemini, transcribeAudio } = require("../controllers/aiChatController");
 const { aiLimiter } = require("../middleware/rateLimiters");
-const { requireAuth } = require("../middleware/auth");
+const requireAuth = require("../middleware/requireAuth");
 
 // Voice clips are tiny; keep them in memory and cap size as a safety net.
 const upload = multer({
