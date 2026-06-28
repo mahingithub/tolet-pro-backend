@@ -10,6 +10,31 @@
 
 const Notification = require('../models/Notification');
 const ApiError     = require('../utils/ApiError');
+const firebaseAdmin = require('./firebaseAdmin');
+
+async function sendPushToDevice(deviceRecord, payload) {
+  const platform = deviceRecord.platform || 'web';
+
+  if (platform === 'android' || platform === 'ios') {
+    // Native FCM via Firebase Admin
+    const message = {
+      token: deviceRecord.token,
+      notification: {
+        title: payload.title,
+        body: payload.body,
+      },
+      data: payload.data || {},
+    };
+    const adminApp = firebaseAdmin.init();
+    if (adminApp) return adminApp.messaging().send(message);
+    return null;
+  } else {
+    // Existing web-push path — unchanged
+    // Note: The previous code used firebaseAdmin.sendToUser for everything.
+    // We preserve that behavior for web tokens here.
+    return null;
+  }
+}
 
 async function emit({ userId, type, title, body, data, skipPush }) {
   if (!userId) return null;
@@ -42,8 +67,16 @@ async function emit({ userId, type, title, body, data, skipPush }) {
     // failure never blocks the in-app notification. Callers that already send
     // their own push (e.g. the call ringer) can pass skipPush:true to opt out.
     if (!skipPush) {
-      const firebaseAdmin = require('./firebaseAdmin');
-      firebaseAdmin.sendToUser(userId, { title, body, data }).catch(() => {});
+      const User = require('../models/User');
+      User.findById(userId).select('deviceTokens').lean().then(user => {
+        const tokens = user?.deviceTokens || [];
+        tokens.forEach(deviceRecord => {
+          sendPushToDevice(deviceRecord, { title, body, data }).catch(() => {});
+        });
+        
+        // Also call the original method to ensure web tokens and legacy behavior is fully preserved
+        firebaseAdmin.sendToUser(userId, { title, body, data }).catch(() => {});
+      }).catch(() => {});
     }
     
     return doc;
