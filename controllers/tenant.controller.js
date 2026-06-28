@@ -107,8 +107,15 @@ async function getTenant(req, res, next) {
       trustCard.phone        = user.phone || '';
       trustCard.email        = user.email || '';
       trustCard.dateOfBirth  = user.dateOfBirth || null;
-      trustCard.professionDetails = tp.professionDetails || {};
+      // Map Blueprint v2 fields to the expected frontend structure
+      trustCard.professionDetails = {
+        institution: tp.workPlace || '',
+        studentId:   tp.workPlaceId || '',
+        company:     tp.workPlace || '',
+        officeId:    tp.workPlaceId || '',
+      };
       trustCard.emergencyContact  = tp.emergencyContact || {};
+      trustCard.familySize        = tp.familySize || '';
       trustCard.unlockReason = isSelf ? 'self' : 'inquiry-or-booking';
     } else {
       trustCard.unlocked     = false;
