@@ -154,6 +154,145 @@ const LandlordProfileSchema = new mongoose.Schema(
   { _id: false },
 );
 
+// ─── GLOBAL SETTINGS SUB-SCHEMAS ─────────────────────────────────────────────
+// The `preferences` block below is the single source of truth for every
+// user-facing setting. It is split into four scopes so the frontend settings
+// hub can render them as "App", "Tenant" and "Landlord" groups:
+//
+//   • flat legacy fields  — cross-cutting toggles the backend already reads
+//                            elsewhere (FCM call push, marketing email sends,
+//                            SMS alerts, theme, language, AI opt-in). KEPT so
+//                            existing server logic keeps working unchanged.
+//   • notifications{}     — granular in-app/push/email notification controls.
+//   • app{}               — global app/display preferences (currency, motion…).
+//   • tenant{}            — settings that only matter while acting as a tenant.
+//   • landlord{}          — settings that only matter while acting as a landlord.
+//
+// Every sub-schema uses `default: () => ({})` so an existing user document
+// (which only has the flat legacy fields) transparently gains the new nested
+// groups — fully populated with defaults — the first time it is loaded.
+
+// A reusable "quiet window" (Do-Not-Disturb / quiet hours). `from`/`until`
+// are 24-hour "HH:MM" strings; an overnight window (from > until) is valid.
+const QuietWindowSchema = new mongoose.Schema(
+  {
+    enabled: { type: Boolean, default: false },
+    from:    { type: String, default: '22:00', maxlength: 5 },
+    until:   { type: String, default: '08:00', maxlength: 5 },
+  },
+  { _id: false },
+);
+
+const NotificationPrefsSchema = new mongoose.Schema(
+  {
+    // ── Channel master switches ──────────────────────────────────────────
+    push:  { type: Boolean, default: true },
+    email: { type: Boolean, default: true },
+    sound: { type: Boolean, default: true },
+
+    // How often batched (non-urgent) emails/digests go out.
+    frequency: { type: String, enum: ['instant', 'daily', 'weekly'], default: 'instant' },
+
+    // Do-Not-Disturb window — suppresses sound + toast between from/until.
+    dnd: { type: QuietWindowSchema, default: () => ({}) },
+
+    // ── Per-topic switches (what the user wants to hear about) ───────────
+    messages:    { type: Boolean, default: true },
+    bookings:    { type: Boolean, default: true },
+    payments:    { type: Boolean, default: true },
+    inquiries:   { type: Boolean, default: true },
+    visits:      { type: Boolean, default: true },
+    priceAlerts: { type: Boolean, default: true },
+  },
+  { _id: false },
+);
+
+const AppPrefsSchema = new mongoose.Schema(
+  {
+    // Currency the UI formats rents/prices in. Display-only — stored data
+    // is always BDT.
+    currency:       { type: String, enum: ['BDT', 'USD'], default: 'BDT' },
+    // Auto-play property walkthrough videos in feeds/galleries.
+    autoplayVideos: { type: Boolean, default: true },
+    // Accessibility: dampen non-essential animations/transitions.
+    reduceMotion:   { type: Boolean, default: false },
+    // Which dashboard a multi-role user lands on after login.
+    defaultLandingRole: { type: String, enum: ['auto', 'tenant', 'landlord'], default: 'auto' },
+  },
+  { _id: false },
+);
+
+const TenantPrefsSchema = new mongoose.Schema(
+  {
+    // Public tenant trust card visibility (mirrors tenantProfile.publicVisible
+    // intent but lives with the other tenant *settings* for a single hub).
+    profileVisibility:      { type: String, enum: ['public', 'private'], default: 'public' },
+    // Let landlords see the tenant's phone/email once a conversation starts.
+    showContactToLandlords: { type: Boolean, default: true },
+    // Email/push when a new listing matches a saved search.
+    savedSearchAlerts:      { type: Boolean, default: true },
+
+    // ── Default search preferences (pre-fill the search bar) ─────────────
+    defaultCity:         { type: String, default: '', trim: true, maxlength: 60 },
+    defaultArea:         { type: String, default: '', trim: true, maxlength: 80 },
+    defaultBudgetMin:    { type: Number, default: null, min: 0, max: 100000000 },
+    defaultBudgetMax:    { type: Number, default: null, min: 0, max: 100000000 },
+    defaultPropertyType: {
+      type: String,
+      enum: ['any', 'apartment', 'duplex', 'studio', 'sublet', 'commercial'],
+      default: 'any',
+    },
+  },
+  { _id: false },
+);
+
+const LandlordPrefsSchema = new mongoose.Schema(
+  {
+    // Notify the landlord the moment a new inquiry arrives.
+    inquiryNotifications: { type: Boolean, default: true },
+    // Auto-reply to first-time inquiries with a canned message.
+    autoReplyEnabled:     { type: Boolean, default: false },
+    autoReplyMessage:     { type: String, default: '', trim: true, maxlength: 500 },
+    // Show the landlord's phone number publicly on their listings.
+    showPhoneOnListings:  { type: Boolean, default: true },
+    // Allow tenants to book instantly without a manual approval step.
+    instantBooking:       { type: Boolean, default: false },
+    // Accept visit-schedule requests from tenants.
+    allowVisitRequests:   { type: Boolean, default: true },
+    // Suppress inquiry pings during these hours.
+    quietHours:           { type: QuietWindowSchema, default: () => ({}) },
+    // Pre-selected property type on the "Add property" form.
+    defaultListingType: {
+      type: String,
+      enum: ['apartment', 'duplex', 'studio', 'sublet', 'commercial'],
+      default: 'apartment',
+    },
+  },
+  { _id: false },
+);
+
+// The umbrella `preferences` schema: legacy flat fields + the four scopes.
+const PreferencesSchema = new mongoose.Schema(
+  {
+    // ── Flat legacy fields (kept — server logic reads these directly) ────
+    aiLearningOptIn:   { type: Boolean, default: false },
+    marketingEmails:   { type: Boolean, default: true },
+    smsAlerts:         { type: Boolean, default: true },
+    // Phase Call-6: master switch for incoming-call push notifications.
+    // When false, the backend skips sending FCM on CALL_INITIATED.
+    callNotifications: { type: Boolean, default: true },
+    theme:             { type: String, enum: ['system', 'light', 'dark'], default: 'system' },
+    language:          { type: String, enum: ['en', 'bn'], default: 'en' },
+
+    // ── Scoped groups (new global-settings surface) ──────────────────────
+    notifications: { type: NotificationPrefsSchema, default: () => ({}) },
+    app:           { type: AppPrefsSchema,          default: () => ({}) },
+    tenant:        { type: TenantPrefsSchema,       default: () => ({}) },
+    landlord:      { type: LandlordPrefsSchema,     default: () => ({}) },
+  },
+  { _id: false },
+);
+
 // ─── USER ───────────────────────────────────────────────────────────────────
 const UserSchema = new mongoose.Schema(
   {
@@ -239,16 +378,12 @@ const UserSchema = new mongoose.Schema(
     bannedBy:  { type: mongoose.Schema.Types.ObjectId, default: null },
 
     // ─── Phase 7: Privacy Center & Account Management ────────────────────
-    preferences: {
-      aiLearningOptIn: { type: Boolean, default: false },
-      marketingEmails: { type: Boolean, default: true },
-      smsAlerts:       { type: Boolean, default: true },
-      // Phase Call-6: master switch for incoming-call push notifications.
-      // When false, the backend skips sending FCM on CALL_INITIATED.
-      callNotifications: { type: Boolean, default: true },
-      theme:           { type: String, enum: ['system', 'light', 'dark'], default: 'system' },
-      language:        { type: String, enum: ['en', 'bn'], default: 'en' },
-    },
+    // Global settings hub — see PreferencesSchema above. Legacy flat fields
+    // are preserved inside it, so `preferences.callNotifications`,
+    // `preferences.smsAlerts`, `preferences.theme`, etc. keep resolving for
+    // the server code that already reads them, while the new nested groups
+    // (notifications/app/tenant/landlord) power the settings screen.
+    preferences: { type: PreferencesSchema, default: () => ({}) },
     sessions: [
       {
         sessionId:  { type: String, required: true },

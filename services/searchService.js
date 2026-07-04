@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { expandLocationToken } = require('../utils/locationAliases');
 
 /**
  * Pure helpers for property search + filter Mongo query construction. Kept
@@ -87,7 +88,16 @@ function buildSearchFilter(rawFilters = {}) {
   if (rawFilters.q) {
     const tokens = tokenize(rawFilters.q).slice(0, MAX_SEARCH_TOKENS);
     for (const t of tokens) {
-      ands.push({ searchHaystack: { $regex: tokenRegex(t) } });
+      // Expand each token with its English↔Bengali (and Bengali↔English digit)
+      // synonyms so a query in one language still matches a listing whose
+      // location was stored in the other (e.g. "savar" ↔ "সাভার"). When a token
+      // has no known synonym it stays a single clause (unchanged behaviour).
+      const variants = expandLocationToken(t);
+      if (variants.length <= 1) {
+        ands.push({ searchHaystack: { $regex: tokenRegex(t) } });
+      } else {
+        ands.push({ $or: variants.map((v) => ({ searchHaystack: { $regex: tokenRegex(v) } })) });
+      }
     }
   }
 
