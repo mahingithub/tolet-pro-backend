@@ -21,7 +21,51 @@ const ApiError      = require('../utils/ApiError');
 const notifications = require('./notification.service');
 const cloudinary    = require('./cloudinary.service');
 const pushService   = require('./push.service');
-const { getIo, emitToUser, roomFor } = require('../socket');
+const firebaseAdmin = require('./firebaseAdmin');
+const { getIo, emitToUser, roomFor, getSocketsForUser } = require('../socket');
+
+/**
+ * Deliver a freshly-created message to the recipient with NO duplicates.
+ *
+ * The rule (this is what fixes "same message twice"):
+ *   • Recipient ONLINE  → deliver live over the socket only (RECEIVE_MESSAGE).
+ *                         The in-app toast/bell handles the alert; we send NO
+ *                         push, so an open app never shows an OS notification
+ *                         on top of the in-app one.
+ *   • Recipient OFFLINE → send exactly the push channels (FCM + web-push) so
+ *                         they're notified with the app closed.
+ *
+ * Presence is checked via Socket.IO room membership (reliable), NOT the old
+ * emit-ack callback — the client never acked, so that path treated EVERYONE as
+ * offline and pushed on every message.
+ */
+function deliverMessage({ io, senderUser, peerId, convoId, msg, preview, payload }) {
+  const online = io ? getSocketsForUser(io, peerId).size > 0 : false;
+
+  if (io && online) {
+    io.to(roomFor(peerId)).emit('RECEIVE_MESSAGE', payload);
+    io.to(roomFor(senderUser._id)).emit('MESSAGE_DELIVERED', { messageId: String(msg._id) });
+    return;
+  }
+
+  // Offline → push. Both channels are kept so native (FCM) and web-push users
+  // are all reachable; they only fire when the recipient has no live socket.
+  const pushBody = preview;
+  firebaseAdmin
+    .sendToUser(peerId, {
+      title: senderUser.name || 'New message',
+      body: pushBody,
+      data: { url: '/messages', type: 'message', conversationId: String(convoId) },
+    })
+    .catch(() => {});
+  pushService
+    .sendPushNotification(peerId, {
+      title: senderUser.name || 'New message',
+      body: pushBody,
+      data: { url: '/messages' },
+    })
+    .catch(() => {});
+}
 
 const oid = (v) => new mongoose.Types.ObjectId(String(v));
 
@@ -173,7 +217,10 @@ async function sendMessage({ id, body, user }) {
   convo.unreadCounts.set(String(user._id), 0);
   await convo.save();
 
-  // Fire-and-forget notification to the peer.
+  // In-app notification record + real-time bell/unread ('new_notification').
+  // skipPush: the push decision is made in deliverMessage() based on live
+  // presence, so this generic emitter must NOT also fire its own unconditional
+  // push — that unconditional push was half of the "same message twice" bug.
   notifications.emit({
     userId: peerId,
     type:   'message',
@@ -186,36 +233,24 @@ async function sendMessage({ id, body, user }) {
       peerAvatar: user.avatar,
       messageId: String(msg._id) 
     },
+    skipPush: true,
   }).catch(() => { /* already swallowed inside emit */ });
 
-  // Emit real-time socket event for global toasts and active chat
-  const io = getIo();
-  if (io) {
-    io.to(roomFor(peerId)).timeout(5000).emit('RECEIVE_MESSAGE', {
+  // Deliver live if the peer is online, otherwise push exactly once.
+  deliverMessage({
+    io: getIo(),
+    senderUser: user,
+    peerId,
+    convoId: convo._id,
+    msg,
+    preview: text.slice(0, 140),
+    payload: {
       conversationId: String(convo._id),
       message: msg.toJSON(),
       senderName: user.name || 'User',
       senderAvatar: user.avatar || user.avatarUrl || user.tenantProfile?.avatar || user.landlordProfile?.avatar || null,
-    }, (err, responses) => {
-      // If at least one device acknowledged, emit delivered
-      if (responses && responses.length > 0) {
-        io.to(roomFor(user._id)).emit('MESSAGE_DELIVERED', { messageId: String(msg._id) });
-      } else {
-        // Send push notification if offline or no response
-        pushService.sendPushNotification(peerId, {
-          title: user.name || 'New message',
-          body: text.slice(0, 140),
-          data: { url: `/smart-alerts` }
-        });
-      }
-    });
-  } else {
-    pushService.sendPushNotification(peerId, {
-      title: user.name || 'New message',
-      body: text.slice(0, 140),
-      data: { url: `/smart-alerts` }
-    });
-  }
+    },
+  });
 
   return msg;
 }
@@ -323,33 +358,24 @@ async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = ''
       peerAvatar: user.avatar,
       messageId: String(msg._id) 
     },
+    skipPush: true,
   }).catch(() => {});
 
-  const io = getIo();
-  if (io) {
-    io.to(roomFor(peerId)).timeout(5000).emit('RECEIVE_MESSAGE', {
+  // Deliver live if the peer is online, otherwise push exactly once.
+  deliverMessage({
+    io: getIo(),
+    senderUser: user,
+    peerId,
+    convoId: convo._id,
+    msg,
+    preview,
+    payload: {
       conversationId: String(convo._id),
       message: msg.toJSON(),
       senderName: user.name || 'User',
       senderAvatar: user.avatar || user.avatarUrl || user.tenantProfile?.avatar || user.landlordProfile?.avatar || null,
-    }, (err, responses) => {
-      if (responses && responses.length > 0) {
-        io.to(roomFor(user._id)).emit('MESSAGE_DELIVERED', { messageId: String(msg._id) });
-      } else {
-        pushService.sendPushNotification(peerId, {
-          title: user.name || 'New message',
-          body: preview,
-          data: { url: `/smart-alerts` }
-        });
-      }
-    });
-  } else {
-    pushService.sendPushNotification(peerId, {
-      title: user.name || 'New message',
-      body: preview,
-      data: { url: `/smart-alerts` }
-    });
-  }
+    },
+  });
 
   return msg;
 }
