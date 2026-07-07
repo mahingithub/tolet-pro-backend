@@ -128,9 +128,15 @@ async function createBooking(req, res, next) {
 async function listHostBookings(req, res, next) {
   try {
     const bookings = await Booking.find({ landlordId: req.user._id, status: { $ne: 'cancelled' } })
+      .populate('tenantId', 'avatar')
       .sort({ createdAt: -1 })
       .lean();
-    bookings.forEach(b => { b.id = String(b._id); delete b._id; });
+    bookings.forEach(b => { 
+      b.id = String(b._id); 
+      b.tenantAvatar = b.tenantId?.avatar || '';
+      if (b.tenantId && b.tenantId._id) b.tenantId = b.tenantId._id;
+      delete b._id; 
+    });
     return res.json({ bookings });
   } catch (err) {
     return next(err);

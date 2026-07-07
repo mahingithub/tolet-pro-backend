@@ -128,7 +128,20 @@ async function createInquiry({ body, user }) {
 async function listHostInquiries({ user, status }) {
   const filter = { propertyOwnerId: user._id };
   if (status) filter.status = status;
-  return Inquiry.find(filter).sort({ createdAt: -1, _id: -1 });
+  const inquiries = await Inquiry.find(filter)
+    .populate('inquirerUserId', 'avatar')
+    .sort({ createdAt: -1, _id: -1 })
+    .lean();
+
+  return inquiries.map((i) => {
+    i.id = String(i._id);
+    i.userAvatar = i.inquirerUserId?.avatar || '';
+    if (i.inquirerUserId && i.inquirerUserId._id) {
+      i.inquirerUserId = i.inquirerUserId._id;
+    }
+    delete i._id;
+    return i;
+  });
 }
 
 async function listMyInquiries({ user }) {
