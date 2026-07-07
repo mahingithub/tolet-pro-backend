@@ -59,7 +59,7 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
       .catch(() => null);
 
     const property = await require('../models/Property').findById(booking.propertyId)
-      .select('coverPhoto')
+      .select('title coverPhoto')
       .lean()
       .catch(() => null);
 
@@ -71,7 +71,7 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
           landlordId:    booking.landlordId,
           tenantId:      booking.tenantId,
           propertyId:    booking.propertyId,
-          propertyTitle: booking.property || '',
+          propertyTitle: booking.property || property?.title || '',
           propertyImage: property?.coverPhoto || '',
           tenantPhone:   booking.tenantPhone || '',
           landlordName:  landlord?.name  || '',

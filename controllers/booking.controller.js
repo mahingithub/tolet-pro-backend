@@ -245,7 +245,7 @@ async function updateBooking(req, res, next) {
 
     // Whitelist mutable fields
     const whitelist = [
-      'autoReminder', 'reminderLeadDays', 'rentDueDay',
+      'autoReminder', 'reminderLeadDays', 'rentDueDay', 'monthlyRent',
       'notes', 'serviceCharge', 'securityDeposit', 'status',
       'tenant', 'tenantPhone', 'tenantId',
     ];
