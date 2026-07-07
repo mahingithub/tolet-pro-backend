@@ -467,20 +467,29 @@ function initSocket(httpServer) {
     socket.on('disconnect', async (reason) => {
       console.log(`[socket] user ${userId} disconnected (${socket.id}) — ${reason}`);
       try {
-        const activeCall = await Call.findOne({
+        // If the CALLER drops off while the call is still RINGING, cancel it so
+        // the receiver's phone stops ringing right away. We intentionally do
+        // NOT touch already-'accepted' (live) calls here: on flaky mobile /
+        // free-tier hosting the socket disconnects and reconnects constantly,
+        // and ending a live call on every brief drop would cut people off mid-
+        // conversation. Live calls are torn down explicitly via CALL_ENDED.
+        const ringingCall = await Call.findOne({
           callerId: userId,
-          status: { $in: ['ringing', 'active'] }
+          status: 'ringing',
         });
-        if (activeCall) {
-          activeCall.status = 'ended';
-          activeCall.endedAt = new Date();
-          await activeCall.save();
-          
-          clearRingTimer(activeCall.callId);
+        if (ringingCall) {
+          ringingCall.status = 'ended';
+          ringingCall.endedAt = new Date();
+          await ringingCall.save();
 
-          emitToUser(io, activeCall.receiverId, 'CALL_ENDED', {
-            callId: activeCall.callId,
-            reason: 'caller_disconnected'
+          // NOTE: the Call id is `_id` (there is no `callId` field). Using the
+          // wrong field here previously left the receiver ringing until the
+          // 45s missed-call timer fired.
+          clearRingTimer(ringingCall._id);
+
+          emitToUser(io, ringingCall.receiverId, 'CALL_ENDED', {
+            callId: String(ringingCall._id),
+            reason: 'caller_disconnected',
           });
         }
       } catch (err) {

@@ -46,12 +46,6 @@ const env = {
   cloudinaryApiKey: process.env.CLOUDINARY_API_KEY || '',
   cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET || '',
 
-  // ── ZegoCloud (Phase Call-3) — optional; calling token endpoint needs both ──
-  // appId is a NUMBER in ZegoCloud's API. Server Secret is a 32-byte string
-  // and must NEVER be exposed to the frontend.
-  zegoAppId: Number(process.env.ZEGO_APP_ID || 0),
-  zegoServerSecret: process.env.ZEGO_SERVER_SECRET || '',
-
   signupIntentTtlMin: Number(process.env.SIGNUP_INTENT_TTL_MIN || 15),
   resetOtpTtlMin: Number(process.env.RESET_OTP_TTL_MIN || 10),
   loginMaxAttempts: Number(process.env.LOGIN_MAX_ATTEMPTS || 5),
@@ -59,11 +53,5 @@ const env = {
 };
 
 env.isProd = env.nodeEnv === 'production';
-
-// Non-fatal heads-up so a misconfigured calling setup is obvious in logs
-// without taking down auth/properties/etc.
-if (!env.zegoAppId || !env.zegoServerSecret) {
-  console.warn('[env] ZEGO_APP_ID / ZEGO_SERVER_SECRET not set — /api/calls/zego-token will return 503 until configured.');
-}
 
 module.exports = env;

@@ -8,9 +8,10 @@
  *   ringing → rejected
  *   ringing → missed   (30s timeout with no answer)
  *
- * The `roomId` is a unique identifier used by the media provider
- * (ZegoCloud / Agora / Twilio) to create the actual media room.
- * It is generated server-side when the call is initiated.
+ * The `roomId` is a unique identifier that pairs the two peers for this call.
+ * The WebRTC handshake (offer/answer/ICE) is relayed over Socket.IO and the
+ * browsers then connect directly, peer-to-peer. It is generated server-side
+ * when the call is initiated.
  */
 
 const mongoose = require('mongoose');

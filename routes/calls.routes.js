@@ -11,7 +11,6 @@ router.post('/push-action', ctl.pushAction); // Signed service-worker notificati
 router.use(requireAuth);
 
 router.post('/',           ctl.createCall);      // Initiate a call
-router.post('/zego-token', ctl.zegoToken);       // Phase Call-3: media token
 router.post('/mark-seen',  ctl.markSeen);        // Phase Call-4: clear missed badge
 router.get('/history',     ctl.getCallHistory);  // Call history
 router.get('/active',      ctl.getActiveCall);    // Current active call (reconnect)
