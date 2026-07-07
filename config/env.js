@@ -48,6 +48,11 @@ const env = {
   // sms.net.bd SMS gateway — used to deliver signup + password-reset OTPs.
   smsApiKey: process.env.SMS_API_KEY || '',
 
+  // Testing escape hatch: when true, OTPs are LOGGED to the server console
+  // and NOT sent via SMS. Lets you exercise the full signup/reset flow without
+  // SMS credits or a verified gateway account. MUST be false for real users.
+  otpDevMode: process.env.OTP_DEV_MODE === 'true',
+
   cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
   cloudinaryApiKey: process.env.CLOUDINARY_API_KEY || '',
   cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET || '',
@@ -59,5 +64,12 @@ const env = {
 };
 
 env.isProd = env.nodeEnv === 'production';
+
+if (env.otpDevMode) {
+  console.warn(
+    '[env] ⚠️  OTP_DEV_MODE is ON — OTP codes are written to the server log and ' +
+    'NOT sent via SMS. Turn this OFF before real users sign up.'
+  );
+}
 
 module.exports = env;

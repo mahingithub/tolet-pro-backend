@@ -58,6 +58,21 @@ async function issueOtp(phone) {
 }
 
 /**
+ * Delivers an OTP to the user. Normally this texts the code via sms.net.bd.
+ * When OTP_DEV_MODE=true it SKIPS the gateway and writes the code to the
+ * server log instead — so the full signup/reset flow can be tested without SMS
+ * credits or a verified gateway account. The code is never returned to the
+ * client, only logged.
+ */
+async function deliverOtp(phone, otp) {
+  if (env.otpDevMode) {
+    console.warn(`[OTP_DEV_MODE] SMS skipped — OTP for ${phone} is ${otp}`);
+    return;
+  }
+  await smsService.sendOtp(phone, otp);
+}
+
+/**
  * Step 1 of signup: persist (name, hashedPassword, role) as a SignupIntent
  * keyed by phone so we can finalize after the OTP is verified. We deliberately
  * do NOT create a real User yet — the user must prove control of the phone
@@ -86,9 +101,9 @@ async function startSignup({ name, phone, password, role }) {
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
-  // Generate + persist a fresh OTP, then text it to the user.
+  // Generate + persist a fresh OTP, then deliver it (SMS, or console in dev).
   const otp = await issueOtp(phone);
-  await smsService.sendOtp(phone, otp);
+  await deliverOtp(phone, otp);
 
   return { ok: true, expiresAt };
 }
@@ -220,11 +235,11 @@ async function forgotPassword({ phoneNumber }) {
   if (user && user.phoneVerified) {
     const otp = await issueOtp(phone);
     try {
-      await smsService.sendOtp(phone, otp);
+      await deliverOtp(phone, otp);
     } catch (err) {
       // Never surface delivery failures here — doing so would leak account
       // existence via error/timing. Log for ops visibility instead.
-      console.error('[auth] forgot-password SMS delivery failed:', err.message);
+      console.error('[auth] forgot-password OTP delivery failed:', err.message);
     }
   }
 

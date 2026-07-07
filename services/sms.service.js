@@ -65,7 +65,11 @@ async function sendSms(to, msg) {
   // Non-zero `error` = message NOT accepted (e.g. 417 insufficient balance,
   // 413 invalid sender id, 416 no valid recipient, ...).
   if (!data || Number(data.error) !== 0) {
-    throw ApiError.internal(`OTP পাঠানো যায়নি। ${data?.msg || ''}`.trim(), {
+    // Log the REAL gateway reason for ops (e.g. insufficient balance, or
+    // "registered number only" on an unverified account) — but do NOT leak
+    // billing/account details to end users; they get a clean retry message.
+    console.error('[sms] gateway rejected send:', { error: data?.error, msg: data?.msg });
+    throw ApiError.internal('OTP পাঠানো যায়নি। একটু পরে আবার চেষ্টা করুন।', {
       code: 'sms_rejected',
       details: data,
     });
