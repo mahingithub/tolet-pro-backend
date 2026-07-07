@@ -46,6 +46,17 @@ const MessageSchema = new mongoose.Schema(
 
     // userIds who have already read this message (used for the "read" tick).
     readBy: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], default: [] },
+
+    // ── Reply ────────────────────────────────────────────────────────────────
+    // The message this one is replying to (WhatsApp/Messenger quote). Null for
+    // normal messages. We populate it on read/send so the receiver can render
+    // the quoted snippet without a second round-trip.
+    replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
+
+    // ── Delete for everyone ────────────────────────────────────────────────
+    // Soft delete: the row is kept (so thread order + reply targets survive) but
+    // its content is stripped and the UI shows "This message was deleted".
+    isDeleted: { type: Boolean, default: false },
   },
   { timestamps: true },
 );

@@ -15,9 +15,12 @@ router.post('/open',              verifyConversationAccess, ctl.openConversation
 
 router.get ('/messages/missed',   ctl.getMissedMessagesCount);
 
-router.get ('/:id/messages',      verifyConversationAccess, ctl.listMessages);
-router.post('/:id/messages',      verifyConversationAccess, ctl.sendMessage);
-router.post('/:id/media',         verifyConversationAccess, uploadSingle, ctl.sendMedia);
-router.post('/:id/read',          verifyConversationAccess, ctl.markRead);
+router.get   ('/:id/messages',             verifyConversationAccess, ctl.listMessages);
+router.post  ('/:id/messages',             verifyConversationAccess, ctl.sendMessage);
+// Delete-for-everyone. `:id` is the conversation id (matches the middleware,
+// which reads req.params.id) → full path: DELETE /api/conversations/:id/messages/:messageId
+router.delete('/:id/messages/:messageId',  verifyConversationAccess, ctl.deleteMessage);
+router.post  ('/:id/media',                verifyConversationAccess, uploadSingle, ctl.sendMedia);
+router.post  ('/:id/read',                 verifyConversationAccess, ctl.markRead);
 
 module.exports = router;

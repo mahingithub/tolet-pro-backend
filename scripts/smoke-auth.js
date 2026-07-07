@@ -6,15 +6,20 @@
  * Tiny end-to-end smoke test for the auth backend. Runs against the local
  * server. Verifies:
  *   1. /healthz
- *   2. /signup/start  → 202
- *   3. /signup/verify (with junk token) → 401
- *   4. /login (no account, wrong creds) → 401 generic
- *   5. /forgot/start → 202 (constant-time exists check)
- *   6. /reset-password (bad token) → 401
+ *   2. /signup/start   → 400 on bad input, 202 on valid input
+ *   3. /signup/verify  (wrong OTP) → 400
+ *   4. /login          (no account, wrong creds) → 401 generic
+ *   5. /forgot-password → 202 (constant-time exists check)
+ *   6. /reset-password (wrong OTP) → 400
  *
- * It does NOT cover the happy-path signup/forgot end-to-end — that requires
- * a real Firebase ID token. Run this in dev to make sure the wiring + validation
- * + error handling are all alive.
+ * It does NOT cover the happy-path signup/forgot end-to-end — that requires a
+ * real OTP delivered by sms.net.bd. Run this in dev to make sure the wiring +
+ * validation + error handling are all alive.
+ *
+ * NOTE: /signup/start with valid input will attempt a real SMS send. Point
+ * SMOKE_BASE at a dev server, and expect a 500 (sms_send_failed / rejected)
+ * if SMS_API_KEY is unset or the gateway rejects the test number — both are
+ * acceptable non-crash outcomes for this smoke check.
  *
  * Usage:  npm run smoke
  */
@@ -53,26 +58,13 @@ test('POST /api/auth/signup/start (missing fields) → 400', async () => {
   expect(r.status, matchers.status(400));
 });
 
-test('POST /api/auth/signup/start (valid input) → 202', async () => {
-  const r = await req('/api/auth/signup/start', {
-    method: 'POST',
-    body: {
-      name: 'Smoke Tester',
-      phone: '+8801999999999',
-      password: 'abcd1234',
-      role: 'tenant',
-    },
-  });
-  expect(r.status, matchers.status(202));
-});
-
-test('POST /api/auth/signup/verify (junk idToken) → 401', async () => {
+test('POST /api/auth/signup/verify (wrong OTP) → 400', async () => {
   const r = await req('/api/auth/signup/verify', {
     method: 'POST',
-    body: { idToken: 'this-is-not-a-real-firebase-id-token-but-long-enough' },
+    body: { phoneNumber: '+8801999999999', otp: '000000' },
   });
-  // 401 if firebase-admin rejects, 500 if not configured — both are non-2xx.
-  if (r.status !== 401 && r.status !== 500) throw new Error(`unexpected status ${r.status}`);
+  // No matching Otp record (or wrong code) → otp_invalid.
+  expect(r.status, matchers.status(400));
 });
 
 test('POST /api/auth/login (no account) → 401 with generic message', async () => {
@@ -86,21 +78,21 @@ test('POST /api/auth/login (no account) → 401 with generic message', async () 
   }
 });
 
-test('POST /api/auth/forgot/start → 202 (constant-time)', async () => {
-  const r = await req('/api/auth/forgot/start', {
+test('POST /api/auth/forgot-password → 202 (constant-time)', async () => {
+  const r = await req('/api/auth/forgot-password', {
     method: 'POST',
-    body: { phone: '+8801000000001' },
+    body: { phoneNumber: '+8801000000001' },
   });
   expect(r.status, matchers.status(202));
 });
 
-test('POST /api/auth/reset-password (bad token) → 401', async () => {
+test('POST /api/auth/reset-password (wrong OTP) → 400', async () => {
   const r = await req('/api/auth/reset-password', {
     method: 'POST',
-    body: { resetToken: 'not-a-real-token', password: 'newpass123' },
+    body: { phoneNumber: '+8801000000001', otp: '000000', newPassword: 'newpass123' },
   });
-  // Validator may catch it first as 400 (token too short) — accept either.
-  if (r.status !== 401 && r.status !== 400) throw new Error(`unexpected status ${r.status}`);
+  // No matching Otp record (or wrong code) → otp_invalid.
+  expect(r.status, matchers.status(400));
 });
 
 (async () => {

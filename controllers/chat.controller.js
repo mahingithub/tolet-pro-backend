@@ -42,6 +42,17 @@ exports.markRead = asyncH(async (req, res) => {
   res.json(r);
 });
 
+// Delete-for-everyone (soft delete). Only the message's original sender is
+// allowed; the service enforces that and notifies the peer over Socket.IO.
+exports.deleteMessage = asyncH(async (req, res) => {
+  const result = await svc.deleteMessage({
+    id:        req.params.id,          // conversation id
+    messageId: req.params.messageId,
+    user:      req.user,
+  });
+  res.json(result);
+});
+
 // Send an image or voice message. The file arrives via multer (field 'file').
 // The `kind` ('image' | 'audio') + optional caption/duration come from the
 // multipart body.

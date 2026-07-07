@@ -19,9 +19,35 @@ const nameSchema = z.string().trim().min(2, 'নাম অন্তত ২ অ�
 
 const roleSchema = z.enum(['tenant', 'landlord']).optional();
 
-const idTokenSchema = z.string().min(20, 'Firebase ID token দেওয়া হয়নি।');
+// 6-digit numeric OTP delivered via sms.net.bd.
+const otpSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{6}$/, 'OTP অবশ্যই ৬ সংখ্যার হতে হবে।');
 
-const resetTokenSchema = z.string().min(20, 'Reset token দেওয়া হয়নি।');
+/**
+ * The OTP endpoints accept the phone under `phoneNumber` (preferred, matches
+ * the Otp model) OR `phone` (alias, matches the rest of the app). This helper
+ * builds a schema that requires exactly one of them plus the given extra
+ * fields, and normalises the output to always carry `phoneNumber` so the
+ * service layer has a single field to read.
+ */
+function phoneOtpSchema(extraShape = {}) {
+  return z
+    .object({
+      phone: phoneSchema.optional(),
+      phoneNumber: phoneSchema.optional(),
+      ...extraShape,
+    })
+    .refine((d) => d.phoneNumber || d.phone, {
+      message: 'ফোন নম্বর দিন।',
+      path: ['phoneNumber'],
+    })
+    .transform(({ phone, phoneNumber, ...rest }) => ({
+      phoneNumber: phoneNumber || phone,
+      ...rest,
+    }));
+}
 
 module.exports = {
   signupStart: z.object({
@@ -30,21 +56,21 @@ module.exports = {
     password: passwordSchema,
     role: roleSchema,
   }),
-  signupVerify: z.object({
-    idToken: idTokenSchema,
-  }),
+
+  // { phoneNumber | phone, otp }  → normalised to { phoneNumber, otp }
+  signupVerify: phoneOtpSchema({ otp: otpSchema }),
+
   login: z.object({
     phone: phoneSchema,
     password: z.string().min(1, 'পাসওয়ার্ড দিন।'),
   }),
-  forgotStart: z.object({
-    phone: phoneSchema,
-  }),
-  forgotVerify: z.object({
-    idToken: idTokenSchema,
-  }),
-  resetPassword: z.object({
-    resetToken: resetTokenSchema,
-    password: passwordSchema,
+
+  // { phoneNumber | phone }  → normalised to { phoneNumber }
+  forgotPassword: phoneOtpSchema(),
+
+  // { phoneNumber | phone, otp, newPassword }  → normalised
+  resetPassword: phoneOtpSchema({
+    otp: otpSchema,
+    newPassword: passwordSchema,
   }),
 };

@@ -4,10 +4,10 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const SignupIntent = require('../models/SignupIntent');
+const Otp = require('../models/Otp');
 const ApiError = require('../utils/ApiError');
 const env = require('../config/env');
-const firebaseAdmin = require('./firebaseAdmin');
-const otpService = require('./otp.service');
+const smsService = require('./sms.service');
 const tokenService = require('./token.service');
 
 const GENERIC_LOGIN_ERROR = 'ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে।';
@@ -37,10 +37,36 @@ function addSession(user, { device = 'Unknown device', ipAddress = '0.0.0.0' } =
 }
 
 /**
+ * Generates a 6-digit, zero-padded numeric OTP (e.g. "004271").
+ */
+function generateOtp() {
+  return crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
+}
+
+/**
+ * Upserts the single active OTP for a phone number and (re)starts its
+ * 5-minute TTL window by refreshing `createdAt`. Returns the plaintext code.
+ */
+async function issueOtp(phone) {
+  const otp = generateOtp();
+  await Otp.findOneAndUpdate(
+    { phoneNumber: phone },
+    { phoneNumber: phone, otp, createdAt: new Date() },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  return otp;
+}
+
+/**
  * Step 1 of signup: persist (name, hashedPassword, role) as a SignupIntent
- * keyed by phone, so we can finalize after the client-side Firebase OTP
- * succeeds. We deliberately do NOT create a real User yet — the user must
- * prove control of the phone first.
+ * keyed by phone so we can finalize after the OTP is verified. We deliberately
+ * do NOT create a real User yet — the user must prove control of the phone
+ * first.
+ *
+ * Then generate a 6-digit OTP, store it in the Otp collection, and deliver it
+ * via sms.net.bd. If SMS delivery fails we surface the error so the client can
+ * retry (the SignupIntent + Otp are already saved and will simply be
+ * overwritten / TTL-expire).
  *
  * If a verified account already exists for this phone, we refuse with 409.
  */
@@ -51,6 +77,7 @@ async function startSignup({ name, phone, password, role }) {
       code: 'account_exists',
     });
   }
+
   const passwordHash = await bcrypt.hash(password, env.bcryptRounds);
   const expiresAt = new Date(Date.now() + env.signupIntentTtlMin * 60_000);
   await SignupIntent.findOneAndUpdate(
@@ -58,16 +85,33 @@ async function startSignup({ name, phone, password, role }) {
     { name, phone, passwordHash, role: role || 'tenant', expiresAt },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
+
+  // Generate + persist a fresh OTP, then text it to the user.
+  const otp = await issueOtp(phone);
+  await smsService.sendOtp(phone, otp);
+
   return { ok: true, expiresAt };
 }
 
 /**
- * Step 2 of signup: verify the Firebase ID token, look up the SignupIntent,
- * create/update the User, mark phoneVerified, and issue an access token.
+ * Step 2 of signup: verify the OTP the user received via SMS, look up the
+ * matching SignupIntent, create/finalize the User, mark phoneVerified, open a
+ * session, and issue an access token. On success the SignupIntent and the Otp
+ * document are both deleted.
  */
-async function verifySignup({ idToken }) {
-  const { uid, phone } = await firebaseAdmin.verifyIdToken(idToken);
+async function verifySignup({ phoneNumber, otp }) {
+  const phone = phoneNumber;
 
+  // 1. Verify the OTP. A missing record means it never existed or the 5-minute
+  //    TTL already reaped it → treat both as "invalid/expired".
+  const record = await Otp.findOne({ phoneNumber: phone });
+  if (!record || record.otp !== String(otp)) {
+    throw ApiError.badRequest('OTP ভুল অথবা মেয়াদ শেষ হয়েছে। আবার চেষ্টা করুন।', {
+      code: 'otp_invalid',
+    });
+  }
+
+  // 2. Find the pending signup details.
   const intent = await SignupIntent.findOne({ phone });
   if (!intent) {
     throw ApiError.badRequest('সাইনআপ সেশন মেয়াদ শেষ হয়েছে। আবার শুরু করুন।', {
@@ -77,9 +121,10 @@ async function verifySignup({ idToken }) {
 
   let user = await User.findOne({ phone });
   if (user && user.phoneVerified) {
-    // Edge case: account already exists. Bail rather than overwriting (CRITICAL
-    // bug that existed in the old code). Tell client to log in.
+    // Edge case: account already exists. Bail rather than overwriting. Clean up
+    // the temporary records and tell the client to log in.
     await SignupIntent.deleteOne({ phone });
+    await Otp.deleteOne({ phoneNumber: phone });
     throw ApiError.conflict('এই নম্বরে অ্যাকাউন্ট আগে থেকেই রয়েছে। লগইন করুন।', {
       code: 'account_exists',
     });
@@ -91,7 +136,6 @@ async function verifySignup({ idToken }) {
       password: intent.passwordHash,
       role: intent.role,
       phoneVerified: true,
-      firebaseUid: uid,
       passwordChangedAt: new Date(),
     });
   } else {
@@ -100,7 +144,6 @@ async function verifySignup({ idToken }) {
     user.password = intent.passwordHash;
     user.role = intent.role;
     user.phoneVerified = true;
-    user.firebaseUid = uid;
     user.passwordChangedAt = new Date();
   }
 
@@ -108,6 +151,7 @@ async function verifySignup({ idToken }) {
 
   await user.save();
   await SignupIntent.deleteOne({ phone });
+  await Otp.deleteOne({ phoneNumber: phone });
 
   const token = tokenService.signAccessToken(user, sessionId);
   return { token, user };
@@ -164,69 +208,60 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
 }
 
 /**
- * Forgot password — issues a fresh reset OTP and (in this build) returns
- * it via the response in development for testing. In production this OTP
- * should be delivered ONLY via Firebase Phone Auth on the client (same
- * mechanism as signup), and the verify step exchanges a Firebase ID token,
- * not a server-issued code. The `OtpToken` model exists for a future
- * server-side SMS fallback.
- *
- * For Option A (Firebase) the client itself runs `signInWithPhoneNumber`
- * and posts the resulting ID token to `/forgot/verify`. So this `start`
- * endpoint just confirms the account exists in a constant-time way.
+ * Forgot password — step 1. If a verified account exists for this phone, we
+ * issue a fresh OTP and deliver it via sms.net.bd. We ALWAYS resolve
+ * successfully (and swallow SMS errors) so the endpoint can return a constant
+ * response and never leak whether the account exists.
  */
-async function startForgotPassword({ phone }) {
+async function forgotPassword({ phoneNumber }) {
+  const phone = phoneNumber;
   const user = await User.findOne({ phone });
-  // Constant-time "exists" check — always return ok, never leak.
-  return { ok: true, exists: !!(user && user.phoneVerified) };
+
+  if (user && user.phoneVerified) {
+    const otp = await issueOtp(phone);
+    try {
+      await smsService.sendOtp(phone, otp);
+    } catch (err) {
+      // Never surface delivery failures here — doing so would leak account
+      // existence via error/timing. Log for ops visibility instead.
+      console.error('[auth] forgot-password SMS delivery failed:', err.message);
+    }
+  }
+
+  return { ok: true };
 }
 
 /**
- * Step 2 of forgot password: verify Firebase ID token to confirm phone
- * ownership, then issue a short-lived reset token.
+ * Forgot password — step 2. Verify the OTP against the Otp collection, then
+ * set the new password. Bumps `passwordChangedAt` (which invalidates any
+ * previously-issued access tokens via the requireAuth check) and clears any
+ * account lock. Deletes the Otp document on success.
  */
-async function verifyForgotPassword({ idToken }) {
-  const { phone } = await firebaseAdmin.verifyIdToken(idToken);
-  const user = await User.findOne({ phone });
-  if (!user || !user.phoneVerified) {
-    throw ApiError.notFound('এই নম্বরে অ্যাকাউন্ট পাওয়া যায়নি।', { code: 'user_not_found' });
-  }
-  const resetToken = tokenService.signResetToken(user);
-  return { resetToken };
-}
+async function resetPassword({ phoneNumber, otp, newPassword }) {
+  const phone = phoneNumber;
 
-/**
- * Step 3 of forgot password: exchange the reset token + new password for
- * an updated User. Bumps `passwordChangedAt` and clears any account lock.
- */
-async function resetPassword({ resetToken, password }) {
-  let decoded;
-  try {
-    decoded = tokenService.verifyResetToken(resetToken);
-  } catch (err) {
-    throw ApiError.unauthorized('রিসেট টোকেন অবৈধ বা মেয়াদ শেষ।', { code: 'reset_token_invalid' });
-  }
-  const user = await User.findById(decoded.sub).select('+password');
-  if (!user) throw ApiError.notFound('অ্যাকাউন্ট পাওয়া যায়নি।');
-
-  // One-time use (audit 5.7): a reset token is only accepted if it was issued
-  // at or after the user's most recent password change. The moment this token
-  // is consumed below, `passwordChangedAt` jumps forward — so the same token
-  // (and any other token minted before this change) can no longer be replayed.
-  const changedAtSec = user.passwordChangedAt
-    ? Math.floor(new Date(user.passwordChangedAt).getTime() / 1000)
-    : 0;
-  if (typeof decoded.iat === 'number' && decoded.iat < changedAtSec) {
-    throw ApiError.unauthorized('এই রিসেট লিংকটি আর বৈধ নয়। নতুন করে রিসেট করুন।', {
-      code: 'reset_token_used',
+  const record = await Otp.findOne({ phoneNumber: phone });
+  if (!record || record.otp !== String(otp)) {
+    throw ApiError.badRequest('OTP ভুল অথবা মেয়াদ শেষ হয়েছে। আবার চেষ্টা করুন।', {
+      code: 'otp_invalid',
     });
   }
 
-  user.password = await bcrypt.hash(password, env.bcryptRounds);
+  const user = await User.findOne({ phone }).select('+password');
+  if (!user || !user.phoneVerified) {
+    // The OTP matched a real record but the account is gone/unverified — an
+    // edge case (e.g. account deleted mid-flow). Clean up and refuse.
+    await Otp.deleteOne({ phoneNumber: phone });
+    throw ApiError.notFound('এই নম্বরে অ্যাকাউন্ট পাওয়া যায়নি।', { code: 'user_not_found' });
+  }
+
+  user.password = await bcrypt.hash(newPassword, env.bcryptRounds);
   user.passwordChangedAt = new Date();
   user.loginAttempts = 0;
   user.lockUntil = null;
   await user.save();
+
+  await Otp.deleteOne({ phoneNumber: phone });
   return { ok: true };
 }
 
@@ -234,7 +269,6 @@ module.exports = {
   startSignup,
   verifySignup,
   login,
-  startForgotPassword,
-  verifyForgotPassword,
+  forgotPassword,
   resetPassword,
 };

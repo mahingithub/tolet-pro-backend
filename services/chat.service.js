@@ -186,7 +186,11 @@ async function listMessages({ id, user, since, limit }) {
     if (!isNaN(d.getTime())) filter.createdAt = { $gt: d };
   }
   const cap = Math.min(Math.max(Number(limit) || 100, 1), 500);
-  return Message.find(filter).sort({ createdAt: 1, _id: 1 }).limit(cap);
+  return Message.find(filter)
+    .sort({ createdAt: 1, _id: 1 })
+    .limit(cap)
+    // Carry the quoted-message context so replies render their snippet.
+    .populate({ path: 'replyTo', select: 'text type mediaUrl senderId isDeleted' });
 }
 
 async function sendMessage({ id, body, user }) {
@@ -197,12 +201,25 @@ async function sendMessage({ id, body, user }) {
     throw ApiError.badRequest('Message অনেক বড় (>4000)।', { code: 'too_long' });
   }
 
+  // Optional reply target. It MUST be a real message that lives in THIS
+  // conversation — this stops a client from quoting messages from other threads.
+  let replyToId = null;
+  if (body?.replyTo && mongoose.isValidObjectId(body.replyTo)) {
+    const parent = await Message.findOne({ _id: body.replyTo, conversationId: convo._id }).select('_id');
+    if (parent) replyToId = parent._id;
+  }
+
   const msg = await Message.create({
     conversationId: convo._id,
     senderId:       user._id,
     text,
+    replyTo:        replyToId,
     readBy:         [user._id],
   });
+
+  // Populate the quoted message so the receiver's socket payload already carries
+  // the reply context (no extra fetch needed to render the quote).
+  await msg.populate({ path: 'replyTo', select: 'text type mediaUrl senderId isDeleted' });
 
   // Update conversation denormalised fields + bump unread for OTHER party.
   const peerId = convo.participants.find((p) => String(p) !== String(user._id));
@@ -412,6 +429,48 @@ async function getMissedMessagesCount({ user, since }) {
   return { count };
 }
 
+/**
+ * Soft "delete for everyone". Only the ORIGINAL sender may delete. We keep the
+ * row (so thread order + any replies pointing at it stay intact) but strip the
+ * content and flag `isDeleted`, then notify BOTH sides in real-time so their
+ * open thread swaps to "This message was deleted".
+ */
+async function deleteMessage({ id, messageId, user }) {
+  const convo = await getConversationOr403({ id, user });
+
+  if (!mongoose.isValidObjectId(messageId)) {
+    throw ApiError.badRequest('Invalid message id.', { code: 'bad_message_id' });
+  }
+  const msg = await Message.findOne({ _id: messageId, conversationId: convo._id });
+  if (!msg) throw ApiError.notFound('Message পাওয়া যায়নি।', { code: 'message_not_found' });
+
+  // Authorisation: you can only delete YOUR OWN message.
+  if (String(msg.senderId) !== String(user._id)) {
+    throw ApiError.forbidden('শুধু নিজের মেসেজ ডিলিট করা যায়।', { code: 'not_sender' });
+  }
+
+  if (!msg.isDeleted) {
+    msg.isDeleted     = true;
+    msg.text          = '';
+    msg.mediaUrl      = null;
+    msg.mediaPublicId = null; // drop the pointer; the row now carries no content
+    // (Optional) also remove the underlying file from Cloudinary BEFORE clearing
+    // the publicId, e.g.: await cloudinary.destroy(oldPublicId).catch(() => {});
+    await msg.save();
+  }
+
+  // Real-time fan-out to the peer AND the sender's other devices/tabs.
+  const peerId = convo.participants.find((p) => String(p) !== String(user._id));
+  const io = getIo();
+  if (io) {
+    const payload = { conversationId: String(convo._id), messageId: String(msg._id) };
+    if (peerId) emitToUser(io, peerId, 'MESSAGE_DELETED', payload);
+    emitToUser(io, user._id, 'MESSAGE_DELETED', payload);
+  }
+
+  return { ok: true, id: String(msg._id), isDeleted: true };
+}
+
 module.exports = {
   openConversation,
   listConversations,
@@ -419,5 +478,6 @@ module.exports = {
   sendMessage,
   sendMediaMessage,
   markRead,
+  deleteMessage,
   getMissedMessagesCount,
 };

@@ -1,8 +1,12 @@
 'use strict';
 
+// NOTE: Firebase is NO LONGER used for authentication. Phone OTP (signup +
+// password reset) has been migrated to sms.net.bd (see services/sms.service.js
+// and services/auth.service.js). This module now exists SOLELY to deliver FCM
+// push notifications (sendToUser), used by chat.service.js and
+// notification.service.js. Do not reintroduce ID-token verification here.
 const admin = require('firebase-admin');
 const env = require('../config/env');
-const ApiError = require('../utils/ApiError');
 
 let app = null;
 
@@ -11,8 +15,8 @@ function init() {
   if (!env.firebaseServiceAccountBase64) {
     console.warn(
       '[firebase-admin] FIREBASE_SERVICE_ACCOUNT_BASE64 is not set. ' +
-        'Signup OTP verification + forgot-password OTP verification will fail. ' +
-        'See .env.example for setup steps.'
+        'FCM push notifications (chat + in-app alerts) will be disabled. ' +
+        'Auth (OTP) is unaffected — it uses sms.net.bd.'
     );
     return null;
   }
@@ -26,39 +30,6 @@ function init() {
   }
   app = admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
   return app;
-}
-
-/**
- * Verifies a Firebase ID token from the client (returned by signInWithPhoneNumber
- * after the user enters the OTP). Throws an ApiError if invalid.
- *
- * @param {string} idToken
- * @returns {Promise<{ uid: string, phone: string }>}
- */
-async function verifyIdToken(idToken) {
-  const a = init();
-  if (!a) {
-    throw ApiError.internal('OTP যাচাই সম্ভব হয়নি। সার্ভার কনফিগারেশনে সমস্যা।');
-  }
-  let decoded;
-  try {
-    decoded = await admin.auth().verifyIdToken(idToken, /* checkRevoked */ true);
-  } catch (err) {
-    throw ApiError.unauthorized('OTP যাচাইকরণ ব্যর্থ হয়েছে। আবার চেষ্টা করুন।', {
-      code: 'firebase_id_token_invalid',
-      details: err.code || err.message,
-    });
-  }
-  if (env.firebaseProjectId && decoded.aud !== env.firebaseProjectId) {
-    throw ApiError.unauthorized('OTP যাচাইকরণ ব্যর্থ হয়েছে।', { code: 'firebase_wrong_project' });
-  }
-  const phone = decoded.phone_number;
-  if (!phone) {
-    throw ApiError.unauthorized('Firebase টোকেনে ফোন নম্বর পাওয়া যায়নি।', {
-      code: 'firebase_no_phone',
-    });
-  }
-  return { uid: decoded.uid, phone };
 }
 
 /**
@@ -133,4 +104,4 @@ async function sendToUser(userId, { title = '', body = '', data = {} } = {}) {
   }
 }
 
-module.exports = { init, verifyIdToken, sendToUser };
+module.exports = { init, sendToUser };

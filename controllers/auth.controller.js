@@ -14,6 +14,7 @@ exports.signupStart = asyncH(async (req, res) => {
 });
 
 exports.signupVerify = asyncH(async (req, res) => {
+  // Body is now { phoneNumber, otp } (validated + normalised by the validator).
   const { token, user } = await authService.verifySignup(req.body);
   res.status(201).json({
     code: 'ACCOUNT_CREATED_SUCCESS',
@@ -33,20 +34,24 @@ exports.login = asyncH(async (req, res) => {
   res.json({ token, user });
 });
 
-exports.forgotStart = asyncH(async (req, res) => {
-  await authService.startForgotPassword(req.body);
+// ─── Forgot password (OTP via sms.net.bd) ───────────────────────────────────
+// Step 1: request an OTP. Body: { phoneNumber }.
+exports.forgotPassword = asyncH(async (req, res) => {
+  await authService.forgotPassword(req.body);
   // Constant response — never reveal whether the account exists.
-  res.status(202).json({ code: 'FORGOT_OTP_SENT', message: 'If the account exists, an OTP has been sent.' });
+  res.status(202).json({
+    code: 'FORGOT_OTP_SENT',
+    message: 'If the account exists, an OTP has been sent.',
+  });
 });
 
-exports.forgotVerify = asyncH(async (req, res) => {
-  const { resetToken } = await authService.verifyForgotPassword(req.body);
-  res.json({ resetToken });
-});
-
+// Step 2: verify OTP + set the new password. Body: { phoneNumber, otp, newPassword }.
 exports.resetPassword = asyncH(async (req, res) => {
   await authService.resetPassword(req.body);
-  res.json({ code: 'PASSWORD_RESET_SUCCESS', message: 'Password reset successful. Please log in again.' });
+  res.json({
+    code: 'PASSWORD_RESET_SUCCESS',
+    message: 'Password reset successful. Please log in again.',
+  });
 });
 
 exports.me = asyncH(async (req, res) => {

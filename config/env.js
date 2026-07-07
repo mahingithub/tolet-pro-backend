@@ -39,8 +39,14 @@ const env = {
   resetTokenExpiresIn: process.env.RESET_TOKEN_EXPIRES_IN || '15m',
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS || 12),
 
+  // Firebase Admin is NO LONGER used for auth (phone OTP migrated to
+  // sms.net.bd). These are retained ONLY for FCM push notifications
+  // (see services/firebaseAdmin.js -> sendToUser, used by chat/notifications).
   firebaseServiceAccountBase64: process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || '',
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID || '',
+
+  // sms.net.bd SMS gateway — used to deliver signup + password-reset OTPs.
+  smsApiKey: process.env.SMS_API_KEY || '',
 
   cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
   cloudinaryApiKey: process.env.CLOUDINARY_API_KEY || '',

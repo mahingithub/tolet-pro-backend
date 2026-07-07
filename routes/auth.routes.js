@@ -28,16 +28,19 @@ const uploadLandlordVerificationFields = multer({
 
 const router = express.Router();
 
-// ─── Signup (OTP via Firebase Phone Auth on client) ─────────────────────────
+// ─── Signup (OTP via sms.net.bd) ────────────────────────────────────────────
+// signup/start  → hashes password, saves SignupIntent, texts a 6-digit OTP.
+// signup/verify → { phoneNumber, otp }; finalizes the User + logs in.
 router.post('/signup/start', rl.signup, validate(v.signupStart), ctl.signupStart);
 router.post('/signup/verify', rl.signup, validate(v.signupVerify), ctl.signupVerify);
 
 // ─── Login (no OTP) ─────────────────────────────────────────────────────────
 router.post('/login', rl.login, validate(v.login), ctl.login);
 
-// ─── Forgot password (OTP via Firebase Phone Auth on client) ────────────────
-router.post('/forgot/start', rl.sendOtp, validate(v.forgotStart), ctl.forgotStart);
-router.post('/forgot/verify', rl.sendOtp, validate(v.forgotVerify), ctl.forgotVerify);
+// ─── Forgot password (OTP via sms.net.bd) ───────────────────────────────────
+// forgot-password → { phoneNumber }; texts an OTP (constant response).
+// reset-password  → { phoneNumber, otp, newPassword }; verifies OTP + resets.
+router.post('/forgot-password', rl.sendOtp, validate(v.forgotPassword), ctl.forgotPassword);
 router.post('/reset-password', rl.reset, validate(v.resetPassword), ctl.resetPassword);
 
 // ─── Session ───────────────────────────────────────────────────────────────
