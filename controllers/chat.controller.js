@@ -53,6 +53,18 @@ exports.deleteMessage = asyncH(async (req, res) => {
   res.json(result);
 });
 
+// Add / change / remove an emoji reaction. Either participant may react; the
+// service fans out MESSAGE_REACTION over Socket.IO.
+exports.reactMessage = asyncH(async (req, res) => {
+  const result = await svc.reactToMessage({
+    id:        req.params.id,          // conversation id
+    messageId: req.params.messageId,
+    user:      req.user,
+    emoji:     req.body.emoji,         // '' or omitted → removes the reaction
+  });
+  res.json(result);
+});
+
 // Send an image or voice message. The file arrives via multer (field 'file').
 // The `kind` ('image' | 'audio') + optional caption/duration come from the
 // multipart body.

@@ -57,6 +57,11 @@ const MessageSchema = new mongoose.Schema(
     // Soft delete: the row is kept (so thread order + reply targets survive) but
     // its content is stripped and the UI shows "This message was deleted".
     isDeleted: { type: Boolean, default: false },
+
+    // ── Emoji reactions ────────────────────────────────────────────────────
+    // One reaction per user (WhatsApp style): a Map of userId → emoji. Stored
+    // as a Map so upserts are O(1) and it serialises to a plain object in JSON.
+    reactions: { type: Map, of: String, default: {} },
   },
   { timestamps: true },
 );

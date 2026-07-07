@@ -471,6 +471,45 @@ async function deleteMessage({ id, messageId, user }) {
   return { ok: true, id: String(msg._id), isDeleted: true };
 }
 
+/**
+ * Add / change / remove an emoji reaction on a message. EITHER participant may
+ * react. One reaction per user (WhatsApp style): sending the same emoji again
+ * (or an empty emoji) removes it. Fans out MESSAGE_REACTION to both sides so
+ * the reaction appears live for the other user.
+ */
+async function reactToMessage({ id, messageId, user, emoji }) {
+  const convo = await getConversationOr403({ id, user });
+
+  if (!mongoose.isValidObjectId(messageId)) {
+    throw ApiError.badRequest('Invalid message id.', { code: 'bad_message_id' });
+  }
+  const msg = await Message.findOne({ _id: messageId, conversationId: convo._id });
+  if (!msg) throw ApiError.notFound('Message পাওয়া যায়নি।', { code: 'message_not_found' });
+
+  const uid = String(user._id);
+  msg.reactions = msg.reactions || new Map();
+  const current = msg.reactions.get(uid);
+  if (!emoji || current === emoji) {
+    msg.reactions.delete(uid);          // toggle off
+  } else {
+    msg.reactions.set(uid, String(emoji)); // set / replace
+  }
+  await msg.save();
+
+  // Serialise the Map → plain { userId: emoji } for the clients.
+  const reactionsObj = Object.fromEntries(msg.reactions);
+
+  const peerId = convo.participants.find((p) => String(p) !== String(user._id));
+  const io = getIo();
+  if (io) {
+    const payload = { conversationId: String(convo._id), messageId: String(msg._id), reactions: reactionsObj };
+    if (peerId) emitToUser(io, peerId, 'MESSAGE_REACTION', payload);
+    emitToUser(io, user._id, 'MESSAGE_REACTION', payload);
+  }
+
+  return { ok: true, id: String(msg._id), reactions: reactionsObj };
+}
+
 module.exports = {
   openConversation,
   listConversations,
@@ -479,5 +518,6 @@ module.exports = {
   sendMediaMessage,
   markRead,
   deleteMessage,
+  reactToMessage,
   getMissedMessagesCount,
 };

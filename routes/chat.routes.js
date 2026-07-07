@@ -20,6 +20,7 @@ router.post  ('/:id/messages',             verifyConversationAccess, ctl.sendMes
 // Delete-for-everyone. `:id` is the conversation id (matches the middleware,
 // which reads req.params.id) → full path: DELETE /api/conversations/:id/messages/:messageId
 router.delete('/:id/messages/:messageId',  verifyConversationAccess, ctl.deleteMessage);
+router.post  ('/:id/messages/:messageId/react', verifyConversationAccess, ctl.reactMessage);
 router.post  ('/:id/media',                verifyConversationAccess, uploadSingle, ctl.sendMedia);
 router.post  ('/:id/read',                 verifyConversationAccess, ctl.markRead);
 
