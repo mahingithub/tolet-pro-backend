@@ -51,6 +51,10 @@ function pickPublicUser(u) {
     isBanned:       !!j.isBanned,
     banReason:      j.banReason || '',
     bannedAt:       j.bannedAt || null,
+    // Suspected flag (softer than a ban — set from a user report).
+    isSuspected:     !!j.isSuspected,
+    suspectedReason: j.suspectedReason || '',
+    suspectedAt:     j.suspectedAt || null,
 
     // ── Account meta — used by the reviewer to spot fresh signups vs
     //     long-standing users. lastLoginAt is null for first-time logins.
@@ -535,6 +539,103 @@ async function deleteProperty(req, res, next) {
   }
 }
 
+// ─── GET /api/admin/reports ─────────────────────────────────────────────────
+// User-abuse reports raised from chat. Filterable by ?status=open|reviewed|dismissed
+// and ?search=<reporter/reported name substring>. Newest first.
+async function listReports(req, res, next) {
+  try {
+    const Report = require('../models/Report');
+    const { status, search } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page, 10)  || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+
+    const filter = {};
+    if (status) filter.status = String(status).toLowerCase();
+    if (search && String(search).trim()) {
+      const rx = new RegExp(String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ reporterName: rx }, { reportedUserName: rx }, { reason: rx }];
+    }
+
+    const [items, total, openCount] = await Promise.all([
+      Report.find(filter).sort({ createdAt: -1, _id: -1 }).skip((page - 1) * limit).limit(limit),
+      Report.countDocuments(filter),
+      Report.countDocuments({ status: 'open' }),
+    ]);
+
+    return res.json({ reports: items.map((r) => r.toJSON()), total, openCount, page, limit });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── POST /api/admin/reports/:id/status ─────────────────────────────────────
+// Body: { status: 'reviewed' | 'dismissed' | 'open' }. Stamps who reviewed it.
+async function updateReportStatus(req, res, next) {
+  try {
+    const Report = require('../models/Report');
+    const status = String(req.body?.status || '').trim().toLowerCase();
+    if (!['open', 'reviewed', 'dismissed'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status.', code: 'bad_status' });
+    }
+    const report = await Report.findById(req.params.id);
+    if (!report) return res.status(404).json({ message: 'Report not found' });
+
+    report.status     = status;
+    report.reviewedAt = status === 'open' ? null : new Date();
+    report.reviewedBy = status === 'open' ? null : req.user._id;
+    await report.save();
+
+    return res.json({ report: report.toJSON() });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── POST /api/admin/users/:id/suspect ──────────────────────────────────────
+// Marks a user as "suspected" (soft flag, does not block them). Reachable from
+// the reports queue.
+async function suspectUser(req, res, next) {
+  try {
+    const { id } = req.params;
+    const reason = String(req.body?.reason || '').trim() || 'Flagged from a user report.';
+
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.role === 'super_admin') {
+      return res.status(403).json({ message: "Super admins can't be flagged." });
+    }
+
+    user.isSuspected     = true;
+    user.suspectedReason = reason.slice(0, 500);
+    user.suspectedAt     = new Date();
+    user.suspectedBy     = req.user._id;
+    await user.save();
+
+    return res.json({ user: pickPublicUser(user) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── POST /api/admin/users/:id/unsuspect ────────────────────────────────────
+async function unsuspectUser(req, res, next) {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user.isSuspected     = false;
+    user.suspectedReason = '';
+    user.suspectedAt     = null;
+    user.suspectedBy     = null;
+    await user.save();
+
+    return res.json({ user: pickPublicUser(user) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // ─── DELETE /api/admin/users/:id ───────────────────────────────────────────
 async function deleteUser(req, res, next) {
   try {
@@ -578,4 +679,8 @@ module.exports = {
   moderateProperty,
   deleteProperty,
   deleteUser,
+  listReports,
+  updateReportStatus,
+  suspectUser,
+  unsuspectUser,
 };

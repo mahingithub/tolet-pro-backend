@@ -92,3 +92,64 @@ exports.getMissedMessagesCount = asyncH(async (req, res) => {
   });
   res.json(result);
 });
+
+// ─── Block / Unblock ───────────────────────────────────────────────────────
+exports.blockConversation = asyncH(async (req, res) => {
+  const r = await svc.blockConversation({ id: req.params.id, user: req.user, reason: req.body?.reason });
+  res.json(r);
+});
+
+exports.unblockConversation = asyncH(async (req, res) => {
+  const r = await svc.unblockConversation({ id: req.params.id, user: req.user });
+  res.json(r);
+});
+
+// ─── Mute ──────────────────────────────────────────────────────────────────
+exports.muteConversation = asyncH(async (req, res) => {
+  const r = await svc.muteConversation({
+    id: req.params.id,
+    user: req.user,
+    muted: req.body?.muted,
+    duration: req.body?.duration,
+  });
+  res.json(r);
+});
+
+// ─── Report ────────────────────────────────────────────────────────────────
+exports.reportConversation = asyncH(async (req, res) => {
+  const r = await svc.reportConversation({
+    id: req.params.id,
+    user: req.user,
+    reason: req.body?.reason,
+    details: req.body?.details,
+  });
+  res.status(201).json(r);
+});
+
+// ─── Forward a message into another conversation ─────────────────────────
+exports.forwardMessage = asyncH(async (req, res) => {
+  const msg = await svc.forwardMessage({
+    user: req.user,
+    targetId: req.params.id,          // target conversation
+    sourceId: req.body?.sourceId,     // source conversation (optional)
+    messageId: req.body?.messageId,
+  });
+  res.status(201).json({ message: msg.toJSON() });
+});
+
+// ─── Pin / Unpin ─────────────────────────────────────────────────────────
+exports.pinMessage = asyncH(async (req, res) => {
+  const r = await svc.pinMessage({
+    id: req.params.id,
+    user: req.user,
+    messageId: req.params.messageId,
+    pinned: req.body?.pinned,
+  });
+  res.json(r);
+});
+
+// ─── Presence ──────────────────────────────────────────────────────────────
+exports.getPresence = asyncH(async (req, res) => {
+  const map = await svc.getPresence({ user: req.user, ids: req.query.ids });
+  res.json({ presence: map });
+});

@@ -43,8 +43,14 @@ router.post('/users/:id/reject-landlord',            ctl.rejectLandlord);
 // ─── Account moderation ────────────────────────────────────────────────────
 router.post('/users/:id/ban',               ctl.banUser);
 router.post('/users/:id/unban',             ctl.unbanUser);
+router.post('/users/:id/suspect',           ctl.suspectUser);
+router.post('/users/:id/unsuspect',         ctl.unsuspectUser);
 router.put ('/users/:id/role',              ctl.updateUserRole);
 router.delete('/users/:id',                 ctl.deleteUser);
+
+// ─── User reports (abuse reports raised from chat) ──────────────────────────
+router.get ('/reports',                     ctl.listReports);
+router.post('/reports/:id/status',          ctl.updateReportStatus);
 
 // ─── Property moderation ───────────────────────────────────────────────────
 // /api/admin/properties               — list all listings (filterable)

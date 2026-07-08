@@ -22,7 +22,8 @@ const notifications = require('./notification.service');
 const cloudinary    = require('./cloudinary.service');
 const pushService   = require('./push.service');
 const firebaseAdmin = require('./firebaseAdmin');
-const { getIo, emitToUser, roomFor, getSocketsForUser } = require('../socket');
+const { getIo, emitToUser, roomFor, getSocketsForUser, isUserOnline } = require('../socket');
+const Report        = require('../models/Report');
 
 /**
  * Deliver a freshly-created message to the recipient with NO duplicates.
@@ -140,14 +141,29 @@ async function listConversations({ user }) {
     }
   }
   const users = await User.find({ _id: { $in: [...peerIds] } })
-    .select('_id name avatar avatarUrl tenantProfile.avatar landlordProfile.avatar roles')
+    .select('_id name avatar avatarUrl tenantProfile.avatar landlordProfile.avatar roles lastSeenAt')
     .lean();
   const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+  const meKey = String(user._id);
+  const now   = Date.now();
 
   return uniqueItems.map((c) => {
     const peerId = c.participants.find((p) => String(p) !== String(user._id));
     const peer   = userMap.get(String(peerId)) || null;
-    const unread = (c.unreadCounts || {})[String(user._id)] || 0;
+    const unread = (c.unreadCounts instanceof Map
+      ? Object.fromEntries(c.unreadCounts)
+      : (c.unreadCounts || {}))[meKey] || 0;
+
+    // Block state (per-viewer): did I block them, or did they block me?
+    const blockedByMe   = (c.blockedBy || []).some((b) => String(b) === meKey);
+    const blockedByThem = (c.blockedBy || []).some((b) => String(b) === String(peerId));
+
+    // Mute state (per-viewer): muted while mutedUntil[me] is in the future.
+    const mutedMap = c.mutedUntil instanceof Map ? Object.fromEntries(c.mutedUntil) : (c.mutedUntil || {});
+    const myMuteUntil = mutedMap[meKey] ? new Date(mutedMap[meKey]).getTime() : 0;
+    const muted = myMuteUntil > now;
+
     return {
       id:              String(c._id),
       peerUserId:      String(peerId),
@@ -157,12 +173,20 @@ async function listConversations({ user }) {
                           || peer?.landlordProfile?.avatar
                           || null,
       peerRoles:       peer?.roles || [],
+      // Presence — live online flag (socket rooms) + last-seen timestamp.
+      peerOnline:      isUserOnline(peerId),
+      peerLastSeenAt:  peer?.lastSeenAt || null,
       propertyId:      c.propertyId ? String(c.propertyId) : null,
       inquiryId:       c.inquiryId  ? String(c.inquiryId)  : null,
       lastMessageText: c.lastMessageText || '',
       lastMessageAt:   c.lastMessageAt,
       lastSenderId:    c.lastSenderId ? String(c.lastSenderId) : null,
       unread,
+      blocked:         blockedByMe,
+      blockedByPeer:   blockedByThem,
+      muted,
+      mutedUntil:      myMuteUntil || null,
+      pinnedMessageIds: (c.pinnedMessageIds || []).map((x) => String(x)),
       createdAt:       c.createdAt,
       updatedAt:       c.updatedAt,
     };
@@ -193,8 +217,28 @@ async function listMessages({ id, user, since, limit }) {
     .populate({ path: 'replyTo', select: 'text type mediaUrl senderId isDeleted' });
 }
 
+/**
+ * Block gate shared by sendMessage + sendMediaMessage. Refuses to deliver a
+ * message when either side has blocked the other:
+ *   • peer blocked me   → I can't reach them (WhatsApp behaviour, silent-ish).
+ *   • I blocked peer    → I must unblock before messaging them again.
+ */
+function assertNotBlocked(convo, user) {
+  const meKey   = String(user._id);
+  const peerId  = convo.participants.find((p) => String(p) !== meKey);
+  const blockedByMe   = (convo.blockedBy || []).some((b) => String(b) === meKey);
+  const blockedByThem = (convo.blockedBy || []).some((b) => String(b) === String(peerId));
+  if (blockedByMe) {
+    throw ApiError.forbidden('আপনি এই ব্যবহারকারীকে ব্লক করেছেন। মেসেজ পাঠাতে আনব্লক করুন।', { code: 'blocked_by_me' });
+  }
+  if (blockedByThem) {
+    throw ApiError.forbidden('এই ব্যবহারকারীকে মেসেজ পাঠানো যাচ্ছে না।', { code: 'blocked_by_peer' });
+  }
+}
+
 async function sendMessage({ id, body, user }) {
   const convo = await getConversationOr403({ id, user });
+  assertNotBlocked(convo, user);
   const text  = (body?.text || '').trim();
   if (!text) throw ApiError.badRequest('Message ফাঁকা থাকতে পারে না।', { code: 'empty_message' });
   if (text.length > 4000) {
@@ -289,6 +333,7 @@ async function sendMessage({ id, body, user }) {
  */
 async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = '', durationSec = null, filename = null }) {
   const convo = await getConversationOr403({ id, user });
+  assertNotBlocked(convo, user);
 
   if (!buffer || !buffer.length) {
     throw ApiError.badRequest('কোনো ফাইল পাওয়া যায়নি।', { code: 'no_file' });
@@ -510,6 +555,265 @@ async function reactToMessage({ id, messageId, user, emoji }) {
   return { ok: true, id: String(msg._id), reactions: reactionsObj };
 }
 
+// ─── Block / Unblock ─────────────────────────────────────────────────────
+// Blocking is per-user: we add the caller to the conversation's `blockedBy`.
+// The peer can no longer send into this thread (see assertNotBlocked) and the
+// caller's UI shows the "You blocked X" composer state. We fan out a
+// CONVERSATION_UPDATED event so the peer's open thread reflects it live.
+async function blockConversation({ id, user, reason }) {
+  const convo = await getConversationOr403({ id, user });
+  const meKey = String(user._id);
+  if (!(convo.blockedBy || []).some((b) => String(b) === meKey)) {
+    convo.blockedBy = [...(convo.blockedBy || []), user._id];
+    await convo.save();
+  }
+  const peerId = convo.participants.find((p) => String(p) !== meKey);
+  const io = getIo();
+  if (io && peerId) {
+    emitToUser(io, peerId, 'CONVERSATION_BLOCKED', {
+      conversationId: String(convo._id),
+      by: meKey,
+    });
+  }
+  return { ok: true, blocked: true };
+}
+
+async function unblockConversation({ id, user }) {
+  const convo = await getConversationOr403({ id, user });
+  const meKey = String(user._id);
+  convo.blockedBy = (convo.blockedBy || []).filter((b) => String(b) !== meKey);
+  await convo.save();
+  const peerId = convo.participants.find((p) => String(p) !== meKey);
+  const io = getIo();
+  if (io && peerId) {
+    emitToUser(io, peerId, 'CONVERSATION_UNBLOCKED', {
+      conversationId: String(convo._id),
+      by: meKey,
+    });
+  }
+  return { ok: true, blocked: false };
+}
+
+// ─── Mute ─────────────────────────────────────────────────────────────────
+// duration: '8h' | '1w' | 'always' | false (to unmute). Stored per-user as the
+// timestamp until which the thread is muted.
+async function muteConversation({ id, user, muted, duration }) {
+  const convo = await getConversationOr403({ id, user });
+  const meKey = String(user._id);
+  convo.mutedUntil = convo.mutedUntil || new Map();
+
+  if (muted === false) {
+    convo.mutedUntil.delete(meKey);
+  } else {
+    let until;
+    const now = Date.now();
+    if (duration === '8h')       until = new Date(now + 8 * 60 * 60 * 1000);
+    else if (duration === '1w')  until = new Date(now + 7 * 24 * 60 * 60 * 1000);
+    else                          until = new Date('2999-12-31T00:00:00.000Z'); // "always"
+    convo.mutedUntil.set(meKey, until);
+  }
+  await convo.save();
+  const val = convo.mutedUntil.get(meKey);
+  return { ok: true, muted: !!val, mutedUntil: val || null };
+}
+
+// ─── Report ─────────────────────────────────────────────────────────────
+// Files (or bumps) an abuse report against the OTHER participant, then pings
+// every admin so they can review it and optionally mark the user suspected.
+async function reportConversation({ id, user, reason, details }) {
+  const convo = await getConversationOr403({ id, user });
+  const peerId = convo.participants.find((p) => String(p) !== String(user._id));
+  if (!peerId) throw ApiError.badRequest('Report করা যায়নি।', { code: 'no_peer' });
+
+  const peer = await User.findById(peerId).select('_id name');
+
+  // De-dupe: if there's already an OPEN report by me for this peer/thread,
+  // bump its count + refresh reason instead of spawning duplicates.
+  let report = await Report.findOne({
+    reporterId: user._id,
+    reportedUserId: peerId,
+    conversationId: convo._id,
+    status: 'open',
+  });
+
+  if (report) {
+    report.reportCount += 1;
+    if (reason)  report.reason  = String(reason).slice(0, 120);
+    if (details) report.details = String(details).slice(0, 1000);
+    await report.save();
+  } else {
+    report = await Report.create({
+      reporterId:       user._id,
+      reporterName:     user.name || '',
+      reportedUserId:   peerId,
+      reportedUserName: peer?.name || '',
+      conversationId:   convo._id,
+      reason:           String(reason || 'Reported from chat').slice(0, 120),
+      details:          String(details || '').slice(0, 1000),
+    });
+  }
+
+  // Notify all admins (in-app bell + push). Never blocks the report.
+  notifications.emitToAdmins({
+    type:  'system',
+    title: 'New user report',
+    body:  `${user.name || 'A user'} reported ${peer?.name || 'a user'}${reason ? ` — ${reason}` : ''}`,
+    data:  {
+      kind: 'user_report',
+      reportId: String(report._id),
+      reportedUserId: String(peerId),
+      reporterId: String(user._id),
+      path: '/admin?tab=reports',
+    },
+  }).catch(() => {});
+
+  return { ok: true, reportId: String(report._id) };
+}
+
+// ─── Forward a message ──────────────────────────────────────────────────
+// Clones an existing message (text OR media) into a target conversation. For
+// media we reference the SAME Cloudinary URL but drop the publicId on the copy,
+// so deleting the forwarded copy never removes the original file. This is what
+// makes voice/photo/document forwards render as real media instead of a raw
+// Cloudinary link pasted as text.
+async function forwardMessage({ user, targetId, sourceId, messageId }) {
+  const target = await getConversationOr403({ id: targetId, user });
+  assertNotBlocked(target, user);
+
+  if (!mongoose.isValidObjectId(messageId)) {
+    throw ApiError.badRequest('Invalid message id.', { code: 'bad_message_id' });
+  }
+
+  // Load the source message. If a sourceId is given, verify access to it too;
+  // otherwise just find the message and confirm the caller can see its thread.
+  const src = await Message.findById(messageId);
+  if (!src) throw ApiError.notFound('Message পাওয়া যায়নি।', { code: 'message_not_found' });
+  await getConversationOr403({ id: sourceId || src.conversationId, user });
+  if (src.isDeleted) throw ApiError.badRequest('Deleted message forward করা যায় না।', { code: 'deleted_message' });
+
+  const isMedia = src.type && src.type !== 'text';
+  const preview = src.type === 'image' ? '📷 Photo'
+                : src.type === 'audio' ? '🎤 Voice message'
+                : src.type === 'document' ? '📄 Document'
+                : (src.text || '').slice(0, 600);
+
+  // Copy media metadata as a PLAIN object (never the source Mongoose subdoc).
+  const clonedMeta = (isMedia && src.mediaMeta) ? {
+    originalName: src.mediaMeta.originalName || null,
+    durationSec:  src.mediaMeta.durationSec ?? null,
+    width:        src.mediaMeta.width ?? null,
+    height:       src.mediaMeta.height ?? null,
+    bytes:        src.mediaMeta.bytes ?? null,
+    format:       src.mediaMeta.format || null,
+  } : undefined;
+
+  const msg = await Message.create({
+    conversationId: target._id,
+    senderId:       user._id,
+    type:           src.type || 'text',
+    text:           src.text || '',
+    mediaUrl:       isMedia ? src.mediaUrl : null,
+    mediaPublicId:  null, // never let the copy own the original file
+    mediaMeta:      clonedMeta,
+    readBy:         [user._id],
+  });
+
+  const peerId  = target.participants.find((p) => String(p) !== String(user._id));
+  const peerKey = String(peerId);
+  target.lastMessageText = String(preview).slice(0, 600);
+  target.lastMessageAt   = msg.createdAt;
+  target.lastSenderId    = user._id;
+  target.unreadCounts    = target.unreadCounts || new Map();
+  target.unreadCounts.set(peerKey, (target.unreadCounts.get(peerKey) || 0) + 1);
+  target.unreadCounts.set(String(user._id), 0);
+  await target.save();
+
+  notifications.emit({
+    userId: peerId,
+    type:   'message',
+    title:  user.name || 'New message',
+    body:   String(preview).slice(0, 140),
+    data:   { targetId: String(target._id), peerId: String(user._id), peerName: user.name, peerAvatar: user.avatar, messageId: String(msg._id) },
+    skipPush: true,
+  }).catch(() => {});
+
+  deliverMessage({
+    io: getIo(),
+    senderUser: user,
+    peerId,
+    convoId: target._id,
+    msg,
+    preview: String(preview).slice(0, 140),
+    payload: {
+      conversationId: String(target._id),
+      message: msg.toJSON(),
+      senderName: user.name || 'User',
+      senderAvatar: user.avatar || user.avatarUrl || user.tenantProfile?.avatar || user.landlordProfile?.avatar || null,
+    },
+  });
+
+  return msg;
+}
+
+// ─── Pin / Unpin a message ────────────────────────────────────────────────
+async function pinMessage({ id, user, messageId, pinned }) {
+  const convo = await getConversationOr403({ id, user });
+  if (!mongoose.isValidObjectId(messageId)) {
+    throw ApiError.badRequest('Invalid message id.', { code: 'bad_message_id' });
+  }
+  const msg = await Message.findOne({ _id: messageId, conversationId: convo._id }).select('_id');
+  if (!msg) throw ApiError.notFound('Message পাওয়া যায়নি।', { code: 'message_not_found' });
+
+  const key = String(messageId);
+  const cur = (convo.pinnedMessageIds || []).map((x) => String(x));
+  if (pinned === false) {
+    convo.pinnedMessageIds = cur.filter((x) => x !== key);
+  } else if (!cur.includes(key)) {
+    // Cap at 3 pinned messages; drop the oldest when full.
+    const next = [...cur, key];
+    convo.pinnedMessageIds = next.slice(-3);
+  }
+  await convo.save();
+
+  const io = getIo();
+  if (io) {
+    const payload = { conversationId: String(convo._id), pinnedMessageIds: convo.pinnedMessageIds.map((x) => String(x)) };
+    for (const p of convo.participants) emitToUser(io, p, 'CONVERSATION_PINS', payload);
+  }
+  return { ok: true, pinnedMessageIds: convo.pinnedMessageIds.map((x) => String(x)) };
+}
+
+// ─── Presence lookup (REST) ────────────────────────────────────────────────
+// Returns { [userId]: { online, lastSeenAt } } for the requested ids. Only ids
+// the caller actually shares a conversation with are returned (privacy).
+async function getPresence({ user, ids }) {
+  const wanted = (Array.isArray(ids) ? ids : String(ids || '').split(','))
+    .map((s) => String(s).trim())
+    .filter(Boolean);
+  if (wanted.length === 0) return {};
+
+  // Restrict to peers the caller shares a thread with.
+  const convos = await Conversation.find({ participants: user._id }).select('participants').lean();
+  const allowed = new Set();
+  for (const c of convos) {
+    for (const p of c.participants || []) {
+      if (String(p) !== String(user._id)) allowed.add(String(p));
+    }
+  }
+  const scoped = wanted.filter((idv) => allowed.has(idv));
+  if (scoped.length === 0) return {};
+
+  const users = await User.find({ _id: { $in: scoped } }).select('_id lastSeenAt').lean();
+  const map = {};
+  for (const u of users) {
+    map[String(u._id)] = {
+      online: isUserOnline(u._id),
+      lastSeenAt: u.lastSeenAt || null,
+    };
+  }
+  return map;
+}
+
 module.exports = {
   openConversation,
   listConversations,
@@ -520,4 +824,11 @@ module.exports = {
   deleteMessage,
   reactToMessage,
   getMissedMessagesCount,
+  blockConversation,
+  unblockConversation,
+  muteConversation,
+  reportConversation,
+  forwardMessage,
+  pinMessage,
+  getPresence,
 };

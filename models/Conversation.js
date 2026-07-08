@@ -41,6 +41,29 @@ const ConversationSchema = new mongoose.Schema(
 
     // Map<userIdString, unreadCount>
     unreadCounts: { type: Map, of: Number, default: () => new Map() },
+
+    // ── Block ──────────────────────────────────────────────────────────────
+    // userIds who have blocked THIS conversation/peer. If user A is in
+    // `blockedBy`, A has blocked the other participant → the other participant
+    // may not send messages to A, and A's UI shows the "You blocked X" state.
+    blockedBy: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+      default: [],
+    },
+
+    // ── Mute ───────────────────────────────────────────────────────────────
+    // Map<userIdString, ISO/date until which the chat is muted>. A value of
+    // 'always' (stored as a far-future date) means muted indefinitely. Absence
+    // of a key means not muted.
+    mutedUntil: { type: Map, of: Date, default: () => new Map() },
+
+    // ── Pinned messages ──────────────────────────────────────────────────
+    // Message ids pinned in this thread (WhatsApp/Telegram style). Shared by
+    // both participants so a pinned banner shows for everyone in the thread.
+    pinnedMessageIds: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Message' }],
+      default: [],
+    },
   },
   { timestamps: true },
 );
@@ -56,6 +79,9 @@ ConversationSchema.set('toJSON', {
     // Convert Map → plain object for the frontend.
     if (ret.unreadCounts instanceof Map) {
       ret.unreadCounts = Object.fromEntries(ret.unreadCounts);
+    }
+    if (ret.mutedUntil instanceof Map) {
+      ret.mutedUntil = Object.fromEntries(ret.mutedUntil);
     }
     return ret;
   },

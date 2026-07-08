@@ -36,6 +36,53 @@ const fcm = require('./services/fcm.service');
 const ringTimers = new Map();
 let ioInstance = null;
 
+// ─── Presence ───────────────────────────────────────────────────────────────
+// userId(string) → number of live sockets for that user. A user is "online"
+// while this count is > 0. We keep a count (not a boolean) so multi-tab /
+// multi-device users only flip to offline once their LAST socket drops.
+const onlineUsers = new Map();
+
+/** Is this user currently connected on at least one socket? */
+function isUserOnline(userId) {
+  return (onlineUsers.get(String(userId)) || 0) > 0;
+}
+
+/** Snapshot of all currently-online userIds (strings). */
+function getOnlineUserIds() {
+  return [...onlineUsers.keys()];
+}
+
+/**
+ * Tell a user's conversation peers that their presence changed, so an open
+ * chat header flips between "Active now" and "Last seen …" in real time.
+ * Runs on the first connect and the last disconnect only.
+ */
+async function broadcastPresence(userId, online, lastSeenAt) {
+  if (!ioInstance) return;
+  try {
+    const Conversation = require('./models/Conversation');
+    const convos = await Conversation.find({ participants: userId })
+      .select('participants')
+      .lean();
+    const peerIds = new Set();
+    for (const c of convos) {
+      for (const p of c.participants || []) {
+        if (String(p) !== String(userId)) peerIds.add(String(p));
+      }
+    }
+    const payload = {
+      userId: String(userId),
+      online: !!online,
+      lastSeenAt: lastSeenAt ? new Date(lastSeenAt).toISOString() : null,
+    };
+    for (const pid of peerIds) {
+      emitToUser(ioInstance, pid, 'PRESENCE_UPDATE', payload);
+    }
+  } catch (err) {
+    console.warn('[socket] broadcastPresence failed:', err.message);
+  }
+}
+
 /**
  * Room naming: every socket for a given user joins the room `user:<userId>`.
  *
@@ -188,6 +235,34 @@ function initSocket(httpServer) {
     // re-joins the same room automatically, so call routing never breaks even
     // when the underlying connection churns (Render free tier / mobile).
     socket.join(roomFor(userId));
+
+    // ── Presence: mark this user online (first socket → notify peers) ──────
+    const prevCount = onlineUsers.get(String(userId)) || 0;
+    onlineUsers.set(String(userId), prevCount + 1);
+    if (prevCount === 0) {
+      User.updateOne({ _id: userId }, { $set: { lastSeenAt: new Date() } }).catch(() => {});
+      broadcastPresence(userId, true, null);
+    }
+
+    // Let the freshly-connected client learn who among its peers is online
+    // right now (so the header doesn't wait for the next REST poll).
+    (async () => {
+      try {
+        const Conversation = require('./models/Conversation');
+        const convos = await Conversation.find({ participants: userId })
+          .select('participants')
+          .lean();
+        const onlinePeers = [];
+        for (const c of convos) {
+          for (const p of c.participants || []) {
+            if (String(p) !== String(userId) && isUserOnline(p)) onlinePeers.push(String(p));
+          }
+        }
+        if (onlinePeers.length) {
+          socket.emit('PRESENCE_SNAPSHOT', { online: [...new Set(onlinePeers)] });
+        }
+      } catch { /* non-fatal */ }
+    })();
 
     if (socket.recovered) {
       console.log(`[socket] user ${userId} RECONNECTED+recovered (${socket.id})`);
@@ -466,6 +541,18 @@ function initSocket(httpServer) {
     // ── Disconnect ────────────────────────────────────────────────────────
     socket.on('disconnect', async (reason) => {
       console.log(`[socket] user ${userId} disconnected (${socket.id}) — ${reason}`);
+
+      // ── Presence: last socket dropped → mark offline + stamp lastSeenAt ──
+      const cnt = (onlineUsers.get(String(userId)) || 1) - 1;
+      if (cnt <= 0) {
+        onlineUsers.delete(String(userId));
+        const seenAt = new Date();
+        User.updateOne({ _id: userId }, { $set: { lastSeenAt: seenAt } }).catch(() => {});
+        broadcastPresence(userId, false, seenAt);
+      } else {
+        onlineUsers.set(String(userId), cnt);
+      }
+
       try {
         // If the CALLER drops off while the call is still RINGING, cancel it so
         // the receiver's phone stops ringing right away. We intentionally do
@@ -503,4 +590,4 @@ function initSocket(httpServer) {
 
 function getIo() { return ioInstance; }
 
-module.exports = { initSocket, getIo, getSocketsForUser, emitToUser, notifyCallRejected, clearRingTimer, roomFor };
+module.exports = { initSocket, getIo, getSocketsForUser, emitToUser, notifyCallRejected, clearRingTimer, roomFor, isUserOnline, getOnlineUserIds };

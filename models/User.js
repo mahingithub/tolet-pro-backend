@@ -360,6 +360,12 @@ const UserSchema = new mongoose.Schema(
     // Verification + audit fields
     lastLoginAt:       { type: Date, default: null },
     passwordChangedAt: { type: Date, default: null },
+    // ─── Presence ────────────────────────────────────────────────────────
+    // Stamped whenever the user's last socket disconnects (and on connect for
+    // freshness). The chat header/rows use this to render "Active now" (green)
+    // vs "Last seen …" (red) when the peer has no live socket. Live online
+    // state is computed from Socket.IO room membership, not persisted here.
+    lastSeenAt: { type: Date, default: null },
     // Brute-force protection
     loginAttempts: { type: Number, default: 0, select: false },
     lockUntil:     { type: Date,   default: null, select: false },
@@ -376,6 +382,15 @@ const UserSchema = new mongoose.Schema(
     banReason: { type: String,  default: '', maxlength: 500 },
     bannedAt:  { type: Date,    default: null },
     bannedBy:  { type: mongoose.Schema.Types.ObjectId, default: null },
+
+    // ─── Suspected flag (set by an admin from a user Report) ─────────────
+    // A softer signal than a ban: it marks the account as "under suspicion"
+    // (e.g. after abuse/scam reports) so admins can watch it. It does NOT
+    // block the account by itself — banning is still the enforcement action.
+    isSuspected:     { type: Boolean, default: false, index: true },
+    suspectedReason: { type: String,  default: '', maxlength: 500 },
+    suspectedAt:     { type: Date,    default: null },
+    suspectedBy:     { type: mongoose.Schema.Types.ObjectId, default: null },
 
     // ─── Phase 7: Privacy Center & Account Management ────────────────────
     // Global settings hub — see PreferencesSchema above. Legacy flat fields
