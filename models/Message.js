@@ -25,7 +25,7 @@ const MessageSchema = new mongoose.Schema(
 
     // What kind of message this is. Defaults to 'text' so every existing
     // document (created before this field existed) reads back as a text message.
-    type: { type: String, enum: ['text', 'image', 'audio', 'document'], default: 'text', index: true },
+    type: { type: String, enum: ['text', 'image', 'audio', 'video', 'document'], default: 'text', index: true },
 
     // Text body (or optional caption for media). Not required — an image or
     // voice message can stand on its own.

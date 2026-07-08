@@ -64,6 +64,15 @@ const ConversationSchema = new mongoose.Schema(
       type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Message' }],
       default: [],
     },
+
+    // ── Per-user "Delete conversation" (soft, WhatsApp-style) ─────────────
+    // A user who deletes the chat is added here; listConversations hides the
+    // thread for anyone listed. A NEW message revives it (we clear this array
+    // whenever a message is added), matching WhatsApp behaviour.
+    deletedBy: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+      default: [],
+    },
   },
   { timestamps: true },
 );

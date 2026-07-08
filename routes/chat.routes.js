@@ -38,4 +38,7 @@ router.post  ('/:id/unblock',              verifyConversationAccess, ctl.unblock
 router.post  ('/:id/mute',                 verifyConversationAccess, ctl.muteConversation);
 router.post  ('/:id/report',               verifyConversationAccess, ctl.reportConversation);
 
+// Delete a whole conversation for the current user (soft, per-user).
+router.delete('/:id',                      verifyConversationAccess, ctl.deleteConversation);
+
 module.exports = router;

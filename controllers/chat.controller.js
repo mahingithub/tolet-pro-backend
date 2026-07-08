@@ -153,3 +153,9 @@ exports.getPresence = asyncH(async (req, res) => {
   const map = await svc.getPresence({ user: req.user, ids: req.query.ids });
   res.json({ presence: map });
 });
+
+// ─── Delete conversation (per-user soft delete) ─────────────────────────────
+exports.deleteConversation = asyncH(async (req, res) => {
+  const r = await svc.deleteConversation({ id: req.params.id, user: req.user });
+  res.json(r);
+});

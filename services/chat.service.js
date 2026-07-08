@@ -116,7 +116,9 @@ async function openConversation({ user, body }) {
 }
 
 async function listConversations({ user }) {
-  const items = await Conversation.find({ participants: user._id })
+  // Hide threads the user soft-deleted (they reappear once a new message
+  // arrives, because sending clears `deletedBy` — see below).
+  const items = await Conversation.find({ participants: user._id, deletedBy: { $ne: user._id } })
     .sort({ lastMessageAt: -1, updatedAt: -1, _id: -1 })
     .lean();
 
@@ -272,6 +274,7 @@ async function sendMessage({ id, body, user }) {
   convo.lastMessageText = text.slice(0, 600);
   convo.lastMessageAt   = msg.createdAt;
   convo.lastSenderId    = user._id;
+  convo.deletedBy       = []; // a new message revives the thread for anyone who deleted it
   convo.unreadCounts    = convo.unreadCounts || new Map();
   const prev            = convo.unreadCounts.get(peerKey) || 0;
   convo.unreadCounts.set(peerKey, prev + 1);
@@ -338,33 +341,40 @@ async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = ''
   if (!buffer || !buffer.length) {
     throw ApiError.badRequest('কোনো ফাইল পাওয়া যায়নি।', { code: 'no_file' });
   }
-  if (kind !== 'image' && kind !== 'audio' && kind !== 'document') {
+  if (!['image', 'audio', 'video', 'document'].includes(kind)) {
     throw ApiError.badRequest('অজানা মিডিয়া টাইপ।', { code: 'bad_kind' });
   }
 
   // Mime allow-list per kind.
   const okImage = /^image\/(jpe?g|png|webp|gif|heic|heif)$/i.test(mimetype || '');
   const okAudio = /^audio\/(webm|ogg|mpeg|mp3|mp4|m4a|aac|wav|x-m4a)$/i.test(mimetype || '');
+  const okVideo = /^video\/(mp4|webm|ogg|quicktime|x-m4v|3gpp|3gpp2)$/i.test(mimetype || '');
   const okPdf = mimetype === 'application/pdf';
-  
+
   if (kind === 'image' && !okImage) {
     throw ApiError.badRequest('শুধু ছবি পাঠানো যাবে।', { code: 'bad_image_mime' });
   }
   if (kind === 'audio' && !okAudio) {
     throw ApiError.badRequest('শুধু অডিও পাঠানো যাবে।', { code: 'bad_audio_mime' });
   }
+  if (kind === 'video' && !okVideo) {
+    throw ApiError.badRequest('শুধু ভিডিও পাঠানো যাবে।', { code: 'bad_video_mime' });
+  }
   if (kind === 'document' && !okPdf) {
     throw ApiError.badRequest('শুধু PDF পাঠানো যাবে।', { code: 'bad_document_mime' });
   }
 
-  // Hard size cap (5 MB) — multer lets 8 MB through so we can give a clean error.
-  if (buffer.length > 5 * 1024 * 1024) {
-    throw ApiError.badRequest('ফাইল অনেক বড় (সর্বোচ্চ ৫ MB)।', { code: 'too_large' });
+  // Per-kind hard size cap. Video clips get a bigger allowance than photos /
+  // voice / docs. The multer safety-net (see uploadMiddleware) is set above
+  // this so the controller can return a clean per-kind error.
+  const maxBytes = kind === 'video' ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
+  if (buffer.length > maxBytes) {
+    throw ApiError.badRequest(`ফাইল অনেক বড় (সর্বোচ্চ ${Math.round(maxBytes / 1024 / 1024)} MB)।`, { code: 'too_large' });
   }
 
-  // Cloudinary: images as 'image', audio as 'video' (Cloudinary stores audio
-  // under the video resource type), documents as 'raw'.
-  const resourceType = kind === 'image' ? 'image' : kind === 'audio' ? 'video' : 'raw';
+  // Cloudinary resource type: images as 'image', audio AND video under 'video'
+  // (Cloudinary stores both there), documents as 'raw'.
+  const resourceType = kind === 'image' ? 'image' : (kind === 'audio' || kind === 'video') ? 'video' : 'raw';
   const folder = `tolet-pro/chat/${String(convo._id)}`;
 
   let up;
@@ -395,13 +405,17 @@ async function sendMediaMessage({ id, user, buffer, mimetype, kind, caption = ''
   });
 
   // Denormalised preview text shown in the sidebar.
-  const preview = kind === 'image' ? '📷 Photo' : kind === 'audio' ? '🎤 Voice message' : '📄 Document';
+  const preview = kind === 'image' ? '📷 Photo'
+                : kind === 'audio' ? '🎤 Voice message'
+                : kind === 'video' ? '🎥 Video'
+                : '📄 Document';
 
   const peerId  = convo.participants.find((p) => String(p) !== String(user._id));
   const peerKey = String(peerId);
   convo.lastMessageText = cap ? `${preview}: ${cap}`.slice(0, 600) : preview;
   convo.lastMessageAt   = msg.createdAt;
   convo.lastSenderId    = user._id;
+  convo.deletedBy       = []; // a new message revives the thread for anyone who deleted it
   convo.unreadCounts    = convo.unreadCounts || new Map();
   const prev            = convo.unreadCounts.get(peerKey) || 0;
   convo.unreadCounts.set(peerKey, prev + 1);
@@ -723,6 +737,7 @@ async function forwardMessage({ user, targetId, sourceId, messageId }) {
   target.lastMessageText = String(preview).slice(0, 600);
   target.lastMessageAt   = msg.createdAt;
   target.lastSenderId    = user._id;
+  target.deletedBy       = []; // a new message revives the thread for anyone who deleted it
   target.unreadCounts    = target.unreadCounts || new Map();
   target.unreadCounts.set(peerKey, (target.unreadCounts.get(peerKey) || 0) + 1);
   target.unreadCounts.set(String(user._id), 0);
@@ -814,6 +829,25 @@ async function getPresence({ user, ids }) {
   return map;
 }
 
+/**
+ * Soft-delete a conversation for the current user only ("Delete conversation").
+ * The thread disappears from THEIR sidebar (listConversations filters it out)
+ * but the other participant keeps it. A new message from either side revives
+ * it (sendMessage clears `deletedBy`). We also zero the user's unread counter
+ * so it doesn't come back with a stale badge.
+ */
+async function deleteConversation({ id, user }) {
+  const convo = await getConversationOr403({ id, user });
+  const meKey = String(user._id);
+  if (!(convo.deletedBy || []).some((u) => String(u) === meKey)) {
+    convo.deletedBy = [...(convo.deletedBy || []), user._id];
+  }
+  convo.unreadCounts = convo.unreadCounts || new Map();
+  convo.unreadCounts.set(meKey, 0);
+  await convo.save();
+  return { ok: true, id: String(convo._id), deleted: true };
+}
+
 module.exports = {
   openConversation,
   listConversations,
@@ -831,4 +865,5 @@ module.exports = {
   forwardMessage,
   pinMessage,
   getPresence,
+  deleteConversation,
 };

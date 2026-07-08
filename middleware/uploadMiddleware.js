@@ -19,7 +19,9 @@ const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   limits: {
-    fileSize: 8 * 1024 * 1024, // 8 MB safety net
+    // 22 MB safety net so short video clips (hard-capped at 20 MB in
+    // chat.service) get through; images/voice/docs are capped tighter there.
+    fileSize: 22 * 1024 * 1024,
     files: 1,
   },
 });
