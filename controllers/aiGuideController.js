@@ -9,17 +9,44 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 exports.getAIGuides = asyncH(async (req, res) => {
 	// Public route → only active guides, sorted by order.
 	//
-	// IMPORTANT: we must EXCLUDE Welcome-Robot guides here, otherwise the
-	// welcome videos would leak into the Assistant's suggestion list.
-	// We filter with { $ne: "welcome" } rather than { placement: "assistant" }
-	// on purpose: guides created before this feature existed have NO placement
-	// field at all in MongoDB (the schema default only applies on save, not to
-	// old documents). `$ne: "welcome"` matches both "assistant" guides AND those
-	// older field-less guides, so nothing disappears from the Assistant.
+	// IMPORTANT: we must EXCLUDE every non-Assistant placement here, otherwise
+	// welcome / how-it-works / support videos would leak into the Assistant's
+	// suggestion list. We use `$nin` (not `placement: "assistant"`) on purpose:
+	// guides created before the placement field existed have NO placement field
+	// at all in MongoDB (the schema default only applies on save, not to old
+	// documents). `$nin` matches "assistant" guides AND those older field-less
+	// guides (a missing field is treated as not-in-array), so nothing disappears
+	// from the Assistant.
 	const guides = await AIGuide.find({
 		isActive: true,
-		placement: { $ne: "welcome" },
+		placement: { $nin: ["welcome", "how_it_works", "support"] },
 	}).sort({ order: 1 });
+	res.status(200).json(guides);
+});
+
+// @desc    Get active guides for a public page section (How it Works / Support)
+// @route   GET /api/ai-guides/section/:placement?audience=tenant|landlord
+// @access  Public
+exports.getGuidesByPlacement = asyncH(async (req, res) => {
+	const { placement } = req.params;
+	const { audience } = req.query;
+
+	// Only page-section placements are fetchable through this public endpoint.
+	const allowed = ["how_it_works", "support"];
+	if (!allowed.includes(placement)) {
+		throw ApiError.badRequest("Unknown guide placement");
+	}
+
+	const filter = { isActive: true, placement };
+
+	// If a valid role is given, return guides for that role PLUS "all"-audience
+	// guides. Anything else → return every active guide for the placement (the
+	// caller can split by audience client-side).
+	if (audience === "tenant" || audience === "landlord") {
+		filter.audience = { $in: [audience, "all"] };
+	}
+
+	const guides = await AIGuide.find(filter).sort({ order: 1 });
 	res.status(200).json(guides);
 });
 

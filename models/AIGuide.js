@@ -26,18 +26,23 @@ const aiGuideSchema = new mongoose.Schema(
 			default: 0,
 		},
 		// Where this guide is shown.
-		//  'assistant' = the floating AI Assistant's suggestion list. This is
-		//                the DEFAULT, so every guide that already exists keeps
-		//                showing in the Assistant exactly as before — no data
-		//                migration needed.
-		//  'welcome'   = the post-login Welcome Robot popup.
+		//  'assistant'    = the floating AI Assistant's suggestion list. This is
+		//                   the DEFAULT, so every guide that already exists keeps
+		//                   showing in the Assistant exactly as before — no data
+		//                   migration needed.
+		//  'welcome'      = the post-login Welcome Robot popup.
+		//  'how_it_works' = the public "How it Works" page. Combined with
+		//                   `audience`, admins build separate tenant / landlord
+		//                   video sections (e.g. "How to rent a house").
+		//  'support'      = the public "Help & Support" page (e.g. a "How to use
+		//                   support" walkthrough video).
 		placement: {
 			type: String,
-			enum: ["assistant", "welcome"],
+			enum: ["assistant", "welcome", "how_it_works", "support"],
 			default: "assistant",
 		},
-		// Who the guide targets. Used mainly by 'welcome' placement so the robot
-		// can pick the right video per role. 'all' shows to both roles.
+		// Who the guide targets. Used by 'welcome' and 'how_it_works' placements
+		// so the right video shows per role. 'all' shows to both roles.
 		audience: {
 			type: String,
 			enum: ["tenant", "landlord", "all"],
