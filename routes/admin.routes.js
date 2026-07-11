@@ -12,7 +12,9 @@
 
 const express = require('express');
 const ctl = require('../controllers/admin.controller');
+const teamCtl = require('../controllers/admin.team.controller');
 const requireAdminAuth = require('../middleware/requireAdminAuth');
+const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 
 const router = express.Router();
 
@@ -60,5 +62,15 @@ router.post('/reports/:id/status',          ctl.updateReportStatus);
 router.get ('/properties',                  ctl.listAllProperties);
 router.post('/properties/:id/moderate',     ctl.moderateProperty);
 router.delete('/properties/:id',            ctl.deleteProperty);
+
+// ─── Admin team management (SUPER ADMIN ONLY) ───────────────────────────────
+// Designate other users as admins/sub-admins and revoke that access. The
+// extra requireSuperAdmin gate means a support_agent/moderator can reach the
+// rest of the console but never manage the admin team.
+router.get ('/team',                        requireSuperAdmin, teamCtl.listTeam);
+router.get ('/team/candidates',             requireSuperAdmin, teamCtl.searchCandidates);
+router.post('/team/grant',                  requireSuperAdmin, teamCtl.grantAdmin);
+router.put ('/team/:id/role',               requireSuperAdmin, teamCtl.updateAdminRole);
+router.post('/team/:id/revoke',             requireSuperAdmin, teamCtl.revokeAdmin);
 
 module.exports = router;

@@ -25,4 +25,8 @@ router.post('/login', authLimiter, ctl.login);
 router.get('/me', requireAdminAuth, ctl.me);
 router.post('/logout', requireAdminAuth, ctl.logout);
 
+// Account settings — the admin manages their own profile + password.
+router.patch('/me', requireAdminAuth, ctl.updateMe);
+router.post('/change-password', requireAdminAuth, authLimiter, ctl.changePassword);
+
 module.exports = router;
