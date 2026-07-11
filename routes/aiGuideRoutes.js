@@ -1,7 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const requireAuth = require("../middleware/requireAuth");
-const requireAdmin = require("../middleware/requireAdmin");
+const requireAdminAuth = require("../middleware/requireAdminAuth");
 
 const {
 	getAIGuides,
@@ -24,10 +23,12 @@ router.get("/welcome", getWelcomeGuides);
 // videos. Literal "/section" segment, declared before the "/:id" routes.
 router.get("/section/:placement", getGuidesByPlacement);
 
-// Admin routes for managing guides
-router.get("/admin", requireAuth, requireAdmin, getAllAIGuidesForAdmin);
-router.post("/", requireAuth, requireAdmin, createAIGuide);
-router.put("/:id", requireAuth, requireAdmin, updateAIGuide);
-router.delete("/:id", requireAuth, requireAdmin, deleteAIGuide);
+// Admin routes for managing guides — consumed by the standalone admin console,
+// so they require an admin-scoped token (requireAdminAuth). The public GET
+// routes above stay open for the consumer app.
+router.get("/admin", requireAdminAuth, getAllAIGuidesForAdmin);
+router.post("/", requireAdminAuth, createAIGuide);
+router.put("/:id", requireAdminAuth, updateAIGuide);
+router.delete("/:id", requireAdminAuth, deleteAIGuide);
 
 module.exports = router;

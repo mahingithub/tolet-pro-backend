@@ -2,12 +2,12 @@
 
 const express      = require('express');
 const ctl          = require('../controllers/admin.support.controller');
-const requireAuth  = require('../middleware/requireAuth');
-const requireAdmin = require('../middleware/requireAdmin');
+const requireAdminAuth = require('../middleware/requireAdminAuth');
 
 const router = express.Router();
 
-router.use(requireAuth, requireAdmin);
+// Admin helpdesk console — admin-scoped tokens only (see requireAdminAuth).
+router.use(requireAdminAuth);
 
 router.get('/cases', ctl.listAllTickets);
 router.get('/cases/:id', ctl.getTicketWithContext);

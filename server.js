@@ -48,15 +48,22 @@ const NATIVE_APP_ORIGINS = new Set([
   'https://localhost',
 ]);
 
+// Allowed browser origins = public site (CORS_ORIGINS) + admin console
+// (ADMIN_CORS_ORIGINS). Both are credentialed. Keeping them in separate env
+// vars means the admin subdomain is allow-listed explicitly and can be
+// rotated/locked down without touching the public site config.
+const ALLOWED_WEB_ORIGINS = new Set([...env.corsOrigins, ...env.adminCorsOrigins]);
+
 app.use(
   cors({
     origin: (origin, cb) => {
       if (!origin) return cb(null, true); // server-to-server / curl / native fetch
       if (NATIVE_APP_ORIGINS.has(origin)) return cb(null, true);
-      if (env.corsOrigins.includes(origin)) return cb(null, true);
+      if (ALLOWED_WEB_ORIGINS.has(origin)) return cb(null, true);
       // The old `.vercel.app` wildcard was removed — it let ANY site on
       // *.vercel.app (including an attacker's) make credentialed requests.
-      // Put your exact production URL(s) in the CORS_ORIGINS env var instead.
+      // Put your exact production URL(s) in CORS_ORIGINS (public site) and
+      // ADMIN_CORS_ORIGINS (admin subdomain) instead.
       return cb(new Error(`CORS: origin "${origin}" not allowed`));
     },
     credentials: true,
@@ -98,6 +105,10 @@ app.use('/api/host',       hostRoutes);
 app.use('/api/host-stats', require('./routes/hostStats.routes')); // real host performance metrics
 app.use('/api/landlords',  landlordRoutes);
 app.use('/api/tenants',    tenantRoutes);
+// Dedicated admin-console auth (separate login flow, admin-scoped tokens).
+// MUST be registered BEFORE '/api/admin' so its public /login endpoint isn't
+// captured by the admin router's requireAdminAuth gate.
+app.use('/api/admin/auth', authLimiter, require('./routes/admin.auth.routes'));
 app.use('/api/admin',      require('./routes/admin.routes'));
 // MEDIUM limiter on messaging (spam-prone).
 app.use('/api/conversations',  chatLimiter, require('./routes/chat.routes'));

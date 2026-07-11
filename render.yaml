@@ -46,3 +46,13 @@ services:
       #   https://tolet-pro.vercel.app
       - key: CORS_ORIGINS
         sync: false
+
+      # Origin(s) of the SEPARATE admin console subdomain. Comma-separate,
+      # no trailing slash. Example:
+      #   https://admin.tolet-pro.com
+      - key: ADMIN_CORS_ORIGINS
+        sync: false
+
+      # Admin token lifetime (short by design). Optional — defaults to 12h.
+      - key: JWT_ADMIN_EXPIRES_IN
+        value: 12h

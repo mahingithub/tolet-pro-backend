@@ -32,10 +32,22 @@ const env = {
     .map((s) => s.trim())
     .filter(Boolean),
 
+  // Origins for the SEPARATE admin console (its own subdomain, e.g.
+  // https://admin.tolet-pro.com). Kept in its own env var so the admin
+  // surface can be locked down independently of the public site. Defaults to
+  // the admin dev server on :5174.
+  adminCorsOrigins: (process.env.ADMIN_CORS_ORIGINS || 'http://localhost:5174')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+
   mongoUri: process.env.MONGO_URI,
 
   jwtSecret: process.env.JWT_SECRET,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  // Admin sessions are short-lived by default — admin power is high-value, so
+  // a leaked token has a small blast-radius window.
+  jwtAdminExpiresIn: process.env.JWT_ADMIN_EXPIRES_IN || '12h',
   resetTokenExpiresIn: process.env.RESET_TOKEN_EXPIRES_IN || '15m',
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS || 12),
 

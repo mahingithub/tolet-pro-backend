@@ -12,6 +12,10 @@ const tokenService = require('./token.service');
 
 const GENERIC_LOGIN_ERROR = 'ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে।';
 
+// Roles allowed to authenticate against the SEPARATE admin console. Kept in
+// sync with middleware/requireAdmin + middleware/requireAdminAuth.
+const ADMIN_ROLES = new Set(['support_agent', 'moderator', 'super_admin']);
+
 // Hard cap on how many sessions we keep per user. This is THE root-cause fix
 // for the historical "sessions array grows forever → OOM" bug: every place
 // that adds a session goes through addSession(), which trims first. Because
@@ -223,6 +227,74 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
 }
 
 /**
+ * Admin-console login — the dedicated, separate flow for the standalone admin
+ * frontend. It is deliberately NOT the same as user login():
+ *   1. Same brute-force protections (lockout, generic error, constant-time-ish
+ *      dummy compare) as the public login.
+ *   2. RBAC is enforced HERE, at authentication time — a non-admin account
+ *      that types the right password still cannot obtain an admin token.
+ *   3. On success it mints an ADMIN-SCOPED token (audience 'tolet-pro-admin' +
+ *      scope 'admin') via tokenService.signAdminToken, which only
+ *      middleware/requireAdminAuth accepts.
+ * The account is loaded fresh so we never trust client-supplied role claims.
+ */
+async function adminLogin({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
+  // OOM guard mirrors login(): trim any legacy-bloated sessions before load.
+  await User.updateOne(
+    { phone },
+    { $push: { sessions: { $each: [], $slice: -(MAX_SESSIONS - 1) } } }
+  );
+
+  const user = await User.findOne({ phone }).select('+password +loginAttempts +lockUntil');
+  if (!user || !user.phoneVerified) {
+    await bcrypt.compare(password, '$2a$12$abcdefghijklmnopqrstuv'); // bogus hash — constant-ish timing
+    throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
+  }
+  if (user.isLocked) {
+    throw ApiError.tooMany('অ্যাকাউন্ট সাময়িকভাবে লক করা হয়েছে। কিছুক্ষণ পর চেষ্টা করুন।', {
+      code: 'account_locked',
+    });
+  }
+  const ok = await bcrypt.compare(password, user.password);
+  if (!ok) {
+    user.loginAttempts = (user.loginAttempts || 0) + 1;
+    if (user.loginAttempts >= env.loginMaxAttempts) {
+      user.lockUntil = new Date(Date.now() + env.loginLockMinutes * 60_000);
+      user.loginAttempts = 0;
+    }
+    await user.save();
+    throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
+  }
+
+  // ── RBAC gate: only privileged roles may hold an admin session ──────────
+  const roles = Array.isArray(user.roles) && user.roles.length
+    ? user.roles
+    : (user.role ? [user.role] : []);
+  if (!roles.some((r) => ADMIN_ROLES.has(r))) {
+    // Reset the (successful) attempt counter — the password WAS correct — but
+    // refuse to issue an admin token.
+    user.loginAttempts = 0;
+    await user.save();
+    throw ApiError.forbidden('এই অ্যাকাউন্টের অ্যাডমিন অ্যাক্সেস নেই।', { code: 'admin_required' });
+  }
+
+  // A banned admin cannot manage the platform.
+  if (user.isBanned) {
+    throw ApiError.forbidden('আপনার অ্যাকাউন্ট স্থগিত।', { code: 'account_banned' });
+  }
+
+  user.loginAttempts = 0;
+  user.lockUntil = null;
+  user.lastLoginAt = new Date();
+
+  const sessionId = addSession(user, { device, ipAddress });
+  await user.save();
+
+  const token = tokenService.signAdminToken(user, sessionId);
+  return { token, user };
+}
+
+/**
  * Forgot password — step 1. If a verified account exists for this phone, we
  * issue a fresh OTP and deliver it via sms.net.bd. We ALWAYS resolve
  * successfully (and swallow SMS errors) so the endpoint can return a constant
@@ -284,6 +356,7 @@ module.exports = {
   startSignup,
   verifySignup,
   login,
+  adminLogin,
   forgotPassword,
   resetPassword,
 };

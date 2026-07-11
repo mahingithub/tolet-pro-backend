@@ -12,14 +12,15 @@
 
 const express = require('express');
 const ctl = require('../controllers/admin.controller');
-const requireAuth  = require('../middleware/requireAuth');
-const requireAdmin = require('../middleware/requireAdmin');
+const requireAdminAuth = require('../middleware/requireAdminAuth');
 
 const router = express.Router();
 
-// Every endpoint below is admin-only.
-router.use(requireAuth);
-router.use(requireAdmin);
+// Every endpoint below is admin-only and consumed by the standalone admin
+// console. requireAdminAuth demands an admin-scoped token (audience
+// 'tolet-pro-admin'), re-checks the live role, and enforces session/ban — so
+// a public-app token can never reach these handlers.
+router.use(requireAdminAuth);
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 router.get('/overview', ctl.getOverview);
