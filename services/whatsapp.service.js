@@ -40,12 +40,23 @@ const cfg = env.whatsapp || {};
  * Normalise a phone number to the international form WITHOUT a leading '+'
  * (Meta's Cloud API wants "8801712345678"). Twilio wants the '+' back, which
  * we re-add at the Twilio call site.
+ *
+ * Handles the common Bangladesh formats so real-world stored numbers work
+ * regardless of how they were entered:
+ *   "+8801712345678" → "8801712345678"   (E.164 — the app's canonical form)
+ *   "8801712345678"  → "8801712345678"   (already international)
+ *   "01712345678"    → "8801712345678"   (BD local → prepend 880, drop 0)
+ *   "008801712345678"→ "8801712345678"   ("00" international prefix)
  */
 function normalizeMsisdn(phone) {
-  return String(phone || '')
-    .trim()
-    .replace(/\s+/g, '')
-    .replace(/^\+/, '');
+  // Strip everything that isn't a digit ('+', spaces, dashes, parens, ...).
+  let s = String(phone || '').replace(/\D/g, '');
+  if (!s) return '';
+  // "00" international dialling prefix → drop it.
+  if (s.startsWith('00')) s = s.slice(2);
+  // Bangladesh local "01XXXXXXXXX" (11 digits) → "880" + number w/o leading 0.
+  if (s.startsWith('0') && s.length === 11) s = `880${s.slice(1)}`;
+  return s;
 }
 
 /**
