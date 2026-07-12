@@ -19,7 +19,10 @@ const mongoose = require('mongoose');
 const LedgerEntrySchema = new mongoose.Schema(
   {
     paid:          { type: Boolean, default: false },
-    status:        { type: String, enum: ['scheduled', 'pending', 'due', 'overdue', 'full', 'partial'], default: 'full' },
+    // 'submitted' = tenant filed a manual "I have paid" claim that is awaiting
+    // landlord verification (V1 manual rent flow). It is NOT a paid state —
+    // paid flips to true only when the landlord approves (full/partial).
+    status:        { type: String, enum: ['scheduled', 'pending', 'submitted', 'due', 'overdue', 'full', 'partial'], default: 'full' },
     paidOn:        { type: String, default: '' },
     method:        { type: String, default: '' },
     txnId:         { type: String, default: '' },

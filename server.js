@@ -116,6 +116,9 @@ app.use('/api/notifications',  require('./routes/notification.routes'));
 // MEDIUM limiter on bookings (spam-prone).
 app.use('/api/bookings',       writeLimiter, require('./routes/booking.routes'));
 app.use('/api/receipts',       require('./routes/receipt.routes'));
+// V1 manual rent payments — landlord payout accounts + tenant "I have paid" claims.
+app.use('/api/payment-methods', require('./routes/paymentMethod.routes'));
+app.use('/api/rent-payments',   writeLimiter, require('./routes/rentPayment.routes'));
 app.use('/api/documents',      require('./routes/document.routes'));
 app.use('/api/billing',        require('./routes/billing.routes'));
 // MEDIUM limiter on support ticket creation (spam-prone).
