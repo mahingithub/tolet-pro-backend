@@ -44,13 +44,23 @@ const BookingSchema = new mongoose.Schema(
 
     // Denormalized display fields so dashboards don't need JOINs every render.
     property:    { type: String, trim: true, default: '', maxlength: 200 },
+    // Property location, denormalized from the Property record at create time
+    // so the booking + rent views can show it without an extra JOIN.
+    location:    { type: String, trim: true, default: '', maxlength: 300 },
     tenant:      { type: String, trim: true, default: '', maxlength: 100 },
     tenantPhone: { type: String, trim: true, default: '', maxlength: 20 },
+    // How many people will live in the unit (prefilled from the tenant's
+    // family-members count when the profile is linked).
+    tenantsCount: { type: Number, default: 1, min: 1, max: 50 },
 
     // Lease terms
     leaseStart:       { type: Date, required: true },
     leaseEnd:         { type: Date, required: true },
     monthlyRent:      { type: Number, required: true, min: 0 },
+    // One-time advance / booking money collected up front, plus the channel it
+    // was collected through (bKash | Nagad | Rocket | Bank Transfer | Cash).
+    advancePayment:   { type: Number, default: 0, min: 0 },
+    paymentMethod:    { type: String, trim: true, default: '', maxlength: 40 },
     rentDueDay:       { type: Number, default: 5, min: 1, max: 28 },
     gracePeriodDays:  { type: Number, default: 5, min: 0, max: 28 },
     lateFeeAmount:    { type: Number, default: 500, min: 0 },

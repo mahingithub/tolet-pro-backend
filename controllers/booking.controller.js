@@ -42,10 +42,10 @@ function notifySocket(userId, event, payload) {
 async function createBooking(req, res, next) {
   try {
     const {
-      inquiryId, propertyId, property, tenant, tenantPhone,
-      leaseStart, leaseEnd, monthlyRent, rentDueDay,
+      inquiryId, propertyId, property, location, tenant, tenantPhone,
+      tenantsCount, leaseStart, leaseEnd, monthlyRent, rentDueDay,
       reminderLeadDays, autoReminder, serviceCharge,
-      securityDeposit, notes, chatId, tenantId,
+      securityDeposit, advancePayment, paymentMethod, notes, chatId, tenantId,
     } = req.body;
 
     if (!propertyId) throw ApiError.badRequest('propertyId আবশ্যক।');
@@ -71,11 +71,15 @@ async function createBooking(req, res, next) {
       propertyId:       propertyId,
       inquiryId:        inquiryId && isObjectId(inquiryId) ? inquiryId : null,
       property:         property || '',
+      location:         location || '',
       tenant:           tenant || '',
       tenantPhone:      (tenantPhone && tenantPhone.trim().length >= 10) ? tenantPhone.trim() : null,
+      tenantsCount:     Math.max(1, Number(tenantsCount) || 1),
       leaseStart:       new Date(leaseStart),
       leaseEnd:         new Date(leaseEnd),
       monthlyRent:      rent,
+      advancePayment:   Math.max(0, Number(advancePayment) || 0),
+      paymentMethod:    paymentMethod || '',
       rentDueDay:       Number(rentDueDay) || 5,
       reminderLeadDays: Number(reminderLeadDays) || 3,
       autoReminder:     autoReminder !== false,
@@ -253,7 +257,8 @@ async function updateBooking(req, res, next) {
     const whitelist = [
       'autoReminder', 'reminderLeadDays', 'rentDueDay', 'monthlyRent',
       'notes', 'serviceCharge', 'securityDeposit', 'status',
-      'tenant', 'tenantPhone', 'tenantId',
+      'tenant', 'tenantPhone', 'tenantId', 'tenantsCount',
+      'advancePayment', 'paymentMethod', 'location',
     ];
     for (const key of whitelist) {
       if (req.body[key] !== undefined) {
