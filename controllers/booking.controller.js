@@ -11,6 +11,7 @@
 const mongoose      = require('mongoose');
 const Booking       = require('../models/Booking');
 const Receipt       = require('../models/Receipt');
+const User          = require('../models/User');
 const notifications = require('../services/notification.service');
 const { applyPayment } = require('../services/bookingPayment.service');
 const ApiError      = require('../utils/ApiError');
@@ -20,6 +21,28 @@ const { invalidateInsightsCache } = require('../services/insights.service');
 // ─── helpers ────────────────────────────────────────────────────────────────
 function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
+}
+
+// Reduce any phone format (+880 1712-xxxxxx, 01712xxxxxx, 8801712xxxxxx) down to
+// its 10-digit BD mobile core so we can match a booking's typed phone against a
+// registered User's stored phone regardless of formatting.
+function phoneCore(p) {
+  const d = String(p || '').replace(/\D/g, '');
+  return d.length >= 10 ? d.slice(-10) : '';
+}
+
+// Find a registered tenant's user id from a phone number. Used to link manual /
+// legacy bookings to a real account so Profile / Call / Message work. Returns
+// null when no account matches (unregistered tenant → no profile to open).
+async function resolveUserIdByPhone(phone) {
+  const core = phoneCore(phone);
+  if (!core) return null;
+  try {
+    const user = await User.findOne({ phone: new RegExp(`${core}$`) }).select('_id').lean();
+    return user?._id || null;
+  } catch {
+    return null;
+  }
 }
 
 // CRITICAL: sockets join room `user:<id>` (socket.js → roomFor). The old code
@@ -56,6 +79,14 @@ async function createBooking(req, res, next) {
     const rent = Number(monthlyRent);
     if (!rent || rent <= 0) throw ApiError.badRequest('মাসিক ভাড়া ০ এর বেশি হতে হবে।');
 
+    // Link the booking to a real tenant account. Prefer the id passed from the
+    // client (inquiry-converted bookings), else resolve by phone so manual
+    // "New Lease" bookings also open the tenant's profile / chat / call.
+    let linkedTenantId = tenantId && isObjectId(tenantId) ? tenantId : null;
+    if (!linkedTenantId && tenantPhone) {
+      linkedTenantId = await resolveUserIdByPhone(tenantPhone);
+    }
+
     // Dedup: এক inquiry-র জন্য একটাই active booking। আগে convert হয়ে থাকলে
     // নতুন duplicate না বানিয়ে সেটাই ফেরত দাও।
     if (inquiryId && isObjectId(inquiryId)) {
@@ -67,7 +98,7 @@ async function createBooking(req, res, next) {
 
     const booking = await Booking.create({
       landlordId:       req.user._id,
-      tenantId:         tenantId && isObjectId(tenantId) ? tenantId : null,
+      tenantId:         linkedTenantId,
       propertyId:       propertyId,
       inquiryId:        inquiryId && isObjectId(inquiryId) ? inquiryId : null,
       property:         property || '',
@@ -135,11 +166,26 @@ async function listHostBookings(req, res, next) {
       .populate('tenantId', 'avatar')
       .sort({ createdAt: -1 })
       .lean();
-    bookings.forEach(b => { 
-      b.id = String(b._id); 
-      b.tenantAvatar = b.tenantId?.avatar || '';
+
+    // Self-healing backfill: legacy / manual bookings that were saved before a
+    // tenant account existed (or without a linked id) get their tenantId
+    // resolved by phone now, then persisted so Profile / Call / Message work.
+    const needsResolve = bookings.filter(b => !b.tenantId && b.tenantPhone);
+    if (needsResolve.length) {
+      await Promise.all(needsResolve.map(async (b) => {
+        const uid = await resolveUserIdByPhone(b.tenantPhone);
+        if (uid) {
+          b.tenantId = uid;
+          Booking.updateOne({ _id: b._id }, { $set: { tenantId: uid } }).catch(() => {});
+        }
+      }));
+    }
+
+    bookings.forEach(b => {
+      b.id = String(b._id);
+      b.tenantAvatar = (b.tenantId && b.tenantId.avatar) || b.tenantAvatar || '';
       if (b.tenantId && b.tenantId._id) b.tenantId = b.tenantId._id;
-      delete b._id; 
+      delete b._id;
     });
     return res.json({ bookings });
   } catch (err) {
