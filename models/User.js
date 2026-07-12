@@ -51,7 +51,13 @@ const TenantProfileSchema = new mongoose.Schema(
   {
     professionType: {
       type: String,
-      enum: ['', 'student', 'employed', 'self-employed', 'other'],
+      // Superset of every value the UI can emit. The current profile editor
+      // (TenantProfileFields.jsx) sends: student | job | business | doctor |
+      // other. The legacy VerificationModal + older records use: employed |
+      // self-employed. Both dialects are accepted so a "Job holder" / "Doctor"
+      // selection saves instead of failing mongoose enum validation (the
+      // cause of the PATCH /me 400 → "Saved locally, server sync pending").
+      enum: ['', 'student', 'job', 'business', 'doctor', 'employed', 'self-employed', 'other'],
       default: '',
     },
 
