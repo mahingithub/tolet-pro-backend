@@ -60,6 +60,31 @@ const env = {
   // sms.net.bd SMS gateway — used to deliver signup + password-reset OTPs.
   smsApiKey: process.env.SMS_API_KEY || '',
 
+  // ─── WhatsApp reminders ──────────────────────────────────────────────────
+  // Used by services/whatsapp.service.js to deliver rent + visit reminders
+  // straight to the user's WhatsApp number. Provider-agnostic: set
+  // WHATSAPP_PROVIDER to 'meta' (WhatsApp Business Cloud API — default) or
+  // 'twilio'. When the required keys for the chosen provider are missing the
+  // service no-ops (logs a warning) so the app runs fine without WhatsApp
+  // configured. Fill these in .env once you have your API credentials.
+  whatsapp: {
+    provider: (process.env.WHATSAPP_PROVIDER || 'meta').toLowerCase(),
+
+    // Meta WhatsApp Business Cloud API (graph.facebook.com).
+    apiVersion:    process.env.WHATSAPP_API_VERSION || 'v21.0',
+    phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+    accessToken:   process.env.WHATSAPP_ACCESS_TOKEN || '',
+
+    // Twilio WhatsApp (api.twilio.com). `twilioFrom` is the WhatsApp-enabled
+    // sender, e.g. '+14155238886' (the sandbox) or your approved number.
+    twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || '',
+    twilioAuthToken:  process.env.TWILIO_AUTH_TOKEN || '',
+    twilioFrom:       process.env.TWILIO_WHATSAPP_FROM || '',
+
+    // Default template language code (used only for template messages).
+    defaultLang: process.env.WHATSAPP_DEFAULT_LANG || 'bn',
+  },
+
   // Testing escape hatch: when true, OTPs are LOGGED to the server console
   // and NOT sent via SMS. Lets you exercise the full signup/reset flow without
   // SMS credits or a verified gateway account. MUST be false for real users.

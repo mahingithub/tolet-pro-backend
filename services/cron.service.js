@@ -20,7 +20,9 @@
 
 const cron          = require('node-cron');
 const Booking       = require('../models/Booking');
+const User          = require('../models/User');
 const notifications = require('./notification.service');
+const whatsapp      = require('./whatsapp.service');
 
 const TZ   = process.env.CRON_TZ || 'Asia/Dhaka';
 const TEST = process.env.CRON_TEST === '1';
@@ -35,6 +37,34 @@ function currentMonthKey(d = new Date()) {
 function monthLabel(monthKey) {
   const [y, m] = monthKey.split('-').map(Number);
   return `${MONTHS[(m || 1) - 1]} ${y}`;
+}
+
+// Resolve a tenant's WhatsApp number for a booking: prefer the denormalized
+// `tenantPhone`, else look it up from the linked User account.
+async function resolveTenantPhone(booking) {
+  if (booking.tenantPhone && String(booking.tenantPhone).trim().length >= 8) {
+    return String(booking.tenantPhone).trim();
+  }
+  if (booking.tenantId) {
+    const u = await User.findById(booking.tenantId).select('phone').lean().catch(() => null);
+    if (u && u.phone) return u.phone;
+  }
+  return '';
+}
+
+// Fire-and-forget WhatsApp reminder to a booking's tenant. NEVER blocks or
+// throws — mirrors how notifications.emit is called (best-effort side channel),
+// so a WhatsApp failure can't disrupt the billing/late-fee run.
+function notifyTenantWhatsApp(booking, message) {
+  resolveTenantPhone(booking)
+    .then((phone) => {
+      if (!phone) {
+        console.warn(`[cron] no tenant phone for booking ${booking._id} — WhatsApp skipped`);
+        return null;
+      }
+      return whatsapp.sendWhatsAppMessage(phone, { body: message });
+    })
+    .catch((e) => console.warn('[cron] WhatsApp notify failed:', e.message));
 }
 
 // ─── 1) Monthly invoice generator ────────────────────────────────────────────
@@ -66,6 +96,12 @@ async function generateMonthlyInvoices() {
         data:   { targetId: String(booking._id), bookingId: String(booking._id), monthKey },
       });
     }
+
+    // WhatsApp reminder — new invoice ready (best-effort, non-blocking).
+    notifyTenantWhatsApp(
+      booking,
+      `📢 ${booking.property || 'আপনার বাসা'} — ${monthLabel(monthKey)} এর নতুন ভাড়ার বিল প্রস্তুত। ভাড়া ৳${Number(booking.monthlyRent) || 0}।`,
+    );
   }
 
   console.log(`[cron] invoices: ${created} created for ${monthKey} (of ${bookings.length} active bookings)`);
@@ -120,6 +156,12 @@ async function enforceLateFees() {
         data:   { targetId: String(booking._id), bookingId: String(booking._id), monthKey },
       });
     }
+
+    // WhatsApp reminder — rent overdue + late fee applied (best-effort).
+    notifyTenantWhatsApp(
+      booking,
+      `⚠️ ${booking.property || 'আপনার বাসা'} এর ভাড়া বকেয়া। ৳${lateFee} লেট ফি যোগ হয়েছে — মোট বকেয়া ৳${rent + lateFee}।`,
+    );
   }
 
   console.log(`[cron] late-fees: ${flagged} bookings marked overdue for ${monthKey}`);

@@ -19,7 +19,9 @@
  */
 
 const Inquiry       = require('../models/Inquiry');
+const User          = require('../models/User');
 const notifications = require('./notification.service');
+const whatsapp      = require('./whatsapp.service');
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 const BST_OFFSET   = '+06:00';
@@ -32,6 +34,13 @@ function visitInstant(date, time) {
   return isNaN(d.getTime()) ? null : d;
 }
 
+// Look up a user's WhatsApp number by id. Returns '' when unavailable.
+async function resolveUserPhone(userId) {
+  if (!userId) return '';
+  const u = await User.findById(userId).select('phone').lean().catch(() => null);
+  return (u && u.phone) ? u.phone : '';
+}
+
 async function runVisitReminders() {
   const now = Date.now();
 
@@ -41,7 +50,7 @@ async function runVisitReminders() {
     'visitSchedule.status':       'accepted',
     'visitSchedule.reminderSent': { $ne: true },
   })
-    .select('propTitle propertyId inquirerUserId propertyOwnerId visitSchedule')
+    .select('propTitle propertyId inquirerUserId propertyOwnerId visitSchedule phone')
     .lean();
 
   let sent = 0;
@@ -100,6 +109,22 @@ async function runVisitReminders() {
         title:  '🗓️ ভিজিটের রিমাইন্ডার — ২ ঘণ্টা বাকি',
         body:   `${prop} — ${label} এ ভাড়াটিয়া ভিজিটে আসবেন।`,
         data:   meta,
+      });
+    }
+
+    // ── WhatsApp reminders to BOTH parties (best-effort, non-blocking) ──
+    // sendWhatsAppMessage never throws, so a WhatsApp failure can't stop the
+    // sweep or undo the reminderSent claim above.
+    const tenantPhone   = inq.phone || await resolveUserPhone(inq.inquirerUserId);
+    const landlordPhone = await resolveUserPhone(inq.propertyOwnerId);
+    if (tenantPhone) {
+      whatsapp.sendWhatsAppMessage(tenantPhone, {
+        body: `🗓️ ${prop} — ${label} এ আপনার ভিজিট ২ ঘণ্টার মধ্যে। সময়মতো পৌঁছানোর চেষ্টা করুন।`,
+      });
+    }
+    if (landlordPhone) {
+      whatsapp.sendWhatsAppMessage(landlordPhone, {
+        body: `🗓️ ${prop} — ${label} এ ভাড়াটিয়া ২ ঘণ্টার মধ্যে ভিজিটে আসবেন।`,
       });
     }
     sent++;
