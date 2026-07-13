@@ -43,5 +43,6 @@ router.delete('/groceries/:id', ctrl.deleteGrocery);
 
 // ── settlements ────────────────────────────────────────────────────────────
 router.post('/settlements', ctrl.addSettlement);
+router.delete('/settlements/:id', ctrl.deleteSettlement);
 
 module.exports = router;

@@ -102,6 +102,7 @@ const SettlementSchema = new mongoose.Schema(
     amount: { type: Number, default: 0, min: 0 },
     method: { type: String, enum: METHODS, default: 'cash' },
     note: { type: String, default: '', maxlength: 200 },
+    createdBy: { type: String, default: null }, // member id of whoever recorded it (delete owner)
     date: { type: Date, default: Date.now },
   },
   { _id: true },

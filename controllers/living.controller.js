@@ -142,7 +142,7 @@ function serialize(hh, userId) {
       id: String(g._id), amount: g.amount, paidBy: g.paidBy, note: g.note, createdBy: g.createdBy || null, date: g.date,
     })),
     settlements: hh.settlements.map((s) => ({
-      id: String(s._id), from: s.from, to: s.to, amount: s.amount, method: s.method, note: s.note, date: s.date,
+      id: String(s._id), from: s.from, to: s.to, amount: s.amount, method: s.method, note: s.note, createdBy: s.createdBy || null, date: s.date,
     })),
     activities: hh.activities.slice(0, 60).map((a) => ({
       id: String(a._id), type: a.type, title: a.title, detail: a.detail, date: a.date,
@@ -520,13 +520,26 @@ async function addSettlement(req, res, next) {
     const method = METHODS.includes(req.body.method) ? req.body.method : 'cash';
     hh.settlements.unshift({
       from, to, amount: clampNum(req.body.amount), method,
-      note: String(req.body.note || '').slice(0, 200), date: new Date(),
+      note: String(req.body.note || '').slice(0, 200), createdBy: myMemberId(hh, req.user._id), date: new Date(),
     });
     const fromM = hh.members.id(from);
     const toM = hh.members.id(to);
     pushActivity(hh, 'settlement', 'Settlement completed',
       `${fromM?.name || 'Someone'} → ${toM?.name || 'someone'} · ${taka(req.body.amount)} (${method})`);
     return commit(hh, req, res, 201);
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function deleteSettlement(req, res, next) {
+  try {
+    const hh = await loadMine(req);
+    const item = hh.settlements.id(req.params.id);
+    if (!item) throw ApiError.notFound('সেটেলমেন্ট পাওয়া যায়নি।');
+    assertCanEdit(item, myMemberId(hh, req.user._id));
+    hh.settlements.pull(req.params.id);
+    return commit(hh, req, res);
   } catch (err) {
     return next(err);
   }
@@ -551,4 +564,5 @@ module.exports = {
   addGrocery,
   deleteGrocery,
   addSettlement,
+  deleteSettlement,
 };
