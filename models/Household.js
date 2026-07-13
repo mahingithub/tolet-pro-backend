@@ -141,6 +141,8 @@ const HouseholdSchema = new mongoose.Schema(
     // Shared config.
     rent: { type: Number, default: 0, min: 0 },
     monthlyIncome: { type: Number, default: 0, min: 0 },
+    // Fixed meal rate (৳/meal). 0 = auto (total bazar ÷ total meals).
+    mealRate: { type: Number, default: 0, min: 0 },
     budgets: {
       grocery: { type: Number, default: 0, min: 0 },
       meal: { type: Number, default: 0, min: 0 },

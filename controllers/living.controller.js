@@ -115,6 +115,7 @@ function serialize(hh, userId) {
     me: meMember ? String(meMember._id) : null,
     rent: hh.rent,
     monthlyIncome: hh.monthlyIncome,
+    mealRate: hh.mealRate || 0,
     budgets: { grocery: hh.budgets?.grocery || 0, meal: hh.budgets?.meal || 0 },
     roommates: hh.members.map((m) => ({
       id: String(m._id),
@@ -286,6 +287,7 @@ async function updateHousehold(req, res, next) {
     if (b.name !== undefined) hh.name = String(b.name).trim().slice(0, 80) || hh.name;
     if (b.rent !== undefined) hh.rent = clampNum(b.rent);
     if (b.monthlyIncome !== undefined) hh.monthlyIncome = clampNum(b.monthlyIncome);
+    if (b.mealRate !== undefined) hh.mealRate = clampNum(b.mealRate);
     if (b.budgets && typeof b.budgets === 'object') {
       if (b.budgets.grocery !== undefined) hh.budgets.grocery = clampNum(b.budgets.grocery);
       if (b.budgets.meal !== undefined) hh.budgets.meal = clampNum(b.budgets.meal);
