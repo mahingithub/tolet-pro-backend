@@ -35,6 +35,9 @@ const MemberSchema = new mongoose.Schema(
     // null → placeholder roommate (not a real app user yet).
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     name: { type: String, trim: true, required: true, maxlength: 60 },
+    // Snapshot of the user's profile photo at join time (so we don't have to
+    // populate the User on every read). Refreshed whenever they re-join.
+    avatar: { type: String, default: null, maxlength: 512 },
     color: { type: String, default: '#64748b', maxlength: 20 },
     role: { type: String, enum: ['owner', 'member'], default: 'member' },
     joinedAt: { type: Date, default: Date.now },
@@ -67,7 +70,17 @@ const BillSchema = new mongoose.Schema(
     dueDate: { type: Date, default: Date.now },
     status: { type: String, enum: BILL_STATUS, default: 'unpaid' },
     paidDate: { type: Date, default: null },
+    // Who fronted the money. A PAID bill feeds the who-owes-whom ledger: the
+    // payer is credited the full amount, split equally across all members.
+    paidBy: { type: String, default: '' }, // member id
     reminder: { type: Boolean, default: true },
+    // Recurring monthly bills (WiFi / electricity / water). The bill the user
+    // flags `recurring` acts as the template; getHousehold lazily spawns one
+    // unpaid instance per calendar month (see generateRecurringBills).
+    recurring: { type: Boolean, default: false },
+    dueDay: { type: Number, default: null, min: 1, max: 28 }, // day-of-month for recurring
+    period: { type: String, default: '' }, // 'YYYY-MM' this bill belongs to
+    recurringOf: { type: String, default: null }, // template bill id (for generated instances)
     createdBy: { type: String, default: null }, // member id of whoever added it (edit/delete owner)
   },
   { _id: true },

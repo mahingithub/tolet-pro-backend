@@ -32,6 +32,12 @@ const parseDate = (v) => {
   const d = v ? new Date(v) : new Date();
   return Number.isNaN(d.getTime()) ? new Date() : d;
 };
+// 'YYYY-MM' calendar-month key — used to dedupe recurring bill generation.
+const monthKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+const clampDueDay = (n, fallback = 1) => {
+  const v = Math.round(Number(n));
+  return Number.isFinite(v) && v >= 1 ? Math.min(28, v) : Math.min(28, fallback);
+};
 
 // Ambiguity-free code (no 0/O/1/I) so it's easy to read aloud / type.
 function genCode(len = 6) {
@@ -120,6 +126,7 @@ function serialize(hh, userId) {
     roommates: hh.members.map((m) => ({
       id: String(m._id),
       name: m.name,
+      avatar: m.avatar || null,
       color: m.color,
       userId: m.userId ? String(m.userId) : null,
       isMe: !!(m.userId && String(m.userId) === uid),
@@ -133,7 +140,9 @@ function serialize(hh, userId) {
     })),
     bills: hh.bills.map((b) => ({
       id: String(b._id), type: b.type, amount: b.amount, dueDate: b.dueDate,
-      status: b.status, paidDate: b.paidDate || null, reminder: b.reminder, createdBy: b.createdBy || null,
+      status: b.status, paidDate: b.paidDate || null, paidBy: b.paidBy || null,
+      reminder: b.reminder, recurring: !!b.recurring, dueDay: b.dueDay || null,
+      period: b.period || null, recurringOf: b.recurringOf || null, createdBy: b.createdBy || null,
     })),
     meals: hh.meals.map((m) => ({
       id: String(m._id), date: m.date, roommateId: m.roommateId,
@@ -175,11 +184,54 @@ async function commit(hh, req, res, status = 200) {
   return res.status(status).json({ household: serialize(hh, req.user._id) });
 }
 
+// Lazily materialise recurring bills for the CURRENT month. Each bill flagged
+// `recurring` is a template; if no instance of it exists for this calendar
+// month yet, we spawn one unpaid bill (due on its dueDay). Runs on read
+// (getHousehold) so there's no cron dependency. Returns true if it added any.
+function generateRecurringBills(hh) {
+  const now = new Date();
+  const cur = monthKey(now);
+  let changed = false;
+  const templates = hh.bills.filter((b) => b.recurring);
+  templates.forEach((t) => {
+    const tid = String(t._id);
+    const covered = hh.bills.some(
+      (b) => b.period === cur && (String(b._id) === tid || String(b.recurringOf) === tid),
+    );
+    if (covered) return;
+    const day = clampDueDay(t.dueDay || new Date(t.dueDate).getDate());
+    const due = new Date(now.getFullYear(), now.getMonth(), day);
+    hh.bills.push({
+      type: t.type,
+      amount: t.amount,
+      dueDate: due,
+      status: 'unpaid',
+      paidDate: null,
+      paidBy: '',
+      reminder: t.reminder,
+      recurring: false,
+      dueDay: day,
+      period: cur,
+      recurringOf: tid,
+      createdBy: t.createdBy,
+    });
+    changed = true;
+    pushActivity(hh, 'bill', 'Recurring bill due', `${t.type} · ${taka(t.amount)} · ${cur}`);
+  });
+  return changed;
+}
+
 // ═══════════════════════════════════ HOUSEHOLD ═══════════════════════════════
 async function getHousehold(req, res, next) {
   try {
     const hh = await findMine(req.user._id);
-    return res.json({ household: hh ? serialize(hh, req.user._id) : null });
+    if (!hh) return res.json({ household: null });
+    // Materialise this month's recurring bills before serving the wallet.
+    if (generateRecurringBills(hh)) {
+      await hh.save();
+      emitSync(hh);
+    }
+    return res.json({ household: serialize(hh, req.user._id) });
   } catch (err) {
     return next(err);
   }
@@ -200,6 +252,7 @@ async function createHousehold(req, res, next) {
         {
           userId: req.user._id,
           name: (req.user.name || 'You').slice(0, 60),
+          avatar: req.user.avatar || null,
           color: MEMBER_COLORS[0],
           role: 'owner',
         },
@@ -231,6 +284,7 @@ async function joinHousehold(req, res, next) {
     hh.members.push({
       userId: req.user._id,
       name: (req.user.name || 'Member').slice(0, 60),
+      avatar: req.user.avatar || null,
       color: pickColor(hh),
       role: 'member',
     });
@@ -395,17 +449,29 @@ async function deleteExpense(req, res, next) {
 async function addBill(req, res, next) {
   try {
     const hh = await loadMine(req);
+    const valid = memberIdSet(hh);
+    const mine = myMemberId(hh, req.user._id);
     const type = BILL_TYPES.includes(req.body.type) ? req.body.type : 'electricity';
+    const dueDate = parseDate(req.body.dueDate);
+    const status = req.body.status === 'paid' ? 'paid' : 'unpaid';
+    // Who fronted the money — defaults to whoever is adding the bill.
+    const paidBy = valid.has(String(req.body.paidBy)) ? String(req.body.paidBy) : mine;
+    const recurring = req.body.recurring === true || req.body.recurring === 'true';
     hh.bills.push({
       type,
       amount: clampNum(req.body.amount),
-      dueDate: parseDate(req.body.dueDate),
-      status: req.body.status === 'paid' ? 'paid' : 'unpaid',
-      paidDate: req.body.status === 'paid' ? new Date() : null,
+      dueDate,
+      status,
+      paidDate: status === 'paid' ? new Date() : null,
+      paidBy,
       reminder: req.body.reminder !== false,
-      createdBy: myMemberId(hh, req.user._id),
+      recurring,
+      dueDay: recurring ? clampDueDay(req.body.dueDay || dueDate.getDate()) : null,
+      period: monthKey(dueDate),
+      recurringOf: null,
+      createdBy: mine,
     });
-    pushActivity(hh, 'bill', 'Bill added', `${type} · ${taka(req.body.amount)}`);
+    pushActivity(hh, 'bill', recurring ? 'Recurring bill added' : 'Bill added', `${type} · ${taka(req.body.amount)}`);
     return commit(hh, req, res, 201);
   } catch (err) {
     return next(err);
@@ -418,15 +484,24 @@ async function updateBill(req, res, next) {
     const bill = hh.bills.id(req.params.id);
     if (!bill) throw ApiError.notFound('বিল পাওয়া যায়নি।');
     assertCanEdit(bill, myMemberId(hh, req.user._id));
+    const valid = memberIdSet(hh);
     const b = req.body || {};
     if (b.type !== undefined && BILL_TYPES.includes(b.type)) bill.type = b.type;
     if (b.amount !== undefined) bill.amount = clampNum(b.amount);
-    if (b.dueDate !== undefined) bill.dueDate = parseDate(b.dueDate);
+    if (b.dueDate !== undefined) { bill.dueDate = parseDate(b.dueDate); bill.period = monthKey(bill.dueDate); }
     if (b.reminder !== undefined) bill.reminder = !!b.reminder;
+    if (b.paidBy !== undefined && valid.has(String(b.paidBy))) bill.paidBy = String(b.paidBy);
+    if (b.recurring !== undefined) {
+      bill.recurring = b.recurring === true || b.recurring === 'true';
+      if (bill.recurring && !bill.dueDay) bill.dueDay = clampDueDay(new Date(bill.dueDate).getDate());
+    }
+    if (b.dueDay !== undefined) bill.dueDay = clampDueDay(b.dueDay);
     if (b.status !== undefined) {
       if (b.status === 'paid' && bill.status !== 'paid') {
         bill.status = 'paid';
         bill.paidDate = new Date();
+        // Attribute the payment so it flows into the ledger.
+        if (!bill.paidBy) bill.paidBy = myMemberId(hh, req.user._id);
         pushActivity(hh, 'bill', 'Bill paid', `${bill.type} · ${taka(bill.amount)}`);
       } else if (b.status === 'unpaid') {
         bill.status = 'unpaid';
