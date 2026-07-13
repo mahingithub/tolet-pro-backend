@@ -54,6 +54,7 @@ const ExpenseSchema = new mongoose.Schema(
     // Short receipt URL only. Base64 images are dropped server-side to protect
     // the 16MB document cap (shared receipt hosting = Cloudinary, future work).
     receipt: { type: String, default: null, maxlength: 512 },
+    createdBy: { type: String, default: null }, // member id of whoever added it (edit/delete owner)
     date: { type: Date, default: Date.now },
   },
   { _id: true, minimize: false },
@@ -67,6 +68,7 @@ const BillSchema = new mongoose.Schema(
     status: { type: String, enum: BILL_STATUS, default: 'unpaid' },
     paidDate: { type: Date, default: null },
     reminder: { type: Boolean, default: true },
+    createdBy: { type: String, default: null }, // member id of whoever added it (edit/delete owner)
   },
   { _id: true },
 );
@@ -87,6 +89,7 @@ const GrocerySchema = new mongoose.Schema(
     amount: { type: Number, default: 0, min: 0 },
     paidBy: { type: String, default: '' }, // member id
     note: { type: String, default: '', maxlength: 200 },
+    createdBy: { type: String, default: null }, // member id of whoever added it (edit/delete owner)
     date: { type: Date, default: Date.now },
   },
   { _id: true },

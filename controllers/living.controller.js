@@ -93,6 +93,14 @@ function pushActivity(hh, type, title, detail) {
   if (hh.activities.length > 60) hh.activities = hh.activities.slice(0, 60);
 }
 
+// Ownership rule: whoever ADDED an item is the only one who may edit/delete it.
+// (Legacy items with no `createdBy` stay editable by anyone so nothing locks up.)
+function assertCanEdit(item, myId) {
+  if (item.createdBy && String(item.createdBy) !== String(myId)) {
+    throw ApiError.forbidden('শুধু যিনি যোগ করেছেন তিনিই এটি এডিট বা মুছতে পারবেন।', { code: 'not_creator' });
+  }
+}
+
 // ── serialization ────────────────────────────────────────────────────────────
 // Per-user view: `me` + each roommate's `isMe` depend on who's asking.
 function serialize(hh, userId) {
@@ -120,18 +128,18 @@ function serialize(hh, userId) {
     expenses: hh.expenses.map((e) => ({
       id: String(e._id), category: e.category, amount: e.amount, paidBy: e.paidBy,
       splitWith: e.splitWith || [], splitType: e.splitType, shares: e.shares || {},
-      note: e.note, receipt: e.receipt || null, date: e.date,
+      note: e.note, receipt: e.receipt || null, createdBy: e.createdBy || null, date: e.date,
     })),
     bills: hh.bills.map((b) => ({
       id: String(b._id), type: b.type, amount: b.amount, dueDate: b.dueDate,
-      status: b.status, paidDate: b.paidDate || null, reminder: b.reminder,
+      status: b.status, paidDate: b.paidDate || null, reminder: b.reminder, createdBy: b.createdBy || null,
     })),
     meals: hh.meals.map((m) => ({
       id: String(m._id), date: m.date, roommateId: m.roommateId,
       breakfast: m.breakfast, lunch: m.lunch, dinner: m.dinner,
     })),
     groceries: hh.groceries.map((g) => ({
-      id: String(g._id), amount: g.amount, paidBy: g.paidBy, note: g.note, date: g.date,
+      id: String(g._id), amount: g.amount, paidBy: g.paidBy, note: g.note, createdBy: g.createdBy || null, date: g.date,
     })),
     settlements: hh.settlements.map((s) => ({
       id: String(s._id), from: s.from, to: s.to, amount: s.amount, method: s.method, note: s.note, date: s.date,
@@ -339,7 +347,9 @@ function buildExpense(hh, body, fallbackPaidBy) {
 async function addExpense(req, res, next) {
   try {
     const hh = await loadMine(req);
-    const item = buildExpense(hh, req.body, myMemberId(hh, req.user._id));
+    const mine = myMemberId(hh, req.user._id);
+    const item = buildExpense(hh, req.body, mine);
+    item.createdBy = mine;
     hh.expenses.unshift(item);
     pushActivity(hh, 'expense', 'Expense added', `${item.note || item.category} · ${taka(item.amount)}`);
     return commit(hh, req, res, 201);
@@ -353,6 +363,7 @@ async function updateExpense(req, res, next) {
     const hh = await loadMine(req);
     const item = hh.expenses.id(req.params.id);
     if (!item) throw ApiError.notFound('খরচ পাওয়া যায়নি।');
+    assertCanEdit(item, myMemberId(hh, req.user._id));
     const next2 = buildExpense(hh, { ...item.toObject(), ...req.body }, item.paidBy);
     item.set(next2);
     item.markModified('shares');
@@ -365,7 +376,9 @@ async function updateExpense(req, res, next) {
 async function deleteExpense(req, res, next) {
   try {
     const hh = await loadMine(req);
-    if (!hh.expenses.id(req.params.id)) throw ApiError.notFound('খরচ পাওয়া যায়নি।');
+    const item = hh.expenses.id(req.params.id);
+    if (!item) throw ApiError.notFound('খরচ পাওয়া যায়নি।');
+    assertCanEdit(item, myMemberId(hh, req.user._id));
     hh.expenses.pull(req.params.id);
     return commit(hh, req, res);
   } catch (err) {
@@ -385,6 +398,7 @@ async function addBill(req, res, next) {
       status: req.body.status === 'paid' ? 'paid' : 'unpaid',
       paidDate: req.body.status === 'paid' ? new Date() : null,
       reminder: req.body.reminder !== false,
+      createdBy: myMemberId(hh, req.user._id),
     });
     pushActivity(hh, 'bill', 'Bill added', `${type} · ${taka(req.body.amount)}`);
     return commit(hh, req, res, 201);
@@ -398,6 +412,7 @@ async function updateBill(req, res, next) {
     const hh = await loadMine(req);
     const bill = hh.bills.id(req.params.id);
     if (!bill) throw ApiError.notFound('বিল পাওয়া যায়নি।');
+    assertCanEdit(bill, myMemberId(hh, req.user._id));
     const b = req.body || {};
     if (b.type !== undefined && BILL_TYPES.includes(b.type)) bill.type = b.type;
     if (b.amount !== undefined) bill.amount = clampNum(b.amount);
@@ -422,7 +437,9 @@ async function updateBill(req, res, next) {
 async function deleteBill(req, res, next) {
   try {
     const hh = await loadMine(req);
-    if (!hh.bills.id(req.params.id)) throw ApiError.notFound('বিল পাওয়া যায়নি।');
+    const bill = hh.bills.id(req.params.id);
+    if (!bill) throw ApiError.notFound('বিল পাওয়া যায়নি।');
+    assertCanEdit(bill, myMemberId(hh, req.user._id));
     hh.bills.pull(req.params.id);
     return commit(hh, req, res);
   } catch (err) {
@@ -469,6 +486,7 @@ async function addGrocery(req, res, next) {
       amount: clampNum(req.body.amount),
       paidBy,
       note: String(req.body.note || '').slice(0, 200),
+      createdBy: myMemberId(hh, req.user._id),
       date: parseDate(req.body.date),
     });
     pushActivity(hh, 'meal', 'Grocery added', `${req.body.note || 'Meal groceries'} · ${taka(req.body.amount)}`);
@@ -481,7 +499,9 @@ async function addGrocery(req, res, next) {
 async function deleteGrocery(req, res, next) {
   try {
     const hh = await loadMine(req);
-    if (!hh.groceries.id(req.params.id)) throw ApiError.notFound('আইটেম পাওয়া যায়নি।');
+    const item = hh.groceries.id(req.params.id);
+    if (!item) throw ApiError.notFound('আইটেম পাওয়া যায়নি।');
+    assertCanEdit(item, myMemberId(hh, req.user._id));
     hh.groceries.pull(req.params.id);
     return commit(hh, req, res);
   } catch (err) {
