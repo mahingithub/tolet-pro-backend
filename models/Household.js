@@ -27,7 +27,7 @@ const mongoose = require('mongoose');
 
 const SPLIT_TYPES = ['equal', 'percentage', 'custom'];
 const BILL_TYPES = ['electricity', 'gas', 'water', 'internet'];
-const BILL_STATUS = ['paid', 'unpaid'];
+const BILL_STATUS = ['paid', 'unpaid', 'partial'];
 const METHODS = ['cash', 'bkash', 'nagad', 'bank'];
 
 const MemberSchema = new mongoose.Schema(
@@ -71,8 +71,11 @@ const BillSchema = new mongoose.Schema(
     status: { type: String, enum: BILL_STATUS, default: 'unpaid' },
     paidDate: { type: Date, default: null },
     // Who fronted the money. A PAID bill feeds the who-owes-whom ledger: the
-    // payer is credited the full amount, split equally across all members.
+    // payer is credited what they actually paid, split equally across members.
     paidBy: { type: String, default: '' }, // member id
+    // How much has been paid toward `amount`. Supports partial ("half") payment:
+    // full → paidAmount === amount (status 'paid'); partial → 0 < paidAmount < amount.
+    paidAmount: { type: Number, default: 0, min: 0 },
     reminder: { type: Boolean, default: true },
     // Recurring monthly bills (WiFi / electricity / water). The bill the user
     // flags `recurring` acts as the template; getHousehold lazily spawns one

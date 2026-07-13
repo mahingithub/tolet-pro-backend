@@ -18,7 +18,9 @@
  */
 
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const Household = require('../models/Household');
+const User = require('../models/User');
 const ApiError = require('../utils/ApiError');
 
 const { SPLIT_TYPES, BILL_TYPES, METHODS } = Household;
@@ -79,6 +81,15 @@ function myMemberId(hh, userId) {
   return m ? String(m._id) : null;
 }
 
+// The manager's member id — the household owner. They get full edit/delete
+// rights over every entry (the "Meal Manager has full access" rule).
+function ownerMemberId(hh) {
+  const m =
+    hh.members.find((x) => x.userId && String(x.userId) === String(hh.ownerUserId)) ||
+    hh.members.find((x) => x.role === 'owner');
+  return m ? String(m._id) : null;
+}
+
 function memberIdSet(hh) {
   return new Set(hh.members.map((m) => String(m._id)));
 }
@@ -99,12 +110,14 @@ function pushActivity(hh, type, title, detail) {
   if (hh.activities.length > 60) hh.activities = hh.activities.slice(0, 60);
 }
 
-// Ownership rule: whoever ADDED an item is the only one who may edit/delete it.
-// (Legacy items with no `createdBy` stay editable by anyone so nothing locks up.)
-function assertCanEdit(item, myId) {
-  if (item.createdBy && String(item.createdBy) !== String(myId)) {
-    throw ApiError.forbidden('শুধু যিনি যোগ করেছেন তিনিই এটি এডিট বা মুছতে পারবেন।', { code: 'not_creator' });
-  }
+// Ownership rule: whoever ADDED an item may edit/delete it. The household
+// MANAGER (owner) can edit/delete ANYTHING — full access. Legacy items with no
+// `createdBy` stay editable by anyone so nothing locks up.
+function assertCanEdit(item, myId, hh) {
+  if (!item.createdBy) return;
+  if (String(item.createdBy) === String(myId)) return;
+  if (hh && ownerMemberId(hh) && String(ownerMemberId(hh)) === String(myId)) return; // manager override
+  throw ApiError.forbidden('শুধু যিনি যোগ করেছেন বা ম্যানেজার এটি এডিট/মুছতে পারবেন।', { code: 'not_creator' });
 }
 
 // ── serialization ────────────────────────────────────────────────────────────
@@ -141,6 +154,7 @@ function serialize(hh, userId) {
     bills: hh.bills.map((b) => ({
       id: String(b._id), type: b.type, amount: b.amount, dueDate: b.dueDate,
       status: b.status, paidDate: b.paidDate || null, paidBy: b.paidBy || null,
+      paidAmount: b.paidAmount || 0,
       reminder: b.reminder, recurring: !!b.recurring, dueDay: b.dueDay || null,
       period: b.period || null, recurringOf: b.recurringOf || null, createdBy: b.createdBy || null,
     })),
@@ -298,6 +312,15 @@ async function joinHousehold(req, res, next) {
 async function leaveHousehold(req, res, next) {
   try {
     const hh = await loadMine(req);
+
+    // Dismissing the shared roommate wallet is destructive → require the caller
+    // to re-enter their login password (loaded fresh; req.user omits it).
+    const password = String(req.body.password || '');
+    if (!password) throw ApiError.badRequest('পাসওয়ার্ড দিন।', { code: 'password_required' });
+    const fresh = await User.findById(req.user._id).select('+password');
+    const ok = fresh && fresh.password && (await bcrypt.compare(password, fresh.password));
+    if (!ok) throw ApiError.unauthorized('পাসওয়ার্ড ভুল হয়েছে।', { code: 'invalid_password' });
+
     const meId = myMemberId(hh, req.user._id);
     if (meId) hh.members.pull(meId);
 
@@ -422,7 +445,7 @@ async function updateExpense(req, res, next) {
     const hh = await loadMine(req);
     const item = hh.expenses.id(req.params.id);
     if (!item) throw ApiError.notFound('খরচ পাওয়া যায়নি।');
-    assertCanEdit(item, myMemberId(hh, req.user._id));
+    assertCanEdit(item, myMemberId(hh, req.user._id), hh);
     const next2 = buildExpense(hh, { ...item.toObject(), ...req.body }, item.paidBy);
     item.set(next2);
     item.markModified('shares');
@@ -437,7 +460,7 @@ async function deleteExpense(req, res, next) {
     const hh = await loadMine(req);
     const item = hh.expenses.id(req.params.id);
     if (!item) throw ApiError.notFound('খরচ পাওয়া যায়নি।');
-    assertCanEdit(item, myMemberId(hh, req.user._id));
+    assertCanEdit(item, myMemberId(hh, req.user._id), hh);
     hh.expenses.pull(req.params.id);
     return commit(hh, req, res);
   } catch (err) {
@@ -464,6 +487,7 @@ async function addBill(req, res, next) {
       status,
       paidDate: status === 'paid' ? new Date() : null,
       paidBy,
+      paidAmount: status === 'paid' ? clampNum(req.body.amount) : 0,
       reminder: req.body.reminder !== false,
       recurring,
       dueDay: recurring ? clampDueDay(req.body.dueDay || dueDate.getDate()) : null,
@@ -483,7 +507,7 @@ async function updateBill(req, res, next) {
     const hh = await loadMine(req);
     const bill = hh.bills.id(req.params.id);
     if (!bill) throw ApiError.notFound('বিল পাওয়া যায়নি।');
-    assertCanEdit(bill, myMemberId(hh, req.user._id));
+    assertCanEdit(bill, myMemberId(hh, req.user._id), hh);
     const valid = memberIdSet(hh);
     const b = req.body || {};
     if (b.type !== undefined && BILL_TYPES.includes(b.type)) bill.type = b.type;
@@ -496,17 +520,36 @@ async function updateBill(req, res, next) {
       if (bill.recurring && !bill.dueDay) bill.dueDay = clampDueDay(new Date(bill.dueDate).getDate());
     }
     if (b.dueDay !== undefined) bill.dueDay = clampDueDay(b.dueDay);
-    if (b.status !== undefined) {
-      if (b.status === 'paid' && bill.status !== 'paid') {
-        bill.status = 'paid';
-        bill.paidDate = new Date();
-        // Attribute the payment so it flows into the ledger.
-        if (!bill.paidBy) bill.paidBy = myMemberId(hh, req.user._id);
-        pushActivity(hh, 'bill', 'Bill paid', `${bill.type} · ${taka(bill.amount)}`);
-      } else if (b.status === 'unpaid') {
-        bill.status = 'unpaid';
-        bill.paidDate = null;
+
+    // Payment state — full / partial ("half") / unpaid. `paidAmount` is how much
+    // has actually been paid toward the total; the ledger credits the payer for
+    // exactly that amount, split equally across members.
+    if (b.status !== undefined || b.paidAmount !== undefined) {
+      const total = Number(bill.amount) || 0;
+      const meId = myMemberId(hh, req.user._id);
+      let amt;
+      if (b.status === 'unpaid') amt = 0;
+      else if (b.status === 'paid') amt = total;
+      else if (b.paidAmount !== undefined) amt = Math.min(total, clampNum(b.paidAmount));
+      else amt = Number(bill.paidAmount) || 0; // status 'partial' with no amount → keep
+
+      if (amt <= 0) {
+        bill.status = 'unpaid'; bill.paidAmount = 0; bill.paidDate = null;
+      } else if (amt >= total) {
+        const was = bill.status;
+        bill.status = 'paid'; bill.paidAmount = total; bill.paidDate = new Date();
+        if (!bill.paidBy) bill.paidBy = meId;
+        if (was !== 'paid') pushActivity(hh, 'bill', 'Bill paid', `${bill.type} · ${taka(total)}`);
+      } else {
+        bill.status = 'partial'; bill.paidAmount = amt; bill.paidDate = new Date();
+        if (!bill.paidBy) bill.paidBy = meId;
+        pushActivity(hh, 'bill', 'Bill part-paid', `${bill.type} · ${taka(amt)} / ${taka(total)}`);
       }
+    } else if (b.amount !== undefined) {
+      // Amount edited without touching payment → keep paidAmount consistent.
+      const total = Number(bill.amount) || 0;
+      if (bill.status === 'paid') bill.paidAmount = total;
+      else if (bill.status === 'partial') bill.paidAmount = Math.min(Number(bill.paidAmount) || 0, total);
     }
     return commit(hh, req, res);
   } catch (err) {
@@ -519,7 +562,7 @@ async function deleteBill(req, res, next) {
     const hh = await loadMine(req);
     const bill = hh.bills.id(req.params.id);
     if (!bill) throw ApiError.notFound('বিল পাওয়া যায়নি।');
-    assertCanEdit(bill, myMemberId(hh, req.user._id));
+    assertCanEdit(bill, myMemberId(hh, req.user._id), hh);
     hh.bills.pull(req.params.id);
     return commit(hh, req, res);
   } catch (err) {
@@ -581,7 +624,7 @@ async function deleteGrocery(req, res, next) {
     const hh = await loadMine(req);
     const item = hh.groceries.id(req.params.id);
     if (!item) throw ApiError.notFound('আইটেম পাওয়া যায়নি।');
-    assertCanEdit(item, myMemberId(hh, req.user._id));
+    assertCanEdit(item, myMemberId(hh, req.user._id), hh);
     hh.groceries.pull(req.params.id);
     return commit(hh, req, res);
   } catch (err) {
@@ -617,7 +660,7 @@ async function deleteSettlement(req, res, next) {
     const hh = await loadMine(req);
     const item = hh.settlements.id(req.params.id);
     if (!item) throw ApiError.notFound('সেটেলমেন্ট পাওয়া যায়নি।');
-    assertCanEdit(item, myMemberId(hh, req.user._id));
+    assertCanEdit(item, myMemberId(hh, req.user._id), hh);
     hh.settlements.pull(req.params.id);
     return commit(hh, req, res);
   } catch (err) {
@@ -651,7 +694,7 @@ async function deleteDeposit(req, res, next) {
     const hh = await loadMine(req);
     const item = hh.deposits.id(req.params.id);
     if (!item) throw ApiError.notFound('জমা পাওয়া যায়নি।');
-    assertCanEdit(item, myMemberId(hh, req.user._id));
+    assertCanEdit(item, myMemberId(hh, req.user._id), hh);
     hh.deposits.pull(req.params.id);
     return commit(hh, req, res);
   } catch (err) {
