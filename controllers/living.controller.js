@@ -141,6 +141,9 @@ function serialize(hh, userId) {
     groceries: hh.groceries.map((g) => ({
       id: String(g._id), amount: g.amount, paidBy: g.paidBy, note: g.note, createdBy: g.createdBy || null, date: g.date,
     })),
+    deposits: (hh.deposits || []).map((d) => ({
+      id: String(d._id), roommateId: d.roommateId, amount: d.amount, note: d.note, createdBy: d.createdBy || null, date: d.date,
+    })),
     settlements: hh.settlements.map((s) => ({
       id: String(s._id), from: s.from, to: s.to, amount: s.amount, method: s.method, note: s.note, createdBy: s.createdBy || null, date: s.date,
     })),
@@ -545,6 +548,40 @@ async function deleteSettlement(req, res, next) {
   }
 }
 
+// ═══════════════════════════════════ DEPOSITS (মেস জমা) ══════════════════════
+async function addDeposit(req, res, next) {
+  try {
+    const hh = await loadMine(req);
+    const valid = memberIdSet(hh);
+    const roommateId = valid.has(String(req.body.roommateId)) ? String(req.body.roommateId) : myMemberId(hh, req.user._id);
+    hh.deposits.unshift({
+      roommateId,
+      amount: clampNum(req.body.amount),
+      note: String(req.body.note || '').slice(0, 200),
+      createdBy: myMemberId(hh, req.user._id),
+      date: parseDate(req.body.date),
+    });
+    const m = hh.members.id(roommateId);
+    pushActivity(hh, 'meal', 'Deposit added', `${m?.name || 'Someone'} deposited ${taka(req.body.amount)}`);
+    return commit(hh, req, res, 201);
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function deleteDeposit(req, res, next) {
+  try {
+    const hh = await loadMine(req);
+    const item = hh.deposits.id(req.params.id);
+    if (!item) throw ApiError.notFound('জমা পাওয়া যায়নি।');
+    assertCanEdit(item, myMemberId(hh, req.user._id));
+    hh.deposits.pull(req.params.id);
+    return commit(hh, req, res);
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   getHousehold,
   createHousehold,
@@ -565,4 +602,6 @@ module.exports = {
   deleteGrocery,
   addSettlement,
   deleteSettlement,
+  addDeposit,
+  deleteDeposit,
 };

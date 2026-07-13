@@ -45,4 +45,8 @@ router.delete('/groceries/:id', ctrl.deleteGrocery);
 router.post('/settlements', ctrl.addSettlement);
 router.delete('/settlements/:id', ctrl.deleteSettlement);
 
+// ── mess deposits (জমা) ──────────────────────────────────────────────────────
+router.post('/deposits', ctrl.addDeposit);
+router.delete('/deposits/:id', ctrl.deleteDeposit);
+
 module.exports = router;

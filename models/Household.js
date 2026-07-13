@@ -118,6 +118,18 @@ const ActivitySchema = new mongoose.Schema(
   { _id: true },
 );
 
+// Mess deposit (জমা) — money a member puts into the shared meal fund.
+const DepositSchema = new mongoose.Schema(
+  {
+    roommateId: { type: String, default: '' }, // member id who deposited
+    amount: { type: Number, default: 0, min: 0 },
+    note: { type: String, default: '', maxlength: 200 },
+    createdBy: { type: String, default: null },
+    date: { type: Date, default: Date.now },
+  },
+  { _id: true },
+);
+
 const HouseholdSchema = new mongoose.Schema(
   {
     name: { type: String, trim: true, default: 'Our Flat', maxlength: 80 },
@@ -139,6 +151,7 @@ const HouseholdSchema = new mongoose.Schema(
     bills: { type: [BillSchema], default: [] },
     meals: { type: [MealSchema], default: [] },
     groceries: { type: [GrocerySchema], default: [] },
+    deposits: { type: [DepositSchema], default: [] },
     settlements: { type: [SettlementSchema], default: [] },
     activities: { type: [ActivitySchema], default: [] },
   },
