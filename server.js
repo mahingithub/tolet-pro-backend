@@ -121,6 +121,8 @@ app.use('/api/payment-methods', require('./routes/paymentMethod.routes'));
 app.use('/api/rent-payments',   writeLimiter, require('./routes/rentPayment.routes'));
 app.use('/api/documents',      require('./routes/document.routes'));
 app.use('/api/billing',        require('./routes/billing.routes'));
+// Connected "Roommate Wallet" — shared household ledger (Living tab).
+app.use('/api/living',         require('./routes/living.routes'));
 // MEDIUM limiter on support ticket creation (spam-prone).
 app.use('/api/helpdesk',       writeLimiter, require('./routes/support.routes'));
 app.use('/api/users/me',       require('./routes/privacy.routes')); // Phase 7
