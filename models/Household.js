@@ -57,7 +57,9 @@ const ExpenseSchema = new mongoose.Schema(
     // Short receipt URL only. Base64 images are dropped server-side to protect
     // the 16MB document cap (shared receipt hosting = Cloudinary, future work).
     receipt: { type: String, default: null, maxlength: 512 },
-    createdBy: { type: String, default: null }, // member id of whoever added it (edit/delete owner)
+    createdBy: { type: String, default: null }, // member id of whoever added it
+    editedBy: { type: String, default: null }, // member id of whoever last edited it
+    editedAt: { type: Date, default: null },
     date: { type: Date, default: Date.now },
   },
   { _id: true, minimize: false },
@@ -84,7 +86,9 @@ const BillSchema = new mongoose.Schema(
     dueDay: { type: Number, default: null, min: 1, max: 28 }, // day-of-month for recurring
     period: { type: String, default: '' }, // 'YYYY-MM' this bill belongs to
     recurringOf: { type: String, default: null }, // template bill id (for generated instances)
-    createdBy: { type: String, default: null }, // member id of whoever added it (edit/delete owner)
+    createdBy: { type: String, default: null }, // member id of whoever added it
+    editedBy: { type: String, default: null }, // member id of whoever last edited it
+    editedAt: { type: Date, default: null },
   },
   { _id: true },
 );

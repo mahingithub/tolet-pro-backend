@@ -110,14 +110,12 @@ function pushActivity(hh, type, title, detail) {
   if (hh.activities.length > 60) hh.activities = hh.activities.slice(0, 60);
 }
 
-// Ownership rule: whoever ADDED an item may edit/delete it. The household
-// MANAGER (owner) can edit/delete ANYTHING — full access. Legacy items with no
-// `createdBy` stay editable by anyone so nothing locks up.
-function assertCanEdit(item, myId, hh) {
-  if (!item.createdBy) return;
-  if (String(item.createdBy) === String(myId)) return;
-  if (hh && ownerMemberId(hh) && String(ownerMemberId(hh)) === String(myId)) return; // manager override
-  throw ApiError.forbidden('শুধু যিনি যোগ করেছেন বা ম্যানেজার এটি এডিট/মুছতে পারবেন।', { code: 'not_creator' });
+// Collaborative editing: EVERY member can edit/delete ANY entry — it's a shared
+// wallet, so we keep it fully open and user-friendly. We don't block anyone; we
+// just record WHO made the last edit (see editedBy) so there's a clear trail.
+// Kept as a no-op function so all call sites stay unchanged.
+function assertCanEdit() {
+  /* open to all household members */
 }
 
 // ── serialization ────────────────────────────────────────────────────────────
@@ -149,7 +147,8 @@ function serialize(hh, userId) {
     expenses: hh.expenses.map((e) => ({
       id: String(e._id), category: e.category, amount: e.amount, paidBy: e.paidBy,
       splitWith: e.splitWith || [], splitType: e.splitType, shares: e.shares || {},
-      note: e.note, receipt: e.receipt || null, createdBy: e.createdBy || null, date: e.date,
+      note: e.note, receipt: e.receipt || null, createdBy: e.createdBy || null,
+      editedBy: e.editedBy || null, editedAt: e.editedAt || null, date: e.date,
     })),
     bills: hh.bills.map((b) => ({
       id: String(b._id), type: b.type, amount: b.amount, dueDate: b.dueDate,
@@ -157,6 +156,7 @@ function serialize(hh, userId) {
       paidAmount: b.paidAmount || 0,
       reminder: b.reminder, recurring: !!b.recurring, dueDay: b.dueDay || null,
       period: b.period || null, recurringOf: b.recurringOf || null, createdBy: b.createdBy || null,
+      editedBy: b.editedBy || null, editedAt: b.editedAt || null,
     })),
     meals: hh.meals.map((m) => ({
       id: String(m._id), date: m.date, roommateId: m.roommateId,
@@ -448,6 +448,8 @@ async function updateExpense(req, res, next) {
     assertCanEdit(item, myMemberId(hh, req.user._id), hh);
     const next2 = buildExpense(hh, { ...item.toObject(), ...req.body }, item.paidBy);
     item.set(next2);
+    item.editedBy = myMemberId(hh, req.user._id); // trail: who last edited
+    item.editedAt = new Date();
     item.markModified('shares');
     return commit(hh, req, res);
   } catch (err) {
@@ -550,6 +552,13 @@ async function updateBill(req, res, next) {
       const total = Number(bill.amount) || 0;
       if (bill.status === 'paid') bill.paidAmount = total;
       else if (bill.status === 'partial') bill.paidAmount = Math.min(Number(bill.paidAmount) || 0, total);
+    }
+
+    // Record the editor when the bill DEFINITION changed (not for a pure payment,
+    // where paidBy already tracks who paid).
+    if (['type', 'amount', 'dueDate', 'reminder', 'recurring', 'dueDay'].some((k) => b[k] !== undefined)) {
+      bill.editedBy = myMemberId(hh, req.user._id);
+      bill.editedAt = new Date();
     }
     return commit(hh, req, res);
   } catch (err) {
