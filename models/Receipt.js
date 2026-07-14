@@ -33,7 +33,8 @@ const ReceiptSchema = new mongoose.Schema(
     // member gets their own one-receipt-per-month guarantee.
     memberId:   { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
     memberName: { type: String, trim: true, default: '' },
-    propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true },
+    // Optional — manual (non-listed) bookings have no propertyId.
+    propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', default: null },
 
     propertyTitle: { type: String, trim: true, default: '' },
     propertyImage: { type: String, trim: true, default: '' },

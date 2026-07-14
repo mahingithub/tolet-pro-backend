@@ -101,7 +101,10 @@ const BookingSchema = new mongoose.Schema(
   {
     landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     tenantId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
-    propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true, index: true },
+    // Optional: a booking is either linked to a listing (propertyId) OR created
+    // manually with just a typed property name (propertyId null). Manual entry
+    // lets a host add multiple bookings that aren't tied to a single listing.
+    propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', default: null, index: true },
     inquiryId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Inquiry', default: null },
 
     // Denormalized display fields so dashboards don't need JOINs every render.

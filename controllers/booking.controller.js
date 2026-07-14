@@ -134,6 +134,7 @@ async function buildMemberFromInput(raw = {}, defaults = {}) {
 // sublet / hostel / …) drives multi-member (HOSTEL) vs single-tenant; the
 // `rentalType` defaults a member's rentType.
 async function fetchPropertyMeta(propertyId) {
+  if (!propertyId || !isObjectId(propertyId)) return { type: '', rentalType: 'flat' };
   const prop = await require('../models/Property').findById(propertyId).select('type rentalType').lean().catch(() => null);
   return {
     type: prop?.type || '',
@@ -158,7 +159,10 @@ async function createBooking(req, res, next) {
       members, floorNumber, roomNumber,
     } = req.body;
 
-    if (!propertyId) throw ApiError.badRequest('propertyId আবশ্যক।');
+    // Either a linked listing (propertyId) OR a manually typed property name.
+    if (!propertyId && !(property && String(property).trim())) {
+      throw ApiError.badRequest('প্রপার্টি আবশ্যক (লিস্টিং বাছুন অথবা নাম লিখুন)।');
+    }
     if (!leaseStart || !leaseEnd) throw ApiError.badRequest('লিজের তারিখ আবশ্যক।');
     if (new Date(leaseStart) >= new Date(leaseEnd)) {
       throw ApiError.badRequest('লিজ শুরুর তারিখ শেষের আগে হতে হবে।');
@@ -201,7 +205,7 @@ async function createBooking(req, res, next) {
     const booking = await Booking.create({
       landlordId:       req.user._id,
       tenantId:         linkedTenantId,
-      propertyId:       propertyId,
+      propertyId:       (propertyId && isObjectId(propertyId)) ? propertyId : null,
       inquiryId:        inquiryId && isObjectId(inquiryId) ? inquiryId : null,
       property:         property || '',
       location:         location || '',
