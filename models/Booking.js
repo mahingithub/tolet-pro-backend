@@ -113,6 +113,10 @@ const BookingSchema = new mongoose.Schema(
     // can decide multi-member (HOSTEL only) vs classic single-tenant (everything
     // else) without a JOIN. Empty on legacy rows until the migration backfills it.
     propertyType: { type: String, trim: true, default: '', maxlength: 40 },
+    // Unit location within the property. Floor for all formats; room number for
+    // single-room + hostel bookings. Hostel seats live per-member (members[]).
+    floorNumber: { type: String, trim: true, default: '', maxlength: 40 },
+    roomNumber:  { type: String, trim: true, default: '', maxlength: 40 },
     tenant:      { type: String, trim: true, default: '', maxlength: 100 },
     tenantPhone: { type: String, trim: true, default: '', maxlength: 20 },
     // How many people will live in the unit (prefilled from the tenant's

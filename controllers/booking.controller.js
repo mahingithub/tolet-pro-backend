@@ -155,7 +155,7 @@ async function createBooking(req, res, next) {
       tenantsCount, leaseStart, leaseEnd, monthlyRent, rentDueDay,
       reminderLeadDays, autoReminder, serviceCharge,
       securityDeposit, advancePayment, paymentMethod, notes, chatId, tenantId,
-      members,
+      members, floorNumber, roomNumber,
     } = req.body;
 
     if (!propertyId) throw ApiError.badRequest('propertyId আবশ্যক।');
@@ -206,6 +206,8 @@ async function createBooking(req, res, next) {
       property:         property || '',
       location:         location || '',
       propertyType:     req.body.propertyType || propMeta.type || '',
+      floorNumber:      floorNumber || '',
+      roomNumber:       roomNumber || '',
       tenant:           tenant || '',
       tenantPhone:      (tenantPhone && tenantPhone.trim().length >= 10) ? tenantPhone.trim() : null,
       tenantsCount:     Math.max(1, Number(tenantsCount) || 1),
@@ -447,6 +449,7 @@ async function updateBooking(req, res, next) {
       'notes', 'serviceCharge', 'securityDeposit', 'status',
       'tenant', 'tenantPhone', 'tenantId', 'tenantsCount',
       'advancePayment', 'paymentMethod', 'location',
+      'floorNumber', 'roomNumber', 'propertyType',
     ];
     for (const key of whitelist) {
       if (req.body[key] !== undefined) {
