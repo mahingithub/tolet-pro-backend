@@ -28,6 +28,11 @@ const ReceiptSchema = new mongoose.Schema(
     bookingId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', required: true, index: true },
     landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     tenantId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+    // Which member (occupant) this receipt belongs to. null = legacy
+    // single-tenant / whole-unit receipt. Part of the unique key below so each
+    // member gets their own one-receipt-per-month guarantee.
+    memberId:   { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+    memberName: { type: String, trim: true, default: '' },
     propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true },
 
     propertyTitle: { type: String, trim: true, default: '' },
@@ -65,8 +70,13 @@ const ReceiptSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// One receipt per booking per month — upsert pattern prevents duplicates.
-ReceiptSchema.index({ bookingId: 1, monthKey: 1 }, { unique: true });
+// One receipt per booking per MEMBER per month — upsert prevents duplicates.
+// For legacy / whole-unit receipts memberId is null, so {bookingId, null,
+// monthKey} stays unique per booking-month (the old one-per-month guarantee);
+// per-member receipts differ by memberId so each occupant gets their own.
+// NOTE: the OLD {bookingId, monthKey} unique index must be dropped in the
+// database before this one takes effect — see scripts/migrateBookingMembers.js.
+ReceiptSchema.index({ bookingId: 1, memberId: 1, monthKey: 1 }, { unique: true });
 
 ReceiptSchema.set('toJSON', {
   virtuals: true,

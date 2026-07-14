@@ -59,6 +59,83 @@ function notifySocket(userId, event, payload) {
   }
 }
 
+// ─── multi-member helpers ─────────────────────────────────────────────────────
+
+// Short shareable invite code (mirrors Household). Uppercase, ambiguous
+// characters (I/O/0/1) removed so it's easy to read aloud / type.
+function genInviteCode(len = 6) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < len; i += 1) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out;
+}
+
+// A code guaranteed not to collide with an existing booking. Falls back to a
+// longer code in the astronomically unlikely event of repeated collisions.
+async function uniqueInviteCode() {
+  for (let i = 0; i < 6; i += 1) {
+    const code = genInviteCode();
+    // eslint-disable-next-line no-await-in-loop
+    const exists = await Booking.exists({ inviteCode: code });
+    if (!exists) return code;
+  }
+  return genInviteCode(9);
+}
+
+// lean() leaves _id as an ObjectId on the booking AND each member and skips the
+// toJSON transform. Normalise both to a string `id` for the client (member
+// ledgers are already plain objects from lean()).
+function shapeBookingLean(b) {
+  if (!b) return b;
+  b.id = String(b._id);
+  delete b._id;
+  if (Array.isArray(b.members)) {
+    b.members.forEach((m) => { if (m && m._id) { m.id = String(m._id); delete m._id; } });
+  }
+  return b;
+}
+
+// Find a member subdoc by id on a (non-lean) booking document.
+function findMember(booking, memberId) {
+  if (!booking || !Array.isArray(booking.members)) return null;
+  try { return booking.members.id(memberId) || null; } catch { return null; }
+}
+
+// Build a validated member object from raw client input, applying booking /
+// property defaults (Requirement 1.4, 2.5). Resolves a real userId by phone so
+// Profile / Call / Message work for members who already have an account.
+async function buildMemberFromInput(raw = {}, defaults = {}) {
+  const name  = String(raw.name || '').trim().slice(0, 100);
+  const phone = (raw.phone && String(raw.phone).trim().length >= 10) ? String(raw.phone).trim() : '';
+  let userId = raw.userId && isObjectId(raw.userId) ? raw.userId : null;
+  if (!userId && phone) userId = await resolveUserIdByPhone(phone);
+  const rentType = ['flat', 'room', 'seat'].includes(raw.rentType)
+    ? raw.rentType
+    : (['flat', 'room', 'seat'].includes(defaults.rentType) ? defaults.rentType : 'flat');
+  const reqRent = Number(raw.monthlyRent);
+  return {
+    userId,
+    name,
+    phone,
+    avatar:    raw.avatar || '',
+    rentType,
+    floor:     String(raw.floor || '').trim().slice(0, 40),
+    roomLabel: String(raw.roomLabel || '').trim().slice(0, 40),
+    seatLabel: String(raw.seatLabel || '').trim().slice(0, 40),
+    monthlyRent:     reqRent > 0 ? reqRent : (Number(defaults.monthlyRent) || 0),
+    serviceCharge:   Math.max(0, Number(raw.serviceCharge) || 0),
+    securityDeposit: Math.max(0, Number(raw.securityDeposit) || 0),
+    joinDate:    raw.joinDate ? new Date(raw.joinDate) : new Date(),
+    status:      'active',
+  };
+}
+
+// Default a member's rentType from the property's rentalType (mixed → flat).
+async function propertyRentTypeDefault(propertyId) {
+  const prop = await require('../models/Property').findById(propertyId).select('rentalType').lean().catch(() => null);
+  return prop && ['flat', 'room', 'seat'].includes(prop.rentalType) ? prop.rentalType : 'flat';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/bookings — landlord creates a booking (Convert Inquiry → Lease)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,6 +146,7 @@ async function createBooking(req, res, next) {
       tenantsCount, leaseStart, leaseEnd, monthlyRent, rentDueDay,
       reminderLeadDays, autoReminder, serviceCharge,
       securityDeposit, advancePayment, paymentMethod, notes, chatId, tenantId,
+      members,
     } = req.body;
 
     if (!propertyId) throw ApiError.badRequest('propertyId আবশ্যক।');
@@ -96,6 +174,19 @@ async function createBooking(req, res, next) {
       }
     }
 
+    // Build any initial members (multi-member bookings) + a fresh invite code
+    // so occupants can self-join. rentType defaults from the property.
+    const rentTypeDefault = await propertyRentTypeDefault(propertyId);
+    const initialMembers = [];
+    if (Array.isArray(members)) {
+      for (const raw of members.slice(0, 200)) {
+        // eslint-disable-next-line no-await-in-loop
+        const m = await buildMemberFromInput(raw, { monthlyRent: rent, rentType: rentTypeDefault });
+        if (m.name || m.phone) initialMembers.push(m);
+      }
+    }
+    const inviteCode = await uniqueInviteCode();
+
     const booking = await Booking.create({
       landlordId:       req.user._id,
       tenantId:         linkedTenantId,
@@ -118,6 +209,8 @@ async function createBooking(req, res, next) {
       securityDeposit:  Number(securityDeposit) || 0,
       notes:            notes || '',
       chatId:           chatId || '',
+      members:          initialMembers,
+      inviteCode,
     });
 
     // Property-কে rented mark করি যেন public listing থেকে সরে যায় + reload-এও থাকে।
@@ -188,6 +281,10 @@ async function listHostBookings(req, res, next) {
       b.tenantAvatar = (b.tenantId && b.tenantId.avatar) || b.tenantAvatar || '';
       if (b.tenantId && b.tenantId._id) b.tenantId = b.tenantId._id;
       delete b._id;
+      // Normalise member ids for the client (lean skips toJSON).
+      if (Array.isArray(b.members)) {
+        b.members.forEach((m) => { if (m && m._id) { m.id = String(m._id); delete m._id; } });
+      }
     });
     return res.json({ bookings });
   } catch (err) {
@@ -200,14 +297,45 @@ async function listHostBookings(req, res, next) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function listTenantBookings(req, res, next) {
   try {
-    const conditions = [{ tenantId: req.user._id }];
+    // Match the viewer as the single tenant OR as one of the booking's members
+    // (by linked userId or by phone).
+    const conditions = [{ tenantId: req.user._id }, { 'members.userId': req.user._id }];
     if (req.user.phone) {
       conditions.push({ tenantPhone: req.user.phone });
+      conditions.push({ 'members.phone': req.user.phone });
     }
     const bookings = await Booking.find({ $or: conditions, status: { $ne: 'cancelled' } })
       .sort({ createdAt: -1 })
       .lean();
-    bookings.forEach(b => { b.id = String(b._id); delete b._id; });
+
+    const myPhoneCore = phoneCore(req.user.phone);
+    bookings.forEach(b => {
+      b.id = String(b._id);
+      delete b._id;
+      // Viewer scoping (Requirement 7.3): a tenant only sees THEIR OWN member
+      // ledger. Co-tenants stay visible for context (name/space) but their
+      // financial ledger is stripped so one occupant can't read another's rent.
+      if (Array.isArray(b.members) && b.members.length) {
+        b.members = b.members.map((m) => {
+          const id = m && m._id ? String(m._id) : m.id;
+          const isMine = (m.userId && String(m.userId) === String(req.user._id))
+            || (myPhoneCore && phoneCore(m.phone) === myPhoneCore);
+          if (isMine) {
+            return { ...m, id, _id: undefined };
+          }
+          return {
+            id,
+            name: m.name,
+            avatar: m.avatar,
+            rentType: m.rentType,
+            floor: m.floor,
+            roomLabel: m.roomLabel,
+            seatLabel: m.seatLabel,
+            status: m.status,
+          };
+        });
+      }
+    });
     return res.json({ bookings });
   } catch (err) {
     return next(err);
@@ -367,6 +495,264 @@ async function cancelBooking(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/:id/members — add an occupant to a booking
+// ─────────────────────────────────────────────────────────────────────────────
+async function addMember(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isObjectId(id)) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+
+    const booking = await Booking.findById(id);
+    if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+    if (String(booking.landlordId) !== String(req.user._id)) {
+      throw ApiError.forbidden('এই বুকিং আপনার নয়।');
+    }
+
+    const rentTypeDefault = await propertyRentTypeDefault(booking.propertyId);
+    const memberDoc = await buildMemberFromInput(req.body, {
+      monthlyRent: booking.monthlyRent,
+      rentType:    rentTypeDefault,
+    });
+    if (!memberDoc.name && !memberDoc.phone) {
+      throw ApiError.badRequest('সদস্যের নাম অথবা ফোন আবশ্যক।');
+    }
+
+    booking.members.push(memberDoc);
+    if (!booking.inviteCode) booking.inviteCode = await uniqueInviteCode();
+    await booking.save();
+
+    const created = booking.members[booking.members.length - 1];
+    // Tell a linked member (real account) they were added — realtime + bell.
+    if (created.userId) {
+      notifySocket(created.userId, 'rent:updated', { bookingId: String(booking._id) });
+      notifications.emit({
+        userId: created.userId,
+        type:   'rent_updated',
+        title:  'আপনাকে একটি ভাড়ায় যুক্ত করা হয়েছে।',
+        body:   `${booking.property || 'একটি প্রপার্টিতে'} আপনাকে সদস্য হিসেবে যুক্ত করা হয়েছে।`,
+        data:   { bookingId: String(booking._id), memberId: String(created._id) },
+      });
+    }
+
+    invalidateInsightsCache(req.user._id);
+    return res.status(201).json({ booking });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/bookings/:id/members/:memberId — edit an occupant
+// ─────────────────────────────────────────────────────────────────────────────
+async function updateMember(req, res, next) {
+  try {
+    const { id, memberId } = req.params;
+    if (!isObjectId(id)) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+
+    const booking = await Booking.findById(id);
+    if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+    if (String(booking.landlordId) !== String(req.user._id)) {
+      throw ApiError.forbidden('এই বুকিং আপনার নয়।');
+    }
+    const member = findMember(booking, memberId);
+    if (!member) throw ApiError.notFound('সদস্য পাওয়া যায়নি।');
+
+    const whitelist = [
+      'name', 'phone', 'avatar', 'rentType', 'floor', 'roomLabel', 'seatLabel',
+      'monthlyRent', 'serviceCharge', 'securityDeposit', 'joinDate', 'moveOutDate', 'status',
+    ];
+    for (const key of whitelist) {
+      if (req.body[key] !== undefined) member[key] = req.body[key];
+    }
+    // If a phone was (re)set and no account is linked yet, try to link one.
+    if (req.body.phone !== undefined && !member.userId && member.phone) {
+      const uid = await resolveUserIdByPhone(member.phone);
+      if (uid) member.userId = uid;
+    }
+
+    await booking.save();
+    if (member.userId) {
+      notifySocket(member.userId, 'rent:updated', { bookingId: String(booking._id), memberId: String(member._id) });
+    }
+    return res.json({ booking });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/bookings/:id/members/:memberId — move a member out (soft) or
+// hard-remove (?hard=true, e.g. added by mistake).
+// ─────────────────────────────────────────────────────────────────────────────
+async function removeMember(req, res, next) {
+  try {
+    const { id, memberId } = req.params;
+    if (!isObjectId(id)) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+
+    const booking = await Booking.findById(id);
+    if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+    if (String(booking.landlordId) !== String(req.user._id)) {
+      throw ApiError.forbidden('এই বুকিং আপনার নয়।');
+    }
+    const member = findMember(booking, memberId);
+    if (!member) throw ApiError.notFound('সদস্য পাওয়া যায়নি।');
+
+    const linkedUserId = member.userId;
+    if (req.query.hard === 'true') {
+      // Hard delete — wipe the member and their receipts (mistaken add).
+      booking.members.pull(memberId);
+      await Receipt.deleteMany({ bookingId: booking._id, memberId }).catch(() => {});
+    } else {
+      // Soft move-out — keep rent history for records (Requirement 6.3).
+      member.status = 'moved-out';
+      member.moveOutDate = new Date();
+    }
+    await booking.save();
+
+    if (linkedUserId) {
+      notifySocket(linkedUserId, 'rent:updated', { bookingId: String(booking._id) });
+    }
+    return res.json({ booking });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/bookings/:id/members/:memberId/ledger/:monthKey — mark a member's
+// rent paid/partial/due for a month.
+// ─────────────────────────────────────────────────────────────────────────────
+async function updateMemberLedger(req, res, next) {
+  try {
+    const { id, memberId, monthKey } = req.params;
+    if (!isObjectId(id)) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+    if (!monthKey || !/^\d{4}-\d{2}$/.test(monthKey)) {
+      throw ApiError.badRequest('মাসের ফর্ম্যাট: YYYY-MM');
+    }
+
+    const booking = await Booking.findById(id);
+    if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+    if (String(booking.landlordId) !== String(req.user._id)) {
+      throw ApiError.forbidden('এই বুকিং আপনার নয়।');
+    }
+    const member = findMember(booking, memberId);
+    if (!member) throw ApiError.notFound('সদস্য পাওয়া যায়নি।');
+
+    // Same shared write path as legacy — ledger row + receipt + notify stay
+    // consistent; passing `member` scopes it all to this occupant.
+    const updated = await applyPayment({
+      booking,
+      member,
+      monthKey,
+      source: 'manual',
+      payment: {
+        status:        req.body.status || 'full',
+        paidOn:        req.body.paidOn,
+        method:        req.body.method,
+        txnId:         req.body.txnId,
+        amount:        req.body.amount,
+        balance:       req.body.balance,
+        lateFee:       req.body.lateFee,
+        dueNote:       req.body.dueNote,
+        expectedPayBy: req.body.expectedPayBy,
+        monthLabel:    req.body.monthLabel,
+        totalDue:      req.body.totalDue,
+      },
+    });
+
+    if (member.userId) {
+      notifySocket(member.userId, 'rent:updated', { bookingId: String(booking._id), memberId: String(member._id) });
+    }
+    return res.json({ booking: updated });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/bookings/:id/members/:memberId/ledger/:monthKey — undo a member's
+// payment record for a month.
+// ─────────────────────────────────────────────────────────────────────────────
+async function undoMemberLedger(req, res, next) {
+  try {
+    const { id, memberId, monthKey } = req.params;
+    if (!isObjectId(id)) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+
+    const booking = await Booking.findById(id);
+    if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+    if (String(booking.landlordId) !== String(req.user._id)) {
+      throw ApiError.forbidden('এই বুকিং আপনার নয়।');
+    }
+    const member = findMember(booking, memberId);
+    if (!member) throw ApiError.notFound('সদস্য পাওয়া যায়নি।');
+
+    member.ledger.delete(monthKey);
+    booking.markModified('members');
+    await booking.save();
+    await Receipt.deleteOne({ bookingId: booking._id, memberId: member._id, monthKey }).catch(() => {});
+
+    if (member.userId) {
+      notifySocket(member.userId, 'rent:updated', { bookingId: String(booking._id), memberId: String(member._id) });
+    }
+    const updated = shapeBookingLean(await Booking.findById(id).lean());
+    return res.json({ booking: updated });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/join — a tenant self-joins a booking with an invite code.
+// Links to a phone-matched placeholder member, or creates a new member.
+// ─────────────────────────────────────────────────────────────────────────────
+async function joinByInvite(req, res, next) {
+  try {
+    const code = String(req.body.inviteCode || '').trim().toUpperCase();
+    if (!code) throw ApiError.badRequest('ইনভাইট কোড আবশ্যক।');
+
+    const booking = await Booking.findOne({ inviteCode: code, status: { $ne: 'cancelled' } });
+    if (!booking) throw ApiError.notFound('এই কোডে কোনো বুকিং পাওয়া যায়নি।');
+
+    // Already joined?
+    let member = booking.members.find((m) => m.userId && String(m.userId) === String(req.user._id)) || null;
+
+    if (!member) {
+      // Match a placeholder occupant by phone, else add a brand-new member.
+      const myPhoneCore = phoneCore(req.user.phone);
+      const placeholder = myPhoneCore
+        ? booking.members.find((m) => !m.userId && phoneCore(m.phone) === myPhoneCore)
+        : null;
+
+      if (placeholder) {
+        placeholder.userId = req.user._id;
+        if (!placeholder.name && req.user.name) placeholder.name = req.user.name;
+        if (!placeholder.avatar && req.user.avatar) placeholder.avatar = req.user.avatar;
+        member = placeholder;
+      } else {
+        booking.members.push({
+          userId:      req.user._id,
+          name:        req.user.name || '',
+          phone:       req.user.phone || '',
+          avatar:      req.user.avatar || '',
+          rentType:    await propertyRentTypeDefault(booking.propertyId),
+          monthlyRent: booking.monthlyRent || 0,
+          status:      'active',
+        });
+        member = booking.members[booking.members.length - 1];
+      }
+      await booking.save();
+    }
+
+    // Let the landlord's dashboard update in realtime.
+    notifySocket(booking.landlordId, 'rent:updated', { bookingId: String(booking._id) });
+
+    return res.json({ booking, memberId: String(member._id) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   createBooking,
   listHostBookings,
@@ -375,4 +761,10 @@ module.exports = {
   undoLedger,
   updateBooking,
   cancelBooking,
+  addMember,
+  updateMember,
+  removeMember,
+  updateMemberLedger,
+  undoMemberLedger,
+  joinByInvite,
 };

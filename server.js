@@ -188,6 +188,22 @@ async function start() {
     }, 15 * 60 * 1000);
   }, 15 * 1000);
 
+  // ─── Per-member rent reminders ───────────────────────────────────────────
+  // Daily nudge to each ACTIVE member whose next unpaid month is within its
+  // reminder lead-days (in-app for linked accounts, SMS for phone-only). Runs
+  // in-process like the visit reminders above. member.lastReminderKey de-dupes,
+  // so the interval firing more than once a day still sends at most one nudge
+  // per member+month per day. (The fuller invoice + late-fee automation lives
+  // in services/cron.service.js → startCronJobs(); wire that in too if you also
+  // want auto monthly invoice rows and late-fee enforcement.)
+  const { runRentReminders } = require('./services/rentReminder.service');
+  setTimeout(function bootRentReminders() {
+    runRentReminders().catch((e) => console.warn('[rent-reminder] first run failed:', e.message));
+    setInterval(() => {
+      runRentReminders().catch((e) => console.warn('[rent-reminder] run failed:', e.message));
+    }, 12 * 60 * 60 * 1000);
+  }, 20 * 1000);
+
   // ─── Rented-listing cleanup ──────────────────────────────────────────────
   // A listing flips to 'rented' when its booking is created. We keep it visible
   // (badged "rented", with a countdown) for RENTED_RETENTION_DAYS so the host

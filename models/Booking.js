@@ -38,6 +38,65 @@ const LedgerEntrySchema = new mongoose.Schema(
   { _id: false },
 );
 
+// ─── Member sub-schema — one occupant of the property ────────────────────────
+// A booking can hold MANY members (a hostel / mess / room-share). Each member
+// carries their OWN monthly rent ledger, so "who paid which month" is tracked
+// per person, not per unit. Mirrors the Household.members[] pattern: a real
+// linked app user (userId set) or a placeholder (userId:null) until they join
+// via the booking's inviteCode / are matched by phone.
+const MemberSchema = new mongoose.Schema(
+  {
+    userId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    name:     { type: String, trim: true, default: '', maxlength: 100 },
+    phone:    { type: String, trim: true, default: '', maxlength: 20 },
+    avatar:   { type: String, default: '', maxlength: 512 },
+
+    // What this person rents: whole flat / a room / a single seat (hostel).
+    rentType: { type: String, enum: ['flat', 'room', 'seat'], default: 'flat' },
+    // Optional space labels — floors "stay as they are", these are just labels
+    // used to group + display the rent register (floor → room → seat).
+    floor:     { type: String, trim: true, default: '', maxlength: 40 },
+    roomLabel: { type: String, trim: true, default: '', maxlength: 40 },
+    seatLabel: { type: String, trim: true, default: '', maxlength: 40 },
+
+    // Per-member money terms. Default from the booking's monthlyRent when omitted.
+    monthlyRent:     { type: Number, default: 0, min: 0 },
+    serviceCharge:   { type: Number, default: 0, min: 0 },
+    securityDeposit: { type: Number, default: 0, min: 0 },
+
+    joinDate:    { type: Date, default: Date.now },
+    moveOutDate: { type: Date, default: null },
+    status:      { type: String, enum: ['active', 'moved-out'], default: 'active' },
+
+    // This member's OWN monthly rent ledger — SAME shape as the booking-level
+    // ledger, so every existing rent helper (getRentStatus, etc.) works on it.
+    ledger: { type: Map, of: LedgerEntrySchema, default: {} },
+
+    // Reminder de-dupe: the 'YYYY-MM' we last reminded this member about, so the
+    // daily cron never double-sends for the same due month.
+    lastReminderKey: { type: String, default: '' },
+    lastReminderAt:  { type: Date, default: null },
+  },
+  { _id: true },
+);
+
+// Give members the same Map→object + id serialisation the booking uses, so the
+// frontend reads `member.ledger['2026-05']` and `member.id` directly.
+MemberSchema.set('toJSON', {
+  virtuals: true,
+  versionKey: false,
+  transform: (_doc, ret) => {
+    ret.id = String(ret._id);
+    delete ret._id;
+    if (ret.ledger instanceof Map) {
+      const plain = {};
+      ret.ledger.forEach((v, k) => { plain[k] = v; });
+      ret.ledger = plain;
+    }
+    return ret;
+  },
+});
+
 const BookingSchema = new mongoose.Schema(
   {
     landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -76,8 +135,22 @@ const BookingSchema = new mongoose.Schema(
     // Legacy chat thread reference — kept for ChatSystem backward compat.
     chatId: { type: String, default: '' },
 
-    // Monthly rent ledger — Map of 'YYYY-MM' → LedgerEntry.
+    // Monthly rent ledger — Map of 'YYYY-MM' → LedgerEntry. This is the LEGACY
+    // single-tenant ledger. Multi-member bookings keep each occupant's rent in
+    // members[].ledger instead; this stays for backward compatibility.
     ledger: { type: Map, of: LedgerEntrySchema, default: {} },
+
+    // ─── Multi-member occupancy + rent (house / room / seat) ─────────────────
+    // Occupants of this property, each with their own rent terms + ledger.
+    // Empty for legacy single-tenant bookings (the top-level tenant* fields +
+    // the ledger above drive those). A migration seeds members[0] from the
+    // legacy tenant so existing rent history is preserved.
+    members: { type: [MemberSchema], default: [] },
+
+    // Shareable code so occupants can self-join and see their own rent/receipts
+    // (mirrors Household.inviteCode). Unset on legacy bookings — sparse+unique
+    // so many bookings without a code don't collide.
+    inviteCode: { type: String, uppercase: true, trim: true, index: true, unique: true, sparse: true },
 
     deletedAt:        { type: Date, default: null },
 
@@ -113,5 +186,7 @@ BookingSchema.set('toJSON', {
 BookingSchema.index({ landlordId: 1, createdAt: -1 });
 // Occupancy / property-scoped queries filter by propertyId + status.
 BookingSchema.index({ propertyId: 1, status: 1 });
+// Member self-view: "which bookings am I an occupant of?" (listTenantBookings).
+BookingSchema.index({ 'members.userId': 1 });
 
 module.exports = mongoose.model('Booking', BookingSchema);

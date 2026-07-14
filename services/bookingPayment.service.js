@@ -24,13 +24,15 @@ const PAID_STATUSES = ['full', 'partial'];
 /**
  * @param {Object} opts
  * @param {Object} opts.booking   a Mongoose Booking document (NOT lean — we save it)
+ * @param {Object} [opts.member]  a member subdoc of the booking (multi-member);
+ *                                omit for the legacy single-tenant ledger path
  * @param {String} opts.monthKey  'YYYY-MM'
  * @param {String} [opts.source]  'manual' | 'gateway'  (default 'manual')
  * @param {Object} [opts.payment] { status, paidOn, method, txnId, amount, balance,
  *                                  lateFee, dueNote, expectedPayBy, monthLabel, totalDue }
  * @returns {Promise<Object>} the updated lean booking
  */
-async function applyPayment({ booking, monthKey, source = 'manual', payment = {} }) {
+async function applyPayment({ booking, member = null, monthKey, source = 'manual', payment = {} }) {
   const status        = payment.status || 'full';
   const paymentSource = source === 'gateway' ? 'gateway' : 'manual';
 
@@ -48,8 +50,27 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
     paymentSource,
   };
 
-  booking.ledger.set(monthKey, entry);
+  // Write to the member's ledger when a member is given, else the legacy
+  // booking-level ledger. The member is embedded in the booking, so saving the
+  // booking persists either path; markModified guards the nested-Map change.
+  const ledgerHolder = member || booking;
+  ledgerHolder.ledger.set(monthKey, entry);
+  if (member) booking.markModified('members');
   await booking.save();
+
+  // Who the receipt + notification are for: the member (multi-member) or the
+  // booking's single tenant (legacy single-tenant path).
+  const memberId     = member ? member._id : null;
+  const notifyUserId = member ? member.userId : booking.tenantId;
+  const payerName    = member ? (member.name || '')  : (booking.tenant || '');
+  const payerPhone   = member ? (member.phone || '') : (booking.tenantPhone || '');
+  const rentAmount   = member
+    ? (Number(member.monthlyRent)   || Number(booking.monthlyRent)   || 0)
+    : (Number(booking.monthlyRent)   || 0);
+  const svcAmount    = member
+    ? (Number(member.serviceCharge) || Number(booking.serviceCharge) || 0)
+    : (Number(booking.serviceCharge) || 0);
+  const receiptFilter = { bookingId: booking._id, memberId, monthKey };
 
   if (PAID_STATUSES.includes(status)) {
     // Landlord profile snapshot for the receipt (self-contained, no JOIN at read).
@@ -65,22 +86,24 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
 
     // Receipt upsert — denormalized so dashboards don't JOIN every render.
     const receiptDoc = await Receipt.findOneAndUpdate(
-      { bookingId: booking._id, monthKey },
+      receiptFilter,
       {
         $set: {
           landlordId:    booking.landlordId,
-          tenantId:      booking.tenantId,
+          tenantId:      notifyUserId || null,
+          memberId,
+          memberName:    payerName,
           propertyId:    booking.propertyId,
           propertyTitle: booking.property || property?.title || '',
           propertyImage: property?.coverPhoto || '',
-          tenantPhone:   booking.tenantPhone || '',
+          tenantPhone:   payerPhone,
           landlordName:  landlord?.name  || '',
           landlordPhone: landlord?.phone || '',
           monthLabel:    payment.monthLabel || monthKey,
           status,
-          monthlyRent:   Number(booking.monthlyRent)   || 0,
-          serviceCharge: Number(booking.serviceCharge) || 0,
-          totalDue:      Number(payment.totalDue) || (Number(booking.monthlyRent) + Number(booking.serviceCharge)) || 0,
+          monthlyRent:   rentAmount,
+          serviceCharge: svcAmount,
+          totalDue:      Number(payment.totalDue) || (rentAmount + svcAmount) || 0,
           totalPaid:     Number(payment.amount) || 0,
           balance:       Number(payment.balance) || 0,
           method:        payment.method || '',
@@ -94,22 +117,32 @@ async function applyPayment({ booking, monthKey, source = 'manual', payment = {}
       { upsert: true, new: true, runValidators: true },
     );
 
-    if (booking.tenantId) {
+    // Notify the payer — a linked member OR the legacy tenant. Placeholder
+    // members (no userId) get no in-app notification; the landlord shares the
+    // PDF / SMS instead.
+    if (notifyUserId) {
       notifications.emit({
-        userId: booking.tenantId,
+        userId: notifyUserId,
         type:   'receipt',
         title:  `ভাড়া রিসিট — ${booking.property || 'Property'}`,
         body:   `${payment.monthLabel || monthKey} এর ${status === 'full' ? 'সম্পূর্ণ' : 'আংশিক'} ভাড়া রিসিট পাওয়া গেছে।`,
-        data:   { targetId: String(receiptDoc._id), bookingId: String(booking._id), monthKey },
+        data:   { targetId: String(receiptDoc._id), bookingId: String(booking._id), memberId: memberId ? String(memberId) : null, monthKey },
       });
     }
   } else {
     // 'due' / 'pending' / 'overdue' / 'scheduled' — no receipt yet; clear any stale one.
-    await Receipt.deleteOne({ bookingId: booking._id, monthKey }).catch(() => {});
+    await Receipt.deleteOne(receiptFilter).catch(() => {});
   }
 
   const updated = await Booking.findById(booking._id).lean();
-  if (updated) { updated.id = String(updated._id); delete updated._id; }
+  if (updated) {
+    updated.id = String(updated._id);
+    delete updated._id;
+    // lean() leaves member _id as ObjectId + skips toJSON — normalise to id.
+    if (Array.isArray(updated.members)) {
+      updated.members.forEach((m) => { if (m && m._id) { m.id = String(m._id); delete m._id; } });
+    }
+  }
   return updated;
 }
 

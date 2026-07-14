@@ -230,6 +230,18 @@ const PropertySchema = new mongoose.Schema(
     floor:       { type: Number, default: 0, min: -5, max: 200 },
     furnishing:  { type: String, enum: FURNISHINGS, default: 'Unfurnished' },
 
+    // ─── Multi-member rent management (house / room / seat) ──────────────────
+    // How this property is let out, which drives the DEFAULT member.rentType
+    // when a landlord adds occupants to its booking:
+    //   flat  → whole unit to one lease (default, legacy behaviour)
+    //   room  → subdivided into rooms, each rented separately
+    //   seat  → hostel / mess: rooms subdivided into seats/beds
+    //   mixed → a combination (rentType then lives per-member on the booking)
+    rentalType:  { type: String, enum: ['flat', 'room', 'seat', 'mixed'], default: 'flat', index: true },
+    // Total rentable slots (seats / rooms). Occupancy = active members on the
+    // booking; Vacancy = capacity - occupancy. 0 = not tracked (whole-flat).
+    capacity:    { type: Number, default: 0, min: 0, max: 500 },
+
     amenities:   { type: [String], default: [] },
     // Hosted (https) cover image URL — uploaded to Cloudinary by the wizard.
     // Inline base64 is rejected (audit 4.4); short maxlength is a second guard.

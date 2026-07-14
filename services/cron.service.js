@@ -23,6 +23,7 @@ const Booking       = require('../models/Booking');
 const User          = require('../models/User');
 const notifications = require('./notification.service');
 const whatsapp      = require('./whatsapp.service');
+const { runRentReminders } = require('./rentReminder.service');
 
 const TZ   = process.env.CRON_TZ || 'Asia/Dhaka';
 const TEST = process.env.CRON_TEST === '1';
@@ -74,6 +75,34 @@ async function generateMonthlyInvoices() {
   let created = 0;
 
   for (const booking of bookings) {
+    // Multi-member bookings: seed EACH active member's own ledger row so every
+    // occupant is tracked + notified individually. Legacy single-tenant
+    // bookings fall through to the booking-level path below.
+    if (Array.isArray(booking.members) && booking.members.length) {
+      let dirty = false;
+      for (const m of booking.members) {
+        if (m.status === 'moved-out') continue;
+        if (m.ledger.get(monthKey)) continue; // idempotent
+        const rent = Number(m.monthlyRent) || Number(booking.monthlyRent) || 0;
+        m.ledger.set(monthKey, {
+          paid: false, status: 'due', amount: 0, balance: rent, lateFee: 0, paymentSource: 'manual',
+        });
+        dirty = true;
+        created += 1;
+        if (m.userId) {
+          notifications.emit({
+            userId: m.userId,
+            type:   'payment',
+            title:  `নতুন ভাড়ার বিল — ${booking.property || 'Property'}`,
+            body:   `${monthLabel(monthKey)} এর ভাড়া ৳${rent} পরিশোধের জন্য প্রস্তুত।`,
+            data:   { targetId: String(booking._id), bookingId: String(booking._id), memberId: String(m._id), monthKey },
+          });
+        }
+      }
+      if (dirty) { booking.markModified('members'); await booking.save(); }
+      continue;
+    }
+
     if (booking.ledger.get(monthKey)) continue; // idempotent — row already exists
 
     booking.ledger.set(monthKey, {
@@ -117,6 +146,41 @@ async function enforceLateFees() {
   let flagged = 0;
 
   for (const booking of bookings) {
+    // Multi-member bookings: apply late fees per member on their own ledger.
+    if (Array.isArray(booking.members) && booking.members.length) {
+      const grace  = Number(booking.gracePeriodDays) || 0;
+      const dueDay = Number(booking.rentDueDay) || 5;
+      if (dayOfMonth <= dueDay + grace) continue;           // still inside grace window
+      let dirty = false;
+      for (const m of booking.members) {
+        if (m.status === 'moved-out') continue;
+        const e = m.ledger.get(monthKey);
+        if (!e || e.paid || e.status === 'overdue' || !UNPAID_STATUSES.includes(e.status)) continue;
+        const rent    = Number(m.monthlyRent) || Number(booking.monthlyRent) || 0;
+        const lateFee = Number(booking.lateFeeAmount) || 0;
+        const prev    = typeof e.toObject === 'function' ? e.toObject() : e;
+        m.ledger.set(monthKey, {
+          paid: false, status: 'overdue', paidOn: prev.paidOn || '', method: prev.method || '',
+          txnId: prev.txnId || '', amount: Number(prev.amount) || 0, balance: rent + lateFee,
+          lateFee, dueNote: prev.dueNote || '', expectedPayBy: prev.expectedPayBy || '',
+          paymentSource: prev.paymentSource || 'manual',
+        });
+        dirty = true;
+        flagged += 1;
+        if (m.userId) {
+          notifications.emit({
+            userId: m.userId,
+            type:   'payment',
+            title:  `⚠️ ভাড়া বকেয়া — ${booking.property || 'Property'}`,
+            body:   `${monthLabel(monthKey)} এর ভাড়া বকেয়া। ৳${lateFee} লেট ফি যোগ হয়েছে — মোট বকেয়া ৳${rent + lateFee}।`,
+            data:   { targetId: String(booking._id), bookingId: String(booking._id), memberId: String(m._id), monthKey },
+          });
+        }
+      }
+      if (dirty) { booking.markModified('members'); await booking.save(); }
+      continue;
+    }
+
     const entry = booking.ledger.get(monthKey);
     if (!entry) continue;                                   // no invoice yet this month
     if (entry.paid) continue;                               // already settled
@@ -170,8 +234,9 @@ async function enforceLateFees() {
 
 // ─── Scheduler ────────────────────────────────────────────────────────────────
 function startCronJobs() {
-  const invoiceSchedule = TEST ? '* * * * *' : '0 0 1 * *'; // 1st of month, 00:00
-  const lateFeeSchedule = TEST ? '* * * * *' : '0 0 * * *'; // every day, 00:00
+  const invoiceSchedule  = TEST ? '* * * * *' : '0 0 1 * *'; // 1st of month, 00:00
+  const lateFeeSchedule  = TEST ? '* * * * *' : '0 0 * * *'; // every day, 00:00
+  const reminderSchedule = TEST ? '* * * * *' : '0 9 * * *'; // every day, 09:00 — per-member rent nudges
 
   cron.schedule(invoiceSchedule, () => {
     generateMonthlyInvoices().catch((e) => console.error('[cron] invoice error:', e.message));
@@ -181,10 +246,15 @@ function startCronJobs() {
     enforceLateFees().catch((e) => console.error('[cron] late-fee error:', e.message));
   }, { timezone: TZ });
 
+  cron.schedule(reminderSchedule, () => {
+    runRentReminders().catch((e) => console.error('[cron] rent-reminder error:', e.message));
+  }, { timezone: TZ });
+
   console.log(
-    `[cron] started — invoices: "${invoiceSchedule}", late-fees: "${lateFeeSchedule}", TZ: ${TZ}` +
+    `[cron] started — invoices: "${invoiceSchedule}", late-fees: "${lateFeeSchedule}", ` +
+    `reminders: "${reminderSchedule}", TZ: ${TZ}` +
     (TEST ? '  (TEST MODE: every minute)' : ''),
   );
 }
 
-module.exports = { startCronJobs, generateMonthlyInvoices, enforceLateFees };
+module.exports = { startCronJobs, generateMonthlyInvoices, enforceLateFees, runRentReminders };
