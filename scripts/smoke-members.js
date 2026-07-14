@@ -36,7 +36,7 @@ const mongoose = require('mongoose');
 
   console.log('\n[1] multi-member booking + per-member ledger + isolated receipts');
   let booking = await Booking.create({
-    landlordId, propertyId, property: 'Test Hostel',
+    landlordId, propertyId, property: 'Test Hostel', propertyType: 'hostel',
     leaseStart: new Date('2026-01-01'), leaseEnd: new Date('2026-12-31'),
     monthlyRent: 5000, rentDueDay: 5, inviteCode: 'TEST01',
     members: [
@@ -78,7 +78,7 @@ const mongoose = require('mongoose');
 
   console.log('\n[4] legacy single-tenant path unchanged (applyPayment without member)');
   let legacy = await Booking.create({
-    landlordId, propertyId, tenant: 'Legacy Tom', tenantPhone: '01799999999',
+    landlordId, propertyId, propertyType: 'hostel', tenant: 'Legacy Tom', tenantPhone: '01799999999',
     leaseStart: new Date('2026-01-01'), leaseEnd: new Date('2026-12-31'), monthlyRent: 8000, inviteCode: 'LEG001',
   });
   await applyPayment({ booking: legacy, monthKey: '2026-03', payment: { status: 'full', amount: 8000, monthLabel: 'Mar 2026' } });
@@ -96,6 +96,17 @@ const mongoose = require('mongoose');
   await seedMembers();
   migrated = await Booking.findById(legacy._id);
   assert(migrated.members.length === 1, 'migration idempotent (no duplicate member on re-run)');
+
+  console.log('\n[6] non-hostel (flat) booking is NOT seeded — stays single-tenant');
+  const flat = await Booking.create({
+    landlordId, propertyId, propertyType: 'flat', tenant: 'Flat Frank', tenantPhone: '01700000000',
+    leaseStart: new Date('2026-01-01'), leaseEnd: new Date('2026-12-31'), monthlyRent: 12000, inviteCode: 'FLAT01',
+  });
+  await applyPayment({ booking: flat, monthKey: '2026-02', payment: { status: 'full', amount: 12000, monthLabel: 'Feb 2026' } });
+  await seedMembers();
+  const flatAfter = await Booking.findById(flat._id);
+  assert(flatAfter.members.length === 0, 'flat booking got NO members (single-tenant preserved)');
+  assert(flatAfter.ledger.get('2026-02') && flatAfter.ledger.get('2026-02').paid === true, 'flat booking legacy ledger intact');
 
   console.log('\nALL SMOKE CHECKS PASSED ✅');
   await mongoose.disconnect();

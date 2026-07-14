@@ -109,6 +109,10 @@ const BookingSchema = new mongoose.Schema(
     // Property location, denormalized from the Property record at create time
     // so the booking + rent views can show it without an extra JOIN.
     location:    { type: String, trim: true, default: '', maxlength: 300 },
+    // Property type (flat / sublet / hostel / …), denormalized so dashboards
+    // can decide multi-member (HOSTEL only) vs classic single-tenant (everything
+    // else) without a JOIN. Empty on legacy rows until the migration backfills it.
+    propertyType: { type: String, trim: true, default: '', maxlength: 40 },
     tenant:      { type: String, trim: true, default: '', maxlength: 100 },
     tenantPhone: { type: String, trim: true, default: '', maxlength: 20 },
     // How many people will live in the unit (prefilled from the tenant's

@@ -130,10 +130,19 @@ async function buildMemberFromInput(raw = {}, defaults = {}) {
   };
 }
 
+// Property meta used by booking creation + member defaults: `type` (flat /
+// sublet / hostel / …) drives multi-member (HOSTEL) vs single-tenant; the
+// `rentalType` defaults a member's rentType.
+async function fetchPropertyMeta(propertyId) {
+  const prop = await require('../models/Property').findById(propertyId).select('type rentalType').lean().catch(() => null);
+  return {
+    type: prop?.type || '',
+    rentalType: prop && ['flat', 'room', 'seat'].includes(prop.rentalType) ? prop.rentalType : 'flat',
+  };
+}
 // Default a member's rentType from the property's rentalType (mixed → flat).
 async function propertyRentTypeDefault(propertyId) {
-  const prop = await require('../models/Property').findById(propertyId).select('rentalType').lean().catch(() => null);
-  return prop && ['flat', 'room', 'seat'].includes(prop.rentalType) ? prop.rentalType : 'flat';
+  return (await fetchPropertyMeta(propertyId)).rentalType;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -174,9 +183,11 @@ async function createBooking(req, res, next) {
       }
     }
 
-    // Build any initial members (multi-member bookings) + a fresh invite code
-    // so occupants can self-join. rentType defaults from the property.
-    const rentTypeDefault = await propertyRentTypeDefault(propertyId);
+    // Property meta drives multi-member (hostel) defaults + is denormalized onto
+    // the booking. Build any initial members + a fresh invite code so occupants
+    // can self-join. rentType defaults from the property.
+    const propMeta = await fetchPropertyMeta(propertyId);
+    const rentTypeDefault = propMeta.rentalType;
     const initialMembers = [];
     if (Array.isArray(members)) {
       for (const raw of members.slice(0, 200)) {
@@ -194,6 +205,7 @@ async function createBooking(req, res, next) {
       inquiryId:        inquiryId && isObjectId(inquiryId) ? inquiryId : null,
       property:         property || '',
       location:         location || '',
+      propertyType:     req.body.propertyType || propMeta.type || '',
       tenant:           tenant || '',
       tenantPhone:      (tenantPhone && tenantPhone.trim().length >= 10) ? tenantPhone.trim() : null,
       tenantsCount:     Math.max(1, Number(tenantsCount) || 1),
