@@ -369,16 +369,13 @@ async function updateProperty({ idOrSlug, body, user }) {
   return doc;
 }
 
-async function deleteProperty({ idOrSlug, user }) {
-  const doc = await Property.findOne(findIdOrSlug(idOrSlug));
-  if (!doc) throw ApiError.notFound('প্রপার্টি পাওয়া যায়নি।', { code: 'property_not_found' });
-  if (String(doc.ownerUserId) !== String(user._id)) {
-    throw ApiError.forbidden('শুধুমাত্র মালিকই এই প্রপার্টি মুছতে পারবেন।', {
-      code: 'not_owner',
-    });
-  }
-
-
+// Cascade-delete a property document and EVERY child doc that hangs off it
+// (inquiries, bookings, receipts, conversations, messages, and any bell
+// notification that deep-links to any of them). Ownership authorization is
+// the CALLER's responsibility: the host DELETE route enforces it in
+// deleteProperty() below, while the rented-cleanup cron intentionally runs
+// this with no user context. `doc` must be an already-loaded Property doc.
+async function purgePropertyCascade(doc) {
   const propertyId = doc._id;
 
   // ── Collect every related id BEFORE deleting anything ──────────────────
@@ -452,6 +449,19 @@ async function deleteProperty({ idOrSlug, user }) {
   };
 }
 
+// Host-facing delete: resolve the listing, enforce that the caller owns it,
+// then run the same cascade the cleanup cron uses.
+async function deleteProperty({ idOrSlug, user }) {
+  const doc = await Property.findOne(findIdOrSlug(idOrSlug));
+  if (!doc) throw ApiError.notFound('প্রপার্টি পাওয়া যায়নি।', { code: 'property_not_found' });
+  if (String(doc.ownerUserId) !== String(user._id)) {
+    throw ApiError.forbidden('শুধুমাত্র মালিকই এই প্রপার্টি মুছতে পারবেন।', {
+      code: 'not_owner',
+    });
+  }
+  return purgePropertyCascade(doc);
+}
+
 module.exports = {
   createProperty,
   getPropertyById,
@@ -460,6 +470,8 @@ module.exports = {
   listMyProperties,
   updateProperty,
   deleteProperty,
+  // Reused by the rented-listing cleanup sweep (no owner check — see fn doc).
+  purgePropertyCascade,
   // Exported for tests / future controllers.
   _internal: { normaliseRoomPhotos, normaliseSpecificDetails, gpsFromBody, findIdOrSlug },
 };

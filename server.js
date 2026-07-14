@@ -187,6 +187,20 @@ async function start() {
       runVisitReminders().catch((e) => console.warn('[visit-reminder] run failed:', e.message));
     }, 15 * 60 * 1000);
   }, 15 * 1000);
+
+  // ─── Rented-listing cleanup ──────────────────────────────────────────────
+  // A listing flips to 'rented' when its booking is created. We keep it visible
+  // (badged "rented", with a countdown) for RENTED_RETENTION_DAYS so the host
+  // can review it / create the lease, then permanently delete it and every
+  // child document. Runs in-process hourly — the window is in days, so an
+  // occasional missed tick on a sleeping instance just catches up next run.
+  const { runRentedCleanup } = require('./services/rentedCleanup.service');
+  setTimeout(function bootRentedCleanup() {
+    runRentedCleanup().catch((e) => console.warn('[rented-cleanup] first run failed:', e.message));
+    setInterval(() => {
+      runRentedCleanup().catch((e) => console.warn('[rented-cleanup] run failed:', e.message));
+    }, 60 * 60 * 1000);
+  }, 30 * 1000);
 }
 
 start();

@@ -272,6 +272,13 @@ const PropertySchema = new mongoose.Schema(
       index: true,
     },
 
+    // When this listing was marked 'rented' (stamped by booking.controller
+    // createBooking). A rented listing is kept visible — badged with a
+    // countdown — for RENTED_RETENTION_DAYS, then permanently removed by the
+    // sweep in services/rentedCleanup.service.js. Null for any non-rented
+    // listing; indexed because the cleanup query filters on it.
+    rentedAt: { type: Date, default: null, index: true },
+
     // ─── Ownership snapshot ──────────────────────────────────────────────
     // ownerUserId is the canonical link; ownerName + ownerPhone are stored as
     // a denormalised snapshot so listing cards don't have to JOIN to render.

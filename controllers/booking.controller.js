@@ -125,7 +125,9 @@ async function createBooking(req, res, next) {
       const Property = require('../models/Property');
       await Property.updateOne(
         { _id: propertyId },
-        { $set: { status: 'rented', availabilityStatus: 'rented' } },
+        // Stamp rentedAt so the cleanup sweep can retire this listing a few
+        // days from now. It stays visible (badged "rented") until then.
+        { $set: { status: 'rented', availabilityStatus: 'rented', rentedAt: new Date() } },
       ).catch(() => {});
     }
 
