@@ -134,10 +134,11 @@ async function buildMemberFromInput(raw = {}, defaults = {}) {
 // sublet / hostel / …) drives multi-member (HOSTEL) vs single-tenant; the
 // `rentalType` defaults a member's rentType.
 async function fetchPropertyMeta(propertyId) {
-  if (!propertyId || !isObjectId(propertyId)) return { type: '', rentalType: 'flat' };
-  const prop = await require('../models/Property').findById(propertyId).select('type rentalType').lean().catch(() => null);
+  if (!propertyId || !isObjectId(propertyId)) return { type: '', intent: '', rentalType: 'flat' };
+  const prop = await require('../models/Property').findById(propertyId).select('type intent rentalType').lean().catch(() => null);
   return {
     type: prop?.type || '',
+    intent: prop?.intent || '',
     rentalType: prop && ['flat', 'room', 'seat'].includes(prop.rentalType) ? prop.rentalType : 'flat',
   };
 }
@@ -156,7 +157,7 @@ async function createBooking(req, res, next) {
       tenantsCount, leaseStart, leaseEnd, monthlyRent, rentDueDay,
       reminderLeadDays, autoReminder, serviceCharge,
       securityDeposit, advancePayment, paymentMethod, notes, chatId, tenantId,
-      members, floorNumber, roomNumber,
+      members, floorNumber, roomNumber, dealType, commercialTerms,
     } = req.body;
 
     // Either a linked listing (propertyId) OR a manually typed property name.
@@ -192,6 +193,21 @@ async function createBooking(req, res, next) {
     // can self-join. rentType defaults from the property.
     const propMeta = await fetchPropertyMeta(propertyId);
     const rentTypeDefault = propMeta.rentalType;
+
+    // Residential vs commercial. Prefer the LINKED property's intent; fall back
+    // to the client-provided dealType for manual (no-listing) bookings.
+    const resolvedDealType = propMeta.intent === 'commercial'
+      ? 'commercial'
+      : (dealType === 'commercial' ? 'commercial' : 'residential');
+    const ctIn = (commercialTerms && typeof commercialTerms === 'object') ? commercialTerms : {};
+    const resolvedCommercialTerms = resolvedDealType === 'commercial'
+      ? {
+          businessName:    String(ctIn.businessName || '').slice(0, 160),
+          licenseNumber:   String(ctIn.licenseNumber || '').slice(0, 60),
+          leaseTermMonths: Math.max(0, Math.min(600, Number(ctIn.leaseTermMonths) || 0)),
+        }
+      : undefined;
+
     const initialMembers = [];
     if (Array.isArray(members)) {
       for (const raw of members.slice(0, 200)) {
@@ -210,6 +226,8 @@ async function createBooking(req, res, next) {
       property:         property || '',
       location:         location || '',
       propertyType:     req.body.propertyType || propMeta.type || '',
+      dealType:         resolvedDealType,
+      ...(resolvedCommercialTerms ? { commercialTerms: resolvedCommercialTerms } : {}),
       floorNumber:      floorNumber || '',
       roomNumber:       roomNumber || '',
       tenant:           tenant || '',

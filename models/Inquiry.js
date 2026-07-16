@@ -44,6 +44,18 @@ const InquirySchema = new mongoose.Schema(
     messages:   [{ sender: String, senderId: mongoose.Schema.Types.ObjectId, text: String, createdAt: Date }],
     visitSchedule: { proposedBy: String, date: String, time: String, location: String, status: String, reminderSent: Boolean },
 
+    // ─── Deal type discriminator ─────────────────────────────────────────
+    // Commercial (office / shop / showroom / restaurant) inquiries follow a
+    // DISTINCT flow from residential rentals. Denormalised from the property's
+    // `intent` at creation time so the host inbox + tenant timeline can badge
+    // and branch without a JOIN. Legacy rows default to 'residential'.
+    dealType: {
+      type: String,
+      enum: ['residential', 'commercial'],
+      default: 'residential',
+      index: true,
+    },
+
     leaseStart: { type: Date,   default: null },
     leaseEnd:   { type: Date,   default: null },
 

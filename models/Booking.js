@@ -116,6 +116,16 @@ const BookingSchema = new mongoose.Schema(
     // can decide multi-member (HOSTEL only) vs classic single-tenant (everything
     // else) without a JOIN. Empty on legacy rows until the migration backfills it.
     propertyType: { type: String, trim: true, default: '', maxlength: 40 },
+    // Residential rental vs commercial lease. Drives the distinct commercial
+    // booking form + badges. Derived from the property's `intent` at create
+    // time (commercial when intent==='commercial'); residential by default so
+    // every legacy/manual booking keeps its current behaviour.
+    dealType: {
+      type: String,
+      enum: ['residential', 'commercial'],
+      default: 'residential',
+      index: true,
+    },
     // Unit location within the property. Floor for all formats; room number for
     // single-room + hostel bookings. Hostel seats live per-member (members[]).
     floorNumber: { type: String, trim: true, default: '', maxlength: 40 },
@@ -142,6 +152,19 @@ const BookingSchema = new mongoose.Schema(
     serviceCharge:    { type: Number, default: 0 },
     securityDeposit:  { type: Number, default: 0 },
     notes:            { type: String, trim: true, default: '', maxlength: 2000 },
+
+    // ─── Commercial lease terms (only populated when dealType==='commercial') ─
+    // Commercial deals track the tenant's business/trade identity + a fixed
+    // tenure instead of family occupants / hostel seats. monthlyRent,
+    // advancePayment, securityDeposit and leaseStart/leaseEnd above are reused
+    // by BOTH flows, so only the commercial-only extras live here.
+    commercialTerms: {
+      businessName:    { type: String, trim: true, default: '', maxlength: 160 },
+      // Trade licence number — OPTIONAL.
+      licenseNumber:   { type: String, trim: true, default: '', maxlength: 60 },
+      // Fixed lease tenure in months (e.g. 24 = a 2-year lease).
+      leaseTermMonths: { type: Number, default: 0, min: 0, max: 600 },
+    },
 
     // Legacy chat thread reference — kept for ChatSystem backward compat.
     chatId: { type: String, default: '' },

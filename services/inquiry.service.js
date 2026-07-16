@@ -56,6 +56,11 @@ async function createInquiry({ body, user }) {
   }).sort({ createdAt: -1 });
 
   if (existing) {
+    // Backfill dealType on threads created before this shipped so legacy
+    // commercial inquiries also badge + branch correctly.
+    if (!existing.dealType) {
+      existing.dealType = property.intent === 'commercial' ? 'commercial' : 'residential';
+    }
     if (text) {
       existing.messages.push({
         sender:    'tenant',
@@ -63,8 +68,8 @@ async function createInquiry({ body, user }) {
         text:      text.slice(0, 2000),
         createdAt: new Date(),
       });
-      await existing.save();
     }
+    await existing.save();
 
     notifications.emit({
       userId: property.ownerUserId,
@@ -92,6 +97,9 @@ async function createInquiry({ body, user }) {
     inquirerUserId:  user._id,
     user:            user.name  || '',
     phone:           user.phone || '',
+    // Commercial listings (intent==='commercial') get the distinct commercial
+    // inquiry/booking flow; everything else is a residential rental.
+    dealType:        property.intent === 'commercial' ? 'commercial' : 'residential',
     msg:             text,
     messages:        text
       ? [{ sender: 'tenant', senderId: user._id, text: text.slice(0, 2000), createdAt: new Date() }]
