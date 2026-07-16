@@ -169,8 +169,11 @@ async function createProperty({ body, user }) {
     area:        body.area        || '',
     location:    body.location    || '',
     gps:         gpsFromBody(body),
-    beds:        body.beds        || 1,
-    baths:       body.baths       || 1,
+    // Preserve an explicit 0: commercial units & land send beds/baths: 0
+    // because they have none. The old `|| 1` coerced that 0 into a phantom
+    // "1 Bed / 1 Bath" that then surfaced on listing cards and the detail page.
+    beds:        body.beds  == null || body.beds  === '' ? 1 : Number(body.beds),
+    baths:       body.baths == null || body.baths === '' ? 1 : Number(body.baths),
     sqft:        body.sqft        || 0,
     floor:       wizardFloor,
     floorNumber: wizardFloor,
