@@ -11,6 +11,10 @@ const smsService = require('./sms.service');
 const tokenService = require('./token.service');
 
 const GENERIC_LOGIN_ERROR = 'ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে।';
+// Combined, non-specific OTP failure message — mirrors GENERIC_LOGIN_ERROR so
+// we never reveal WHICH part failed (matches the product's "phone number or
+// OTP is wrong" wording). Used by both signup-verify and password-reset.
+const GENERIC_OTP_ERROR = 'ফোন নম্বর বা OTP ভুল হয়েছে। আবার চেষ্টা করুন।';
 
 // Roles allowed to authenticate against the SEPARATE admin console. Kept in
 // sync with middleware/requireAdmin + middleware/requireAdminAuth.
@@ -125,7 +129,7 @@ async function verifySignup({ phoneNumber, otp }) {
   //    TTL already reaped it → treat both as "invalid/expired".
   const record = await Otp.findOne({ phoneNumber: phone });
   if (!record || record.otp !== String(otp)) {
-    throw ApiError.badRequest('OTP ভুল অথবা মেয়াদ শেষ হয়েছে। আবার চেষ্টা করুন।', {
+    throw ApiError.badRequest(GENERIC_OTP_ERROR, {
       code: 'otp_invalid',
     });
   }
@@ -329,7 +333,7 @@ async function resetPassword({ phoneNumber, otp, newPassword }) {
 
   const record = await Otp.findOne({ phoneNumber: phone });
   if (!record || record.otp !== String(otp)) {
-    throw ApiError.badRequest('OTP ভুল অথবা মেয়াদ শেষ হয়েছে। আবার চেষ্টা করুন।', {
+    throw ApiError.badRequest(GENERIC_OTP_ERROR, {
       code: 'otp_invalid',
     });
   }
