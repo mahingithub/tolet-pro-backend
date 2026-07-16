@@ -8,18 +8,15 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
 // ── Listing-card payload trimming ───────────────────────────────────────────
 // The public listing/search response must stay light on mobile. Per property
-// we ship ONLY: coverPhoto + the best three room-category photos in priority
-// order (bedroom / bathroom / living room / kitchen / other). The heavy
-// walkthrough video (`videoUrl`, up to ~25 MB base64) is dropped entirely; it
-// loads on the detail page instead, along with the full room gallery.
-const LIST_ROOM_BUCKETS = [
-  { room: 'bedroom', matches: (r) => r.includes('bed') },
-  { room: 'bathroom', matches: (r) => r.includes('bath') || r.includes('toilet') || r.includes('wash') },
-  { room: 'living', matches: (r) => r.includes('living') || r.includes('drawing') || r.includes('hall') },
-  { room: 'kitchen', matches: (r) => r.includes('kitchen') || r.includes('cook') },
-  { room: 'other', matches: (r) => r.includes('other') },
-];
-const LIST_ROOM_PHOTO_LIMIT = 3;
+// we ship ONLY: coverPhoto + a few room-category photos — ONE per unique
+// category, ANY property kind (residential OR commercial). The card renders the
+// cover + its best 3 thumbnails from these. The heavy walkthrough video
+// (`videoUrl`, up to ~25 MB base64) is dropped entirely; it loads on the detail
+// page instead, along with the full room gallery.
+//
+// We ship a few EXTRA distinct categories (limit 6) so the card can prefer
+// photos that differ from the cover when choosing its 3 thumbnails.
+const LIST_ROOM_PHOTO_LIMIT = 6;
 
 function toCloudinaryCardImage(url) {
   const s = String(url || '').trim();
@@ -40,25 +37,25 @@ function trimForListCard(p) {
   const coverThumb = p.coverPhotoThumb || '';
   p.coverPhoto = toCloudinaryCardImage(coverThumb || p.coverPhoto);
   delete p.coverPhotoThumb;
+  // Keep ONE photo per unique room category, in upload order, CATEGORY-AGNOSTIC
+  // (residential AND commercial). We preserve the REAL room id so the card
+  // labels it correctly (Front / Inside Floor / Workspace / Reception / Washroom
+  // …) and can order/choose. The old version bucketed by residential room names
+  // (bed/bath/living/kitchen), which dropped every commercial photo except a
+  // washroom (it matched 'wash') and even re-tagged it "bathroom".
   const photos = Array.isArray(p.roomPhotos) ? p.roomPhotos : [];
   const picked = [];
-  for (const bucket of LIST_ROOM_BUCKETS) {
+  const seenRooms = new Set();
+  for (const ph of photos) {
     if (picked.length >= LIST_ROOM_PHOTO_LIMIT) break;
-    const hit = photos.find(
-      (ph) => !picked.some((pickedPhoto) => pickedPhoto.source === ph) &&
-        bucket.matches(String((ph && ph.room) || '').toLowerCase()),
-    );
-    if (hit) {
-      picked.push({
-        source: hit,
-        room: bucket.room,
-        url: toCloudinaryCardImage(hit.thumbUrl || hit.thumbnailUrl || hit.url || hit.preview || ''),
-      });
-    }
+    const room = String((ph && ph.room) || 'other').toLowerCase();
+    if (seenRooms.has(room)) continue;
+    const url = toCloudinaryCardImage((ph && (ph.thumbUrl || ph.thumbnailUrl || ph.url || ph.preview)) || '');
+    if (!url) continue;
+    seenRooms.add(room);
+    picked.push({ room, url });
   }
-  p.roomPhotos = picked
-    .filter((ph) => ph.url)
-    .map(({ room, url }) => ({ room, url })); // ≤ 3 room photos; cover stays in coverPhoto
+  p.roomPhotos = picked; // ≤ LIST_ROOM_PHOTO_LIMIT distinct-category photos; cover stays in coverPhoto
   return p;
 }
 
