@@ -60,19 +60,13 @@ const httpOnly = (field) => ({
   ],
 });
 
-// Keep only the room photos we actually render on a card, by room category.
-const LIST_ROOM_PHOTO_FILTER = {
-  $filter: {
-    input: { $ifNull: ['$roomPhotos', []] },
-    as: 'photo',
-    cond: {
-      $regexMatch: {
-        input: { $toLower: { $ifNull: ['$$photo.room', ''] } },
-        regex: /bed|bath|toilet|wash|living|drawing|hall|kitchen|cook|other/,
-      },
-    },
-  },
-};
+// How many uploaded room photos to ship per card. Category-AGNOSTIC: the old
+// filter only allowed residential room names (bed/bath/living/kitchen…), which
+// silently DROPPED every commercial photo (workspace / reception / meeting /
+// cabin / front / floor / panel …) — so commercial cards had no thumbnails to
+// render. We now keep ALL room photos and just cap the count to keep the list
+// payload lean.
+const LIST_ROOM_PHOTO_CAP = 8;
 
 const LIST_CARD_PROJECT = {
   title: 1,
@@ -99,14 +93,19 @@ const LIST_CARD_PROJECT = {
   // (toCloudinaryListingImage), so shipping a separate (often base64) thumb is
   // pure dead weight and a former OOM source.
   roomPhotos: {
-    $map: {
-      input: LIST_ROOM_PHOTO_FILTER,
-      as: 'photo',
-      in: {
-        room: '$$photo.room',
-        url:  httpOnly('$$photo.url'),  // base64 url → ''; thumbUrl never sent
+    $slice: [
+      {
+        $map: {
+          input: { $ifNull: ['$roomPhotos', []] },
+          as: 'photo',
+          in: {
+            room: '$$photo.room',
+            url:  httpOnly('$$photo.url'),  // base64 url → ''; thumbUrl never sent
+          },
+        },
       },
-    },
+      LIST_ROOM_PHOTO_CAP,
+    ],
   },
   videoId: 1,
   price: 1,
