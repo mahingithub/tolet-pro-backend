@@ -105,6 +105,8 @@ app.use('/api/host',       hostRoutes);
 app.use('/api/host-stats', require('./routes/hostStats.routes')); // real host performance metrics
 app.use('/api/landlords',  landlordRoutes);
 app.use('/api/tenants',    tenantRoutes);
+// Person-to-person reviews (landlord <-> tenant reputation on profiles).
+app.use('/api/reviews',    require('./routes/review.routes'));
 // Dedicated admin-console auth (separate login flow, admin-scoped tokens).
 // MUST be registered BEFORE '/api/admin' so its public /login endpoint isn't
 // captured by the admin router's requireAdminAuth gate.

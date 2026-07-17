@@ -22,6 +22,7 @@
 const mongoose = require('mongoose');
 const User     = require('../models/User');
 const Inquiry  = require('../models/Inquiry');
+const Review   = require('../models/Review');
 
 function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
@@ -74,6 +75,11 @@ async function getTenant(req, res, next) {
     const ageMs     = Date.now() - new Date(createdAt).getTime();
     const isNew     = ageMs < 30 * 24 * 60 * 60 * 1000;
 
+    // Person-to-person rating: reviews others have left about this user AS A
+    // TENANT (e.g. landlords rating a past tenant). Computed on read. This is a
+    // public trust signal, so it's always included (not privacy-gated).
+    const ratingSummary = await Review.summaryFor(user._id, 'tenant');
+
     const trustCard = {
       id:              String(user._id),
       name:            user.name,
@@ -96,6 +102,9 @@ async function getTenant(req, res, next) {
       },
       // Always-public summary signal so the host knows whether to engage.
       phoneOtpVerified:  !!user.phoneVerified,
+      // Person-to-person rating (public trust signal).
+      rating:            ratingSummary.avg,
+      totalReviews:      ratingSummary.count,
     };
 
     // ─── Privacy-gated extras ────────────────────────────────────────────

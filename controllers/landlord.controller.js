@@ -16,6 +16,7 @@ const mongoose = require('mongoose');
 const User     = require('../models/User');
 const Property = require('../models/Property');
 const Inquiry  = require('../models/Inquiry');
+const Review   = require('../models/Review');
 
 function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
@@ -65,6 +66,10 @@ async function getLandlord(req, res, next) {
       ownerUserId: user._id,
       status: 'active',
     });
+
+    // Person-to-person rating: average + count of reviews others have left
+    // about this user AS A LANDLORD. Computed on read (no denormalised copy).
+    const ratingSummary = await Review.summaryFor(user._id, 'landlord');
     const createdAt       = user.createdAt || new Date();
     const memberSince     = createdAt.getFullYear ? createdAt.getFullYear().toString()
                                                   : new Date(createdAt).getFullYear().toString();
@@ -155,8 +160,8 @@ async function getLandlord(req, res, next) {
         // "verified" is the strict "blue tick" signal — both queues green.
         verified:        fullyVerified,
         phoneVerified,
-        rating:          0,
-        totalReviews:    0,
+        rating:          ratingSummary.avg,
+        totalReviews:    ratingSummary.count,
         responseRate:    null,
         responseTime:    '—',
         memberSince,
