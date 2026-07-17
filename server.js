@@ -69,6 +69,17 @@ app.use(
     credentials: true,
   })
 );
+
+// ─── WhatsApp inbound webhook (Meta) ─────────────────────────────────────────
+// Mounted BEFORE the global JSON parser and the /api rate limiter ON PURPOSE:
+//   • it needs the RAW request body to verify Meta's X-Hub-Signature-256 — the
+//     router attaches its own JSON parser that stashes req.rawBody; the global
+//     express.json() below would consume the body without keeping the raw bytes.
+//   • Meta's webhook traffic must NOT be rate-limited — a 429 makes Meta retry
+//     and eventually disable the webhook subscription.
+// Helmet + CORS above still apply. See routes/whatsapp.routes.js.
+app.use('/api/whatsapp', require('./routes/whatsapp.routes'));
+
 // Auth payloads are tiny but property uploads embed base64 cover + room
 // photos (and occasionally a video preview frame). 50 MB gives plenty of
 // headroom for multi-photo listings without bouncing the request. Mongo

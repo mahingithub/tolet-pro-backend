@@ -88,6 +88,18 @@ const env = {
 
     // Default template language code (used only for template messages).
     defaultLang: process.env.WHATSAPP_DEFAULT_LANG || 'bn',
+
+    // ── Inbound webhook (Meta) ───────────────────────────────────────────
+    // verifyToken: the SAME string you type into Meta's "Verify token" field
+    //   in the App Dashboard. Meta sends it back on the GET handshake so we
+    //   can confirm the request is from your configured webhook. MUST match
+    //   exactly (set WHATSAPP_VERIFY_TOKEN in the environment).
+    // appSecret: your Meta App Secret. When set, every inbound POST is checked
+    //   against the X-Hub-Signature-256 header (HMAC-SHA256 over the raw body)
+    //   so nobody can spoof events. Leave empty to accept unsigned posts
+    //   (works, but less secure — set it once things are running).
+    verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',
+    appSecret:   process.env.WHATSAPP_APP_SECRET || '',
   },
 
   // Testing escape hatch: when true, OTPs are LOGGED to the server console
