@@ -102,6 +102,7 @@ function pickPublicUser(u) {
 async function getOverview(req, res, next) {
   try {
     const Property = require('../models/Property');
+    const SellInterest = require('../models/SellInterest');
     const [
       totalUsers,
       totalLandlords,
@@ -114,6 +115,8 @@ async function getOverview(req, res, next) {
       rentedProperties,
       draftProperties,
       totalProperties,
+      sellInterestTotal,
+      sellInterestRegistered,
     ] = await Promise.all([
       User.countDocuments({}),
       User.countDocuments({ roles: 'landlord' }),
@@ -126,6 +129,8 @@ async function getOverview(req, res, next) {
       Property.countDocuments({ status: 'rented' }),
       Property.countDocuments({ status: 'draft' }),
       Property.countDocuments({}),
+      SellInterest.countDocuments({ kind: 'sell' }),
+      SellInterest.countDocuments({ kind: 'sell', userId: { $ne: null } }),
     ]);
 
     // "Pending moderation" surfaced on the overview is the sum of: tenant
@@ -148,6 +153,10 @@ async function getOverview(req, res, next) {
         draftProperties,
         totalProperties,
         pendingModeration,
+        // "Interested in selling" demand gauge (Coming Soon lead capture).
+        sellInterestTotal,
+        sellInterestRegistered,
+        sellInterestGuests: sellInterestTotal - sellInterestRegistered,
         // Revenue is wired up once the subscription / billing pipeline
         // exists. Until then we return 0 honestly rather than fake a number.
         monthlyRevenueFormatted: '৳ 0',

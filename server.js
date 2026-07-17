@@ -117,6 +117,10 @@ app.use('/api/conversations',  chatLimiter, require('./routes/chat.routes'));
 app.use('/api/notifications',  require('./routes/notification.routes'));
 // MEDIUM limiter on bookings (spam-prone).
 app.use('/api/bookings',       writeLimiter, require('./routes/booking.routes'));
+// Demand gauge: "interested in selling" clicks while self-service selling is
+// Coming Soon. Public (guests count too) + spam-prone, so it sits behind the
+// writeLimiter like inquiries/bookings. Admin reads the totals under /api/admin.
+app.use('/api/sell-interest',  writeLimiter, require('./routes/sellInterest.routes'));
 app.use('/api/receipts',       require('./routes/receipt.routes'));
 // V1 manual rent payments — landlord payout accounts + tenant "I have paid" claims.
 app.use('/api/payment-methods', require('./routes/paymentMethod.routes'));

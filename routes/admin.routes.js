@@ -13,6 +13,7 @@
 const express = require('express');
 const ctl = require('../controllers/admin.controller');
 const teamCtl = require('../controllers/admin.team.controller');
+const sellInterestCtl = require('../controllers/sellInterest.controller');
 const requireAdminAuth = require('../middleware/requireAdminAuth');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 
@@ -26,6 +27,11 @@ router.use(requireAdminAuth);
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 router.get('/overview', ctl.getOverview);
+
+// ─── "Interested in selling" demand gauge (Coming Soon lead capture) ────────
+// Count of people who tapped "I am interested in selling my property" + a
+// recent follow-up list for the agency.
+router.get('/sell-interest', sellInterestCtl.getStats);
 
 // ─── Tenant identity verification (NID + photo + profession proof) ──────────
 // Queue + approve/reject for the personal identity submission. Approving
