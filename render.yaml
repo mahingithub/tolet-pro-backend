@@ -56,3 +56,27 @@ services:
       # Admin token lifetime (short by design). Optional — defaults to 12h.
       - key: JWT_ADMIN_EXPIRES_IN
         value: 12h
+
+      # ── Facebook Page auto-post + token auto-refresh ────────────────────
+      # APP_ID + APP_SECRET authenticate the Graph API token-refresh call and
+      # are REQUIRED to enable the ~50-day auto-refresh job. PAGE_ID is the
+      # numeric Page you post to. PAGE_ACCESS_TOKEN is the SEED long-lived
+      # token — used only to bootstrap the DB row the first time; the job then
+      # keeps a fresh token in Mongo. All prompted (sync:false) and safe to
+      # leave blank — the feature stays dormant until they're set.
+      - key: FACEBOOK_APP_ID
+        sync: false
+      - key: FACEBOOK_APP_SECRET
+        sync: false
+      - key: FACEBOOK_PAGE_ID
+        sync: false
+      - key: FACEBOOK_PAGE_ACCESS_TOKEN
+        sync: false
+
+      # Optional tuning knobs (sensible defaults in config/env.js):
+      #   FACEBOOK_TOKEN_TYPE                 'page' (default) | 'user'
+      #   FACEBOOK_TOKEN_REFRESH_BEFORE_DAYS  refresh this many days before
+      #                                       expiry (default 10)
+      #   FACEBOOK_TOKEN_REFRESH_CRON         check schedule (default '30 3 * * *')
+      - key: FACEBOOK_TOKEN_REFRESH_BEFORE_DAYS
+        value: "10"

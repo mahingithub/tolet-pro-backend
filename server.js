@@ -234,6 +234,16 @@ async function start() {
       runRentedCleanup().catch((e) => console.warn('[rented-cleanup] run failed:', e.message));
     }, 60 * 60 * 1000);
   }, 30 * 1000);
+
+  // ─── Facebook token auto-refresh ─────────────────────────────────────────
+  // Facebook long-lived access tokens expire after ~60 days. This job keeps
+  // the token used for Page auto-posting fresh: it checks daily and re-mints
+  // the token via the Graph API once it's within a few days of expiring (so
+  // the real API call lands every ~50 days — well under the 60-day limit). The
+  // refreshed token is persisted to Mongo (models/FacebookToken.js) so it
+  // survives restarts. No-ops cleanly if FACEBOOK_APP_ID/SECRET aren't set.
+  const { startFacebookTokenRefreshJob } = require('./services/facebookToken.service');
+  startFacebookTokenRefreshJob();
 }
 
 start();

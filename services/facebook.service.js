@@ -6,16 +6,22 @@
 //
 // Required env vars:
 //   FACEBOOK_PAGE_ID            – numeric Page ID
-//   FACEBOOK_PAGE_ACCESS_TOKEN  – long-lived Page Access Token
+//   FACEBOOK_PAGE_ACCESS_TOKEN  – long-lived Page Access Token (SEED value)
 //   FRONTEND_BASE_URL           – e.g. https://tolet-pro.vercel.app
 //
-// If any of these are missing the service silently no-ops so existing
+// The access token is NOT read straight from the env var at post time — it's
+// obtained from services/facebookToken.service.js, which keeps a fresh,
+// auto-refreshed token in the database (the env var only seeds it the first
+// time). That way this service always posts with a valid token even after the
+// original ~60-day token would have expired.
+//
+// If the Page ID or token are missing the service silently no-ops so existing
 // behaviour is completely unaffected.
 // ────────────────────────────────────────────────────────────────────────────
 
+const fbToken = require('./facebookToken.service');
+
 const FB_API       = 'https://graph.facebook.com/v21.0';
-const PAGE_ID      = process.env.FACEBOOK_PAGE_ID;
-const ACCESS_TOKEN = process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
 const FRONTEND_URL = (process.env.FRONTEND_BASE_URL || '').replace(/\/+$/, '');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -154,12 +160,12 @@ function buildCaption(property) {
  * Upload a single photo to the Facebook Page as UNPUBLISHED.
  * Returns the media_fbid needed for multi-photo posts.
  */
-async function uploadUnpublishedPhoto(imageUrl) {
-  const url = `${FB_API}/${PAGE_ID}/photos`;
+async function uploadUnpublishedPhoto(pageId, accessToken, imageUrl) {
+  const url = `${FB_API}/${pageId}/photos`;
   const params = new URLSearchParams({
     url:          imageUrl,
     published:    'false',
-    access_token: ACCESS_TOKEN,
+    access_token: accessToken,
   });
 
   const res = await fetch(url, {
@@ -179,12 +185,12 @@ async function uploadUnpublishedPhoto(imageUrl) {
 /**
  * Publish a multi-photo post (gallery) to the Facebook Page.
  */
-async function publishMultiPhotoPost(caption, mediaFbIds) {
-  const url = `${FB_API}/${PAGE_ID}/feed`;
+async function publishMultiPhotoPost(pageId, accessToken, caption, mediaFbIds) {
+  const url = `${FB_API}/${pageId}/feed`;
 
   const body = new URLSearchParams({
     message:      caption,
-    access_token: ACCESS_TOKEN,
+    access_token: accessToken,
   });
 
   // Attach each photo as attached_media[i]
@@ -208,12 +214,12 @@ async function publishMultiPhotoPost(caption, mediaFbIds) {
 /**
  * Publish a single-photo post to the Facebook Page.
  */
-async function publishSinglePhotoPost(caption, imageUrl) {
-  const url = `${FB_API}/${PAGE_ID}/photos`;
+async function publishSinglePhotoPost(pageId, accessToken, caption, imageUrl) {
+  const url = `${FB_API}/${pageId}/photos`;
   const params = new URLSearchParams({
     url:          imageUrl,
     message:      caption,
-    access_token: ACCESS_TOKEN,
+    access_token: accessToken,
   });
 
   const res = await fetch(url, {
@@ -232,11 +238,11 @@ async function publishSinglePhotoPost(caption, imageUrl) {
 /**
  * Publish a text-only post (with link) to the Facebook Page.
  */
-async function publishTextPost(caption, link) {
-  const url = `${FB_API}/${PAGE_ID}/feed`;
+async function publishTextPost(pageId, accessToken, caption, link) {
+  const url = `${FB_API}/${pageId}/feed`;
   const params = new URLSearchParams({
     message:      caption,
-    access_token: ACCESS_TOKEN,
+    access_token: accessToken,
   });
   if (link) {
     params.set('link', link);
@@ -267,8 +273,14 @@ async function publishTextPost(caption, link) {
  * This function NEVER throws. All errors are caught and logged.
  */
 async function postToFacebookPage(property) {
+  // Pull the CURRENT (auto-refreshed) token + page id from the token service.
+  // These come from the DB row the refresh job keeps fresh, so we never post
+  // with a stale/expired env value.
+  const pageId      = fbToken.getCachedPageId();
+  const accessToken = await fbToken.getPageAccessToken();
+
   // Guard: skip if Facebook is not configured
-  if (!PAGE_ID || !ACCESS_TOKEN) {
+  if (!pageId || !accessToken) {
     return;
   }
 
@@ -279,20 +291,20 @@ async function postToFacebookPage(property) {
     if (imageUrls.length > 1) {
       // ── Multi-photo gallery post ──────────────────────────────────────
       const uploadPromises = imageUrls.map((imgUrl) =>
-        uploadUnpublishedPhoto(imgUrl),
+        uploadUnpublishedPhoto(pageId, accessToken, imgUrl),
       );
       const mediaFbIds = await Promise.all(uploadPromises);
-      const result = await publishMultiPhotoPost(caption, mediaFbIds);
+      const result = await publishMultiPhotoPost(pageId, accessToken, caption, mediaFbIds);
       console.log('[FacebookService] Multi-photo post published:', result.id);
 
     } else if (imageUrls.length === 1) {
       // ── Single photo post ─────────────────────────────────────────────
-      const result = await publishSinglePhotoPost(caption, imageUrls[0]);
+      const result = await publishSinglePhotoPost(pageId, accessToken, caption, imageUrls[0]);
       console.log('[FacebookService] Single-photo post published:', result.id || result.post_id);
 
     } else {
       // ── Text-only post ────────────────────────────────────────────────
-      const result = await publishTextPost(caption, link);
+      const result = await publishTextPost(pageId, accessToken, caption, link);
       console.log('[FacebookService] Text post published:', result.id);
     }
   } catch (err) {

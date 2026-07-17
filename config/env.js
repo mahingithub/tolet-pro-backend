@@ -102,6 +102,48 @@ const env = {
     appSecret:   process.env.WHATSAPP_APP_SECRET || '',
   },
 
+  // ─── Facebook Page auto-post + token auto-refresh ────────────────────────
+  // Used by services/facebook.service.js (posts new listings to a Page) and
+  // services/facebookToken.service.js (the background job that regenerates the
+  // long-lived token before its ~60-day expiry).
+  //
+  // Facebook long-lived tokens last ~60 days. The refresh job re-exchanges the
+  // current token for a fresh one via the Graph API, so it must run — and hit
+  // the API — at an interval WELL under 60 days. It does this by checking on a
+  // schedule (refreshCron) and refreshing once the token is within
+  // `refreshBeforeDays` of expiry (≈ every 50 days, with buffer to spare).
+  //
+  // appId + appSecret are REQUIRED for the auto-refresh (they authenticate the
+  // fb_exchange_token call). Without them the job no-ops and posting simply
+  // keeps using whatever token was last stored/seeded. When none of these are
+  // set the whole feature stays dormant — existing behaviour is unaffected.
+  facebook: {
+    appId:       process.env.FACEBOOK_APP_ID || '',
+    appSecret:   process.env.FACEBOOK_APP_SECRET || '',
+    pageId:      process.env.FACEBOOK_PAGE_ID || '',
+
+    // Seed token used ONLY the first time (to populate the DB row). Prefer a
+    // long-lived USER token so it can be re-exchanged; a Page token also works
+    // as a seed. After the first run the DB row is the source of truth.
+    seedToken:   process.env.FACEBOOK_PAGE_ACCESS_TOKEN
+              || process.env.FACEBOOK_LONG_LIVED_TOKEN
+              || '',
+
+    // 'page' → derive + store a Page token for auto-posting; 'user' → track a
+    // user token only.
+    tokenType:   (process.env.FACEBOOK_TOKEN_TYPE || 'page').toLowerCase(),
+
+    apiVersion:  process.env.FACEBOOK_API_VERSION || 'v21.0',
+
+    // Refresh once the token is within this many days of expiry. Default 10 →
+    // with a 60-day token the real refresh fires ~every 50 days.
+    refreshBeforeDays: Number(process.env.FACEBOOK_TOKEN_REFRESH_BEFORE_DAYS || 10),
+
+    // Cron expression for the refresh CHECK (cheap; only calls the API when the
+    // token is near expiry or missing). Default: daily at 03:30.
+    refreshCron: process.env.FACEBOOK_TOKEN_REFRESH_CRON || '30 3 * * *',
+  },
+
   // Testing escape hatch: when true, OTPs are LOGGED to the server console
   // and NOT sent via SMS. Lets you exercise the full signup/reset flow without
   // SMS credits or a verified gateway account. MUST be false for real users.
