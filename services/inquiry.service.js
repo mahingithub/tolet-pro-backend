@@ -73,7 +73,8 @@ async function createInquiry({ body, user }) {
 
     notifications.emit({
       userId: property.ownerUserId,
-      type:   'inquiry',
+      // Recipient is the landlord (property owner) → host inbox surface.
+      type:   'inquiry_new',
       title:  `${user.name || 'একজন ভাড়াটিয়া'} আবার মেসেজ পাঠিয়েছেন`,
       body:   text.slice(0, 140),
       data:   {
@@ -117,7 +118,8 @@ async function createInquiry({ body, user }) {
   // Fire-and-forget notification to the landlord.
   notifications.emit({
     userId: property.ownerUserId,
-    type:   'inquiry',
+    // Recipient is the landlord (property owner) → host inbox surface.
+    type:   'inquiry_new',
     title:  `New inquiry from ${user.name || 'a tenant'}`,
     body:   text.slice(0, 140),
     data:   {
@@ -217,7 +219,8 @@ async function updateInquiryStatus({ id, body, user }) {
   if (doc.inquirerUserId && body.status !== prevStatus) {
     notifications.emit({
       userId: doc.inquirerUserId,
-      type:   'inquiry',
+      // Recipient is the tenant who inquired → their "applications" surface.
+      type:   'inquiry_status',
       title:  `Your inquiry was marked ${body.status}`,
       body:   doc.propTitle ? `Re: ${doc.propTitle}` : '',
       data:   {
@@ -261,7 +264,9 @@ async function replyToInquiry({ id, body, user }) {
   if (targetUserId) {
     notifications.emit({
       userId: targetUserId,
-      type:   'inquiry',
+      // Owner replying → tenant gets a status-style ping (tenant surface);
+      // tenant replying → owner gets it on the host inbox surface.
+      type:   isOwner ? 'inquiry_status' : 'inquiry_new',
       title:  isOwner
         ? 'ল্যান্ডলর্ড আপনার ইনকোয়ারিতে রিপ্লাই দিয়েছেন'
         : 'ভাড়াটিয়া একটি নতুন মেসেজ পাঠিয়েছেন',
@@ -304,7 +309,8 @@ async function proposeVisit({ id, body, user }) {
   if (targetUserId) {
     notifications.emit({
       userId: targetUserId,
-      type:   'inquiry',
+      // Recipient is whichever party did NOT propose the slot.
+      type:   isOwner ? 'inquiry_status' : 'inquiry_new',
       title:  'একটি ভিজিট প্রস্তাব করা হয়েছে',
       body:   `${date} ${time}`.trim(),
       data:   { targetId: String(inq._id), propertyId: String(inq.propertyId), status: inq.status },
@@ -346,7 +352,8 @@ async function respondToVisit({ id, body, user }) {
   if (targetUserId) {
     notifications.emit({
       userId: targetUserId,
-      type:   'inquiry',
+      // Recipient is whichever party did NOT respond to the proposal.
+      type:   isOwner ? 'inquiry_status' : 'inquiry_new',
       title:  accept ? 'ভিজিট গ্রহণ করা হয়েছে ✓' : 'ভিজিট প্রস্তাব প্রত্যাখ্যান করা হয়েছে',
       body:   inq.propTitle ? `Re: ${inq.propTitle}` : '',
       data:   { targetId: String(inq._id), propertyId: String(inq.propertyId), status: inq.status },

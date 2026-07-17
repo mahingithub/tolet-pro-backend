@@ -11,6 +11,7 @@ const SchemaType =
 
 const ApiError = require("../utils/ApiError");
 const Property = require("../models/Property");
+const AIGuide = require("../models/AIGuide");
 const searchService = require("../services/searchService");
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -63,6 +64,31 @@ const searchPropertiesTool = {
 			},
 		},
 	],
+};
+
+// ── Video-guide tool ─────────────────────────────────────────────────────────
+// Lets Gemini attach ONE admin-published walkthrough video to its answer when
+// the user asks how to do something the video covers (e.g. "how do I rent a
+// house?"). The catalogue of available guides (id + title + suggestion) is
+// injected into the system instruction per-request, so Gemini only ever has
+// real ids to choose from. We still validate the returned id server-side.
+const suggestVideoGuideDecl = {
+	name: "suggest_video_guide",
+	description:
+		"Attach a published help/walkthrough video to your answer when it clearly helps the user learn how to do " +
+		"something on TO-LET PRO (how to find/rent a home, how to list a property, how to pay rent, how to use a " +
+		"feature, etc.). Use ONLY an id from the VIDEO GUIDES list in the system instruction. Attach at most one, " +
+		"and only when it clearly matches what the user is trying to do.",
+	parameters: {
+		type: SchemaType.OBJECT,
+		properties: {
+			guideId: {
+				type: SchemaType.STRING,
+				description: "The id of the guide to attach — must be one of the ids listed under VIDEO GUIDES.",
+			},
+		},
+		required: ["guideId"],
+	},
 };
 
 // Execute the search the AI asked for, REUSING the same buildSearchFilter the
@@ -222,11 +248,54 @@ exports.askGemini = asyncH(async (req, res) => {
 		userText = trailing.parts[0].text + "\n" + text;
 	}
 
+	// ── Video guides ─────────────────────────────────────────────────────────
+	// Load the admin-published "Assistant" help videos — the SAME set shown as
+	// the Assistant's suggestion chips (active, and not a welcome/how-it-works/
+	// support-page video). We hand their titles to Gemini so it can attach the
+	// right walkthrough to its answer when the user asks how to do something.
+	// Best-effort: if this query fails, chat still works, just without a video.
+	let guides = [];
+	try {
+		guides = await AIGuide.find({
+			isActive: true,
+			placement: { $nin: ["welcome", "how_it_works", "support"] },
+		})
+			.sort({ order: 1 })
+			.limit(30)
+			.lean();
+	} catch (e) {
+		console.warn("[ai-chat] failed to load video guides:", e.message);
+		guides = [];
+	}
+
+	// Append the video-guide catalogue + rules to the base system instruction,
+	// but only when there are guides to offer.
+	let systemInstruction = SYSTEM_INSTRUCTION;
+	if (guides.length) {
+		const catalogue = guides
+			.map((g) => `- id="${g._id}" — ${g.title}: ${g.suggestionText}`)
+			.join("\n");
+		systemInstruction += `
+
+VIDEO GUIDES (walkthrough videos the admin has published)
+When the user asks HOW to do something on TO-LET PRO that one of these videos covers (e.g. how to find/rent a home, how to list a property, how to pay rent, how to use a feature), attach that video by calling the "suggest_video_guide" tool with its id — IN ADDITION to writing your normal short text answer. Available videos:
+${catalogue}
+
+Video rules:
+- Attach at most ONE video, and only when it clearly matches what the user is trying to do. If none fit, don't call the tool.
+- Never write the id or the video URL in your text answer. Just call the tool, and in your text briefly invite them to watch the short guide shown below your reply.`;
+	}
+
+	// Gemini tools: property search is always available; the video-guide tool is
+	// added only when we actually have guides to suggest.
+	const functionDeclarations = [searchPropertiesTool.functionDeclarations[0]];
+	if (guides.length) functionDeclarations.push(suggestVideoGuideDecl);
+
 	try {
 		const model = ai.getGenerativeModel({
 			model: "gemini-2.5-flash",
-			systemInstruction: SYSTEM_INSTRUCTION,
-			tools: [searchPropertiesTool],
+			systemInstruction,
+			tools: [{ functionDeclarations }],
 			generationConfig: { temperature: 0.6 },
 		});
 
@@ -236,30 +305,66 @@ exports.askGemini = asyncH(async (req, res) => {
 		// Tool-calling loop. Gemini may ask to run search_properties; we execute
 		// it and feed the results back. Bounded to a few rounds for safety.
 		let properties = [];
+		let suggestedGuideId = null;
 		let rounds = 0;
 		while (rounds < 3) {
 			const calls =
 				typeof result.response.functionCalls === "function" ? result.response.functionCalls() : null;
 			if (!calls || !calls.length) break;
 
-			const call = calls[0];
-			let fnResponse = { count: 0, results: [] };
-			if (call.name === "search_properties") {
-				const found = await runPropertySearch(call.args || {});
-				properties = found; // remember the latest search's cards for the client
-				fnResponse = {
-					count: found.length,
-					results: found.map((p) => ({
-						title: p.title, price: p.price, beds: p.beds, baths: p.baths, location: p.location, type: p.type,
-					})),
-				};
+			// Gemini can ask for more than one tool in a single turn (e.g. search
+			// AND suggest a video). Run them all and feed every result back together.
+			const toolResponses = [];
+			for (const call of calls) {
+				if (call.name === "search_properties") {
+					const found = await runPropertySearch(call.args || {});
+					properties = found; // remember the latest search's cards for the client
+					toolResponses.push({
+						functionResponse: {
+							name: call.name,
+							response: {
+								count: found.length,
+								results: found.map((p) => ({
+									title: p.title, price: p.price, beds: p.beds, baths: p.baths, location: p.location, type: p.type,
+								})),
+							},
+						},
+					});
+				} else if (call.name === "suggest_video_guide") {
+					// Only accept an id we actually published this request — never
+					// trust a hallucinated one.
+					const gid = call.args && call.args.guideId ? String(call.args.guideId) : null;
+					const match = gid && guides.find((g) => String(g._id) === gid);
+					if (match) suggestedGuideId = String(match._id);
+					toolResponses.push({
+						functionResponse: { name: call.name, response: { ok: !!match } },
+					});
+				} else {
+					toolResponses.push({ functionResponse: { name: call.name, response: {} } });
+				}
 			}
-			result = await chat.sendMessage([{ functionResponse: { name: call.name, response: fnResponse } }]);
+			result = await chat.sendMessage(toolResponses);
 			rounds += 1;
 		}
 
 		const replyText = result.response.text() || "দুঃখিত, এই মুহূর্তে উত্তরটি দিতে পারছি না।";
-		return res.status(200).json({ text: replyText, properties });
+
+		// Resolve the suggested guide (if any) into the compact shape the client
+		// renders as a "Watch" button that opens the video modal.
+		let videoGuide = null;
+		if (suggestedGuideId) {
+			const g = guides.find((x) => String(x._id) === suggestedGuideId);
+			if (g) {
+				videoGuide = {
+					id: String(g._id),
+					title: g.title,
+					videoUrl: g.videoUrl,
+					suggestionText: g.suggestionText,
+				};
+			}
+		}
+
+		return res.status(200).json({ text: replyText, properties, videoGuide });
 	} catch (error) {
 		console.error("Gemini API Error:", error);
 		return res.status(500).json({

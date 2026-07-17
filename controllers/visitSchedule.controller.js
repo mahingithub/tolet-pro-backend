@@ -2,8 +2,14 @@
 
 const VisitSchedule = require('../models/VisitSchedule');
 const Inquiry = require('../models/Inquiry');
-const Notification = require('../models/Notification');
 const inquiryHelper = require('../services/inquiry.helper');
+// Route visit notifications through the shared service so they (a) use a valid
+// notification type, (b) carry data.targetId for deep-linking to the inquiry,
+// and (c) fan out over socket + push like every other notification. The old
+// Notification.create({ type: 'visit_scheduled', metadata }) calls failed the
+// model's enum validation (and used `metadata` instead of `data`), so they
+// threw — silently breaking visit scheduling.
+const notifications = require('../services/notification.service');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -45,14 +51,14 @@ exports.createVisitSchedule = asyncH(async (req, res) => {
 
   const notifMsg = `ভিজিট শিডিউল: ${new Date(scheduledDate).toLocaleDateString()} ${scheduledTime} — ${location || 'প্রপার্টি'}`;
   
-  // Notify Tenant
+  // Notify Tenant (recipient is the inquirer → their applications surface).
   if (inquiry.inquirerUserId) {
-    await Notification.create({
+    await notifications.emit({
       userId: inquiry.inquirerUserId,
+      type:  'inquiry_status',
       title: 'নতুন ভিজিট শিডিউল',
-      body: notifMsg,
-      type: 'visit_scheduled',
-      metadata: { inquiryId, scheduleId: schedule._id }
+      body:  notifMsg,
+      data:  { targetId: String(inquiryId), inquiryId: String(inquiryId), scheduleId: String(schedule._id) },
     });
   }
 
@@ -113,12 +119,12 @@ exports.approveVisitRequest = asyncH(async (req, res) => {
   }
 
   const notifMsg = `ভিজিট শিডিউল: ${new Date(schedule.scheduledDate).toLocaleDateString()} ${schedule.scheduledTime} — ${schedule.location || 'প্রপার্টি'}`;
-  await Notification.create({
+  await notifications.emit({
     userId: schedule.tenantId,
+    type:  'inquiry_status',
     title: 'ভিজিট শিডিউল অনুমোদিত',
-    body: notifMsg,
-    type: 'visit_scheduled',
-    metadata: { inquiryId: schedule.inquiryId, scheduleId: schedule._id }
+    body:  notifMsg,
+    data:  { targetId: String(schedule.inquiryId), inquiryId: String(schedule.inquiryId), scheduleId: String(schedule._id) },
   });
 
   res.json({ schedule: schedule.toJSON() });
@@ -152,13 +158,16 @@ exports.cancelVisit = asyncH(async (req, res) => {
 
   const cancelDate = schedule.scheduledDate ? new Date(schedule.scheduledDate).toLocaleDateString() : 'আপনার';
   const msg = `${cancelDate} তারিখের ভিজিট বাতিল করা হয়েছে।`;
-  
-  await Notification.create({
-    userId: String(schedule.landlordId) === String(req.user._id) ? schedule.tenantId : schedule.landlordId,
+
+  // Notify the OTHER party. Landlord cancelled → tenant hears about it
+  // (tenant surface); tenant cancelled → landlord hears about it (host inbox).
+  const cancelledByLandlord = String(schedule.landlordId) === String(req.user._id);
+  await notifications.emit({
+    userId: cancelledByLandlord ? schedule.tenantId : schedule.landlordId,
+    type:  cancelledByLandlord ? 'inquiry_status' : 'inquiry_new',
     title: 'ভিজিট বাতিল',
-    body: msg,
-    type: 'visit_cancelled',
-    metadata: { inquiryId: schedule.inquiryId, scheduleId: schedule._id }
+    body:  msg,
+    data:  { targetId: String(schedule.inquiryId), inquiryId: String(schedule.inquiryId), scheduleId: String(schedule._id) },
   });
 
   res.json({ schedule: schedule.toJSON() });
@@ -191,12 +200,12 @@ exports.rescheduleVisit = asyncH(async (req, res) => {
   }
 
   const notifMsg = `ভিজিট পুনঃনির্ধারিত: ${new Date(newDate).toLocaleDateString()} ${newTime}`;
-  await Notification.create({
+  await notifications.emit({
     userId: schedule.tenantId,
+    type:  'inquiry_status',
     title: 'ভিজিট সময় পরিবর্তন',
-    body: notifMsg,
-    type: 'visit_rescheduled',
-    metadata: { inquiryId: schedule.inquiryId, scheduleId: schedule._id }
+    body:  notifMsg,
+    data:  { targetId: String(schedule.inquiryId), inquiryId: String(schedule.inquiryId), scheduleId: String(schedule._id) },
   });
 
   res.json({ schedule: schedule.toJSON() });
