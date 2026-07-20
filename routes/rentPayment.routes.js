@@ -43,5 +43,6 @@ router.get('/tenant',             requireAuth, ctrl.listTenantSubmissions);
 router.get('/host',               requireAuth, ctrl.listHostSubmissions);
 router.post('/:id/approve',       requireAuth, ctrl.approveSubmission);
 router.post('/:id/reject',        requireAuth, ctrl.rejectSubmission);
+router.delete('/:id',             requireAuth, ctrl.deleteSubmission);
 
 module.exports = router;

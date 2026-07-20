@@ -341,6 +341,42 @@ async function rejectSubmission(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/rent-payments/:id — landlord removes a payment record from their
+// history. Only the owning landlord may delete, and only an already-reviewed
+// (approved / rejected) record — a still-pending claim must be approved or
+// rejected first. This removes the submission record + its proof screenshot;
+// it does NOT reverse an approved month's ledger/receipt (the tenant keeps
+// their receipt), it only clears the entry from the landlord's history list.
+// ─────────────────────────────────────────────────────────────────────────────
+async function deleteSubmission(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!isObjectId(id)) throw ApiError.notFound('পেমেন্ট পাওয়া যায়নি।');
+
+    const submission = await RentPaymentSubmission.findById(id);
+    if (!submission) throw ApiError.notFound('পেমেন্ট পাওয়া যায়নি।');
+    if (String(submission.landlordId) !== String(req.user._id)) {
+      throw ApiError.forbidden('এই পেমেন্ট আপনার নয়।');
+    }
+    if (submission.status === 'pending') {
+      throw ApiError.badRequest('পেন্ডিং পেমেন্ট মুছে ফেলা যাবে না — আগে অনুমোদন বা বাতিল করুন।');
+    }
+
+    // Best-effort cleanup of the proof screenshot so we don't leak Cloudinary
+    // quota. Non-fatal — a stale asset never blocks the delete.
+    if (submission.screenshotPublicId) {
+      await cloudinary.destroy(submission.screenshotPublicId).catch(() => {});
+    }
+
+    await submission.deleteOne();
+
+    return res.json({ ok: true, id: String(submission._id) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   submitPayment,
   uploadScreenshot,
@@ -348,4 +384,5 @@ module.exports = {
   listHostSubmissions,
   approveSubmission,
   rejectSubmission,
+  deleteSubmission,
 };
