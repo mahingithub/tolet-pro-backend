@@ -125,8 +125,8 @@ exports.createCall = asyncH(async (req, res) => {
  */
 exports.getCall = asyncH(async (req, res) => {
   const call = await Call.findById(req.params.id)
-    .populate('callerId', 'name profilePicture phone role')
-    .populate('receiverId', 'name profilePicture phone role');
+    .populate('callerId', 'name avatar avatarUrl tenantProfile.avatar landlordProfile.avatar phone role')
+    .populate('receiverId', 'name avatar avatarUrl tenantProfile.avatar landlordProfile.avatar phone role');
 
   if (!call) throw ApiError.notFound('Call not found');
 
@@ -154,8 +154,8 @@ exports.getCallHistory = asyncH(async (req, res) => {
   })
     .sort({ createdAt: -1 })
     .limit(limit)
-    .populate('callerId', 'name profilePicture role')
-    .populate('receiverId', 'name profilePicture role')
+    .populate('callerId', 'name avatar avatarUrl tenantProfile.avatar landlordProfile.avatar role')
+    .populate('receiverId', 'name avatar avatarUrl tenantProfile.avatar landlordProfile.avatar role')
     .lean();
 
   res.json({ calls });
@@ -172,8 +172,8 @@ exports.getActiveCall = asyncH(async (req, res) => {
     $or: [{ callerId: userId }, { receiverId: userId }],
     status: { $in: ['ringing', 'accepted'] },
   })
-    .populate('callerId', 'name profilePicture phone')
-    .populate('receiverId', 'name profilePicture phone');
+    .populate('callerId', 'name avatar avatarUrl tenantProfile.avatar landlordProfile.avatar phone')
+    .populate('receiverId', 'name avatar avatarUrl tenantProfile.avatar landlordProfile.avatar phone');
 
   res.json({ call: call || null });
 });
