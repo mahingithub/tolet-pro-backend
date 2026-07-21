@@ -25,6 +25,7 @@
 const mongoose      = require('mongoose');
 const Inquiry       = require('../models/Inquiry');
 const Property      = require('../models/Property');
+const User          = require('../models/User');
 const Notification  = require('../models/Notification');
 const ApiError      = require('../utils/ApiError');
 const notifications = require('./notification.service');
@@ -190,15 +191,45 @@ async function listMyInquiries({ user }) {
   const propMap = {};
   props.forEach((p) => { propMap[String(p._id)] = p; });
 
+  // Landlord (property owner) avatar per inquiry so the tenant sees WHO they
+  // are talking to. Only an https avatar (Cloudinary) is surfaced — a legacy
+  // base64 data-URL is collapsed to '' INSIDE Mongo (same OOM-guard as
+  // coverPhoto) so multi-MB blobs never load into Node memory; the frontend
+  // then falls back to initials.
+  const ownerIds = [...new Set(
+    inquiries.map((i) => String(i.propertyOwnerId)).filter(Boolean),
+  )].map((id) => new mongoose.Types.ObjectId(id));
+  const owners = ownerIds.length
+    ? await User.aggregate([
+        { $match: { _id: { $in: ownerIds } } },
+        {
+          $project: {
+            name: 1,
+            avatar: {
+              $cond: [
+                { $regexMatch: { input: { $ifNull: ['$avatar', ''] }, regex: /^https?:\/\//i } },
+                '$avatar',
+                '',
+              ],
+            },
+          },
+        },
+      ])
+    : [];
+  const ownerMap = {};
+  owners.forEach((o) => { ownerMap[String(o._id)] = o; });
+
   return inquiries.map((i) => {
     const p = propMap[String(i.propertyId)] || {};
+    const owner = ownerMap[String(i.propertyOwnerId)] || {};
     return {
       ...i,
-      propCover:     p.coverPhoto || '',
-      propLocation:  [p.location, p.area, p.district].filter(Boolean)[0] || '',
-      propPrice:     p.price ?? null,
-      landlordPhone: p.ownerPhone || '',
-      landlordName:  p.ownerName  || '',
+      propCover:      p.coverPhoto || '',
+      propLocation:   [p.location, p.area, p.district].filter(Boolean)[0] || '',
+      propPrice:      p.price ?? null,
+      landlordPhone:  p.ownerPhone || '',
+      landlordName:   p.ownerName  || owner.name || '',
+      landlordAvatar: owner.avatar || '',
     };
   });
 }
