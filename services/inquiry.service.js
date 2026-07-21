@@ -33,6 +33,21 @@ const notifications = require('./notification.service');
 const TERMINAL_STATUSES = ['rejected', 'final_booking'];
 
 async function createInquiry({ body, user }) {
+  // ── Role gate ──────────────────────────────────────────────────────────
+  // Sending an inquiry is a TENANT action. A user acting in landlord mode
+  // (their active `role` is 'landlord') must NOT be able to send one — as a
+  // landlord they list properties for rent instead. The UI (InquiryModal)
+  // already blocks this with a polite notice + a "switch to tenant mode"
+  // CTA; this is the server-side backstop for direct API calls. `role`
+  // mirrors the UI's active role (flipped by POST /api/auth/me/active-role),
+  // so once the user switches to tenant mode this gate clears automatically.
+  if (user.role === 'landlord') {
+    throw ApiError.forbidden(
+      'ল্যান্ডলর্ড মোডে থাকা অবস্থায় inquiry পাঠানো যাবে না। inquiry পাঠাতে আগে ভাড়াটিয়া মোডে যান।',
+      { code: 'landlord_cannot_inquire' },
+    );
+  }
+
   const property = await Property.findById(body.propertyId);
   if (!property) {
     throw ApiError.notFound('প্রপার্টি পাওয়া যায়নি।', { code: 'property_not_found' });
