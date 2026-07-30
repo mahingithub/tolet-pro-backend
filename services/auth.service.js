@@ -237,9 +237,10 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
  *      dummy compare) as the public login.
  *   2. RBAC is enforced HERE, at authentication time — a non-admin account
  *      that types the right password still cannot obtain an admin token.
- *   3. On success it mints an ADMIN-SCOPED token (audience 'tolet-pro-admin' +
- *      scope 'admin') via tokenService.signAdminToken, which only
- *      middleware/requireAdminAuth accepts.
+ *   3. On success, it checks if 2FA is enabled:
+ *      - If 2FA is enabled: returns a temporary token that only allows the
+ *        2FA verification endpoint (requires2FA: true).
+ *      - If 2FA is disabled: mints an ADMIN-SCOPED token immediately.
  * The account is loaded fresh so we never trust client-supplied role claims.
  */
 async function adminLogin({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
@@ -249,7 +250,7 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
     { $push: { sessions: { $each: [], $slice: -(MAX_SESSIONS - 1) } } }
   );
 
-  const user = await User.findOne({ phone }).select('+password +loginAttempts +lockUntil');
+  const user = await User.findOne({ phone }).select('+password +loginAttempts +lockUntil +googleAuthSecret');
   if (!user || !user.phoneVerified) {
     await bcrypt.compare(password, '$2a$12$abcdefghijklmnopqrstuv'); // bogus hash — constant-ish timing
     throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
@@ -289,8 +290,21 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
 
   user.loginAttempts = 0;
   user.lockUntil = null;
-  user.lastLoginAt = new Date();
 
+  // ── 2FA Check: if enabled, return a temporary token instead of full access ──
+  if (user.isGoogleAuthEnabled && user.googleAuthSecret) {
+    // Don't update lastLoginAt or create session yet — those happen after 2FA verification
+    await user.save();
+    const tempToken = tokenService.sign2FATempToken(user);
+    return { 
+      requires2FA: true, 
+      tempToken,
+      message: 'Google Authenticator OTP প্রয়োজন।'
+    };
+  }
+
+  // No 2FA — proceed with normal login flow
+  user.lastLoginAt = new Date();
   const sessionId = addSession(user, { device, ipAddress });
   await user.save();
 
@@ -363,4 +377,5 @@ module.exports = {
   adminLogin,
   forgotPassword,
   resetPassword,
+  addSession,
 };

@@ -22,11 +22,17 @@ const { authLimiter } = require('../middleware/rateLimiters');
 const router = express.Router();
 
 router.post('/login', authLimiter, ctl.login);
+router.post('/verify-2fa-login', authLimiter, ctl.verify2FALogin);
 router.get('/me', requireAdminAuth, ctl.me);
 router.post('/logout', requireAdminAuth, ctl.logout);
 
 // Account settings — the admin manages their own profile + password.
 router.patch('/me', requireAdminAuth, ctl.updateMe);
 router.post('/change-password', requireAdminAuth, authLimiter, ctl.changePassword);
+
+// 2FA / Google Authenticator setup endpoints
+router.post('/2fa/generate', requireAdminAuth, ctl.generate2FASecret);
+router.post('/2fa/enable', requireAdminAuth, ctl.enable2FA);
+router.post('/2fa/disable', requireAdminAuth, authLimiter, ctl.disable2FA);
 
 module.exports = router;

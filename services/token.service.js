@@ -93,6 +93,33 @@ function verifyResetToken(token) {
   return decoded;
 }
 
+/**
+ * Temporary 2FA token issued after password verification but before OTP check.
+ * Short-lived (5 minutes) and only grants access to the 2FA verification endpoint.
+ * Contains user ID but NO admin scope — cannot be used for actual API access.
+ */
+function sign2FATempToken(user) {
+  const jti = crypto.randomBytes(16).toString('hex');
+  return jwt.sign(
+    { sub: user._id.toString(), purpose: '2fa_pending', jti },
+    env.jwtSecret,
+    { expiresIn: '5m', audience: ADMIN_AUDIENCE, issuer: ISSUER }
+  );
+}
+
+function verify2FATempToken(token) {
+  const decoded = jwt.verify(token, env.jwtSecret, {
+    audience: ADMIN_AUDIENCE,
+    issuer: ISSUER,
+  });
+  if (decoded.purpose !== '2fa_pending') {
+    const err = new Error('Wrong token purpose');
+    err.name = 'JsonWebTokenError';
+    throw err;
+  }
+  return decoded;
+}
+
 module.exports = {
   signAccessToken,
   verifyAccessToken,
@@ -100,6 +127,8 @@ module.exports = {
   verifyAdminToken,
   signResetToken,
   verifyResetToken,
+  sign2FATempToken,
+  verify2FATempToken,
   USER_AUDIENCE,
   ADMIN_AUDIENCE,
 };

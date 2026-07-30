@@ -378,6 +378,15 @@ const UserSchema = new mongoose.Schema(
     // Linked Firebase UID after OTP verification.
     firebaseUid:   { type: String, default: null, index: true, select: false },
 
+    // ─── 2FA / Google Authenticator ──────────────────────────────────────
+    // TOTP secret for Google Authenticator. Only populated after the admin
+    // completes the setup flow (generate QR → scan → verify token). Hidden
+    // by default (select: false) so it's never leaked in queries.
+    googleAuthSecret: { type: String, default: null, select: false },
+    // Whether 2FA is active for this user. When true, admin login requires
+    // a valid TOTP code in addition to the password.
+    isGoogleAuthEnabled: { type: Boolean, default: false },
+
     // ─── Moderation flags ────────────────────────────────────────────────
     // Set by an admin via POST /api/admin/users/:id/ban. A banned user
     // can still log in (so they see the in-app rejection notice) but
