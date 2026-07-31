@@ -11,6 +11,7 @@ const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
 const hpp = require('hpp');
 const mongoose = require('mongoose');
+const cookieParser = require('cookie-parser');
 
 const authRoutes     = require('./routes/auth.routes');
 const propertyRoutes = require('./routes/property.routes');
@@ -31,7 +32,104 @@ const app = express();
 app.set('trust proxy', 1);
 
 // ─── Security middleware ────────────────────────────────────────────────────
-app.use(helmet());
+// Configure Helmet with comprehensive security headers
+// 🔒 Security Headers Implemented:
+//   • CSP: Prevents XSS by controlling resource loading
+//   • HSTS: Forces HTTPS for 1 year (including subdomains)
+//   • X-Frame-Options: Prevents clickjacking
+//   • X-Content-Type-Options: Prevents MIME sniffing
+//   • Referrer-Policy: Controls referrer information leakage
+//   • Permissions-Policy: Restricts browser features
+//   • X-XSS-Protection: Legacy XSS filter for old browsers
+app.use(
+  helmet({
+    // Content Security Policy - Prevents XSS attacks
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'", // Required for some inline scripts (consider removing in production)
+          'https://maps.googleapis.com',
+          'https://www.google.com',
+        ],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'", // Required for styled-components and inline styles
+          'https://fonts.googleapis.com',
+        ],
+        imgSrc: [
+          "'self'",
+          'data:', // For base64 images
+          'blob:', // For file uploads preview
+          'https:', // Allow images from any HTTPS source (Cloudinary, etc.)
+        ],
+        fontSrc: [
+          "'self'",
+          'data:',
+          'https://fonts.gstatic.com',
+        ],
+        connectSrc: [
+          "'self'",
+          'https://maps.googleapis.com',
+          'https://firestore.googleapis.com',
+          'https://fcm.googleapis.com',
+          'https://*.google.com',
+        ],
+        frameSrc: [
+          "'self'",
+          'https://www.google.com', // For reCAPTCHA
+        ],
+        objectSrc: ["'none'"],
+        upgradeInsecureRequests: [], // Force HTTPS
+      },
+    },
+
+    // HTTP Strict Transport Security - Force HTTPS for 1 year
+    hsts: {
+      maxAge: 31536000, // 1 year in seconds
+      includeSubDomains: true,
+      preload: true,
+    },
+
+    // X-Frame-Options - Prevent clickjacking
+    frameguard: {
+      action: 'deny', // Don't allow embedding in iframes
+    },
+
+    // X-Content-Type-Options - Prevent MIME sniffing
+    noSniff: true,
+
+    // Referrer-Policy - Control referrer information
+    referrerPolicy: {
+      policy: 'strict-origin-when-cross-origin',
+    },
+
+    // Permissions-Policy - Restrict browser features
+    permissionsPolicy: {
+      features: {
+        geolocation: ['self'], // Allow geolocation for property location
+        camera: ['self'], // Allow camera for photo uploads
+        microphone: ['none'], // Disable microphone
+        payment: ['none'], // Disable payment API
+        usb: ['none'], // Disable USB API
+        bluetooth: ['none'], // Disable Bluetooth API
+      },
+    },
+
+    // X-DNS-Prefetch-Control - Control DNS prefetching
+    dnsPrefetchControl: {
+      allow: false,
+    },
+
+    // X-Download-Options - Prevent IE from executing downloads
+    ieNoOpen: true,
+
+    // Hide X-Powered-By header
+    hidePoweredBy: true,
+  })
+);
+
 // Fix for ERR_QUIC_PROTOCOL_ERROR on Render
 app.use((req, res, next) => {
   res.setHeader('Alt-Svc', 'clear');
@@ -69,6 +167,10 @@ app.use(
     credentials: true,
   })
 );
+
+// ─── Cookie Parser ──────────────────────────────────────────────────────────
+// Parse cookies for httpOnly refresh tokens
+app.use(cookieParser());
 
 // ─── WhatsApp inbound webhook (Meta) ─────────────────────────────────────────
 // Mounted BEFORE the global JSON parser and the /api rate limiter ON PURPOSE:

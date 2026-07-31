@@ -21,6 +21,7 @@
  */
 
 const User = require('../models/User');
+const auditLog = require('../services/auditLog.service');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function pickPublicUser(u) {
@@ -257,6 +258,18 @@ async function verifyUser(req, res, next) {
     // updated verification block, so we don't have to touch it manually.
     await user.save();
 
+    // Audit log
+    await auditLog.safeLog(auditLog.logUserAction, req, {
+      action: 'user.verify',
+      targetId: user._id.toString(),
+      targetName: user.name,
+      description: `Verified user ${user.name} (${user.phone})`,
+      metadata: {
+        previousStatus: 'pending',
+        newStatus: 'verified',
+      },
+    });
+
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
     return next(err);
@@ -353,6 +366,20 @@ async function rejectUser(req, res, next) {
     user.tenantProfile.verification.submittedForReview = false;
 
     await user.save();
+    
+    // Audit log
+    await auditLog.safeLog(auditLog.logUserAction, req, {
+      action: 'user.verify',
+      targetId: user._id.toString(),
+      targetName: user.name,
+      description: `Rejected verification for user ${user.name} (${user.phone})`,
+      metadata: {
+        reason,
+        previousStatus: 'pending',
+        newStatus: 'rejected',
+      },
+    });
+    
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
     return next(err);
@@ -383,6 +410,15 @@ async function banUser(req, res, next) {
     user.bannedBy  = req.user._id;
     await user.save();
 
+    // Audit log
+    await auditLog.safeLog(auditLog.logUserAction, req, {
+      action: 'user.ban',
+      targetId: user._id.toString(),
+      targetName: user.name,
+      description: `Banned user ${user.name} (${user.phone})`,
+      metadata: { reason },
+    });
+
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
     return next(err);
@@ -396,11 +432,22 @@ async function unbanUser(req, res, next) {
     const user = await User.findById(id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    const previousReason = user.banReason;
+    
     user.isBanned  = false;
     user.banReason = '';
     user.bannedAt  = null;
     user.bannedBy  = null;
     await user.save();
+
+    // Audit log
+    await auditLog.safeLog(auditLog.logUserAction, req, {
+      action: 'user.unban',
+      targetId: user._id.toString(),
+      targetName: user.name,
+      description: `Unbanned user ${user.name} (${user.phone})`,
+      metadata: { previousReason },
+    });
 
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
@@ -429,6 +476,8 @@ async function updateUserRole(req, res, next) {
     const user = await User.findById(id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    const previousRole = user.role;
+    
     user.role = role;
     const newRoles = ['tenant'];
     if (user.landlordProfile && user.landlordProfile.fullName) {
@@ -442,6 +491,18 @@ async function updateUserRole(req, res, next) {
     
     user.roles = [...new Set(newRoles)];
     await user.save();
+
+    // Audit log
+    await auditLog.safeLog(auditLog.logUserAction, req, {
+      action: 'user.role.change',
+      targetId: user._id.toString(),
+      targetName: user.name,
+      description: `Changed role for user ${user.name} (${user.phone})`,
+      changes: {
+        before: { role: previousRole },
+        after: { role: user.role },
+      },
+    });
 
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
@@ -659,12 +720,27 @@ async function deleteUser(req, res, next) {
       return res.status(403).json({ message: "Super admins can't be deleted." });
     }
 
+    const userName = user.name;
+    const userPhone = user.phone;
+
     // Cascade delete their properties
     const Property = require('../models/Property');
+    const deletedPropertiesCount = await Property.countDocuments({ ownerId: id });
     await Property.deleteMany({ ownerId: id });
 
     // Delete the user
     await User.findByIdAndDelete(id);
+
+    // Audit log
+    await auditLog.safeLog(auditLog.logUserAction, req, {
+      action: 'user.delete',
+      targetId: id,
+      targetName: userName,
+      description: `Permanently deleted user ${userName} (${userPhone})`,
+      metadata: {
+        deletedPropertiesCount,
+      },
+    });
 
     return res.json({ message: 'User and their properties permanently deleted', id });
   } catch (err) {

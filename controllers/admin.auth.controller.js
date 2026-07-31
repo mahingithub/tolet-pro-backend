@@ -13,6 +13,9 @@ const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const authService = require('../services/auth.service');
 const tokenService = require('../services/token.service');
+const refreshTokenService = require('../services/refreshToken.service');
+const auditLog = require('../services/auditLog.service');
+const loginHistory = require('../services/loginHistory.service');
 const User = require('../models/User');
 const ApiError = require('../utils/ApiError');
 const env = require('../config/env');
@@ -55,7 +58,32 @@ exports.login = asyncH(async (req, res) => {
     });
   }
 
-  res.json({ token: result.token, admin: toAdminDTO(result.user) });
+  // No 2FA or 2FA verification succeeded - issue refresh token
+  const sessionId = result.user.sessions && result.user.sessions.length > 0 
+    ? result.user.sessions[result.user.sessions.length - 1].sessionId 
+    : null;
+  
+  let refreshToken = null;
+  if (sessionId) {
+    refreshToken = await refreshTokenService.issueRefreshToken({
+      userId: result.user._id,
+      sessionId,
+      ipAddress: req.ip || '0.0.0.0',
+      userAgent: req.headers['user-agent'],
+    });
+    
+    // Record login in history
+    await loginHistory.safeLog(
+      loginHistory.recordSuccessfulLogin,
+      req, result.user, sessionId, { loginType: 'password_admin' }
+    );
+  }
+
+  res.json({ 
+    token: result.token, // Access token
+    refreshToken, // NEW: Refresh token
+    admin: toAdminDTO(result.user) 
+  });
 });
 
 // GET /api/admin/auth/me  (requireAdminAuth) — validate token + hydrate admin.
@@ -69,6 +97,12 @@ exports.logout = asyncH(async (req, res) => {
   if (req.sessionId && Array.isArray(req.user.sessions)) {
     req.user.sessions = req.user.sessions.filter((s) => s.sessionId !== req.sessionId);
     await req.user.save();
+    
+    // Also revoke any refresh tokens for this session
+    await refreshTokenService.revokeSessionTokens(req.sessionId);
+    
+    // Record logout in history
+    await loginHistory.safeLog(loginHistory.recordLogout, req.sessionId);
   }
   res.json({ ok: true });
 });
@@ -123,8 +157,26 @@ exports.changePassword = asyncH(async (req, res) => {
 
   user.password = await bcrypt.hash(newPassword, env.bcryptRounds);
   user.passwordChangedAt = new Date();
+  const sessionIds = (user.sessions || []).map(s => s.sessionId);
   user.sessions = []; // sign out everywhere for safety
   await user.save();
+  
+  // Also revoke all refresh tokens for this user
+  await refreshTokenService.revokeAllUserTokens(user._id);
+
+  // Record logout in history for all active sessions
+  await Promise.all(
+    sessionIds.map(sid => loginHistory.safeLog(loginHistory.recordLogout, sid))
+  );
+
+  // Audit log
+  await auditLog.safeLog(auditLog.logAdminAction, req, {
+    action: 'admin.password.reset',
+    targetId: user._id.toString(),
+    targetName: user.name,
+    description: `Admin ${user.name} changed their password`,
+    metadata: { allSessionsRevoked: true },
+  });
 
   res.json({ ok: true, code: 'password_changed' });
 });
@@ -202,9 +254,24 @@ exports.verify2FALogin = asyncH(async (req, res) => {
 
   // Issue the real admin access token
   const accessToken = tokenService.signAdminToken(user, sessionId);
+  
+  // Issue refresh token for the session
+  const refreshToken = await refreshTokenService.issueRefreshToken({
+    userId: user._id,
+    sessionId,
+    ipAddress,
+    userAgent: device,
+  });
+
+  // Record login in history
+  await loginHistory.safeLog(
+    loginHistory.recordSuccessfulLogin,
+    req, user, sessionId, { loginType: '2fa_admin' }
+  );
 
   res.json({ 
     token: accessToken, 
+    refreshToken, // NEW: Refresh token
     admin: toAdminDTO(user),
     message: 'লগইন সফল হয়েছে।'
   });

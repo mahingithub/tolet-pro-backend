@@ -44,12 +44,10 @@ const env = {
   mongoUri: process.env.MONGO_URI,
 
   jwtSecret: process.env.JWT_SECRET,
-  // User sessions are long-lived (1 year) so a freshly signed-up user stays
-  // signed in and isn't bounced back to the login screen. Sessions can still
-  // end explicitly (logout) or be revoked server-side (sessions[] entry
-  // removed / password change) — see middleware/requireAuth.js. Keep this in
-  // sync with the frontend website cap (SESSION_TTL_MS in authService.js).
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '365d',
+  // User access tokens are now short-lived (15m) for security.
+  // Refresh tokens (30d) are used to get new access tokens.
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '15m',
+  jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   // Admin sessions are short-lived by default — admin power is high-value, so
   // a leaked token has a small blast-radius window.
   jwtAdminExpiresIn: process.env.JWT_ADMIN_EXPIRES_IN || '12h',

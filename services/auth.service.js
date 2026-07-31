@@ -9,6 +9,9 @@ const ApiError = require('../utils/ApiError');
 const env = require('../config/env');
 const smsService = require('./sms.service');
 const tokenService = require('./token.service');
+const refreshTokenService = require('./refreshToken.service');
+const otpAbuseService = require('./otpAbuse.service');
+const loginHistoryService = require('./loginHistory.service');
 
 const GENERIC_LOGIN_ERROR = 'ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে।';
 // Combined, non-specific OTP failure message — mirrors GENERIC_LOGIN_ERROR so
@@ -92,8 +95,27 @@ async function deliverOtp(phone, otp) {
  * overwritten / TTL-expire).
  *
  * If a verified account already exists for this phone, we refuse with 409.
+ * 
+ * OTP ABUSE PROTECTION:
+ * - Checks IP + phone + device fingerprint before sending
+ * - Progressive enforcement: warning → delay → CAPTCHA → block
+ * - Returns enforcement status to client for UX adaptation
  */
-async function startSignup({ name, phone, password, role }) {
+async function startSignup({ name, phone, password, role }, req) {
+  // ═══ ABUSE PROTECTION CHECK ═══════════════════════════════════════════════
+  const abuseCheck = await otpAbuseService.checkOtpRequest({
+    phoneNumber: phone,
+    ipAddress: req.ip || '0.0.0.0',
+    req,
+    captchaToken: req.body.captchaToken,
+  });
+  
+  // Apply delay if required (rate limiting)
+  if (abuseCheck.delayMs > 0) {
+    await new Promise(resolve => setTimeout(resolve, abuseCheck.delayMs));
+  }
+  
+  // ═══ EXISTING ACCOUNT CHECK ═══════════════════════════════════════════════
   const existing = await User.findOne({ phone });
   if (existing && existing.phoneVerified) {
     throw ApiError.conflict('এই নম্বরে অ্যাকাউন্ট ইতিমধ্যেই রয়েছে। লগইন করুন।', {
@@ -113,7 +135,14 @@ async function startSignup({ name, phone, password, role }) {
   const otp = await issueOtp(phone);
   await deliverOtp(phone, otp);
 
-  return { ok: true, expiresAt };
+  return {
+    ok: true,
+    expiresAt,
+    // Return abuse protection status to client for UX adaptation
+    enforcementLevel: abuseCheck.enforcementLevel,
+    requiresCaptcha: abuseCheck.requiresCaptcha,
+    message: abuseCheck.message,
+  };
 }
 
 /**
@@ -121,14 +150,24 @@ async function startSignup({ name, phone, password, role }) {
  * matching SignupIntent, create/finalize the User, mark phoneVerified, open a
  * session, and issue an access token. On success the SignupIntent and the Otp
  * document are both deleted.
+ * 
+ * OTP ABUSE PROTECTION:
+ * - Records failed verification attempts
+ * - Triggers CAPTCHA requirement after repeated failures
  */
-async function verifySignup({ phoneNumber, otp }) {
+async function verifySignup({ phoneNumber, otp }, req) {
   const phone = phoneNumber;
 
   // 1. Verify the OTP. A missing record means it never existed or the 5-minute
   //    TTL already reaped it → treat both as "invalid/expired".
   const record = await Otp.findOne({ phoneNumber: phone });
   if (!record || record.otp !== String(otp)) {
+    // Record failed verification for abuse tracking
+    await otpAbuseService.recordFailedVerification({
+      phoneNumber: phone,
+      ipAddress: req.ip || '0.0.0.0',
+    });
+    
     throw ApiError.badRequest(GENERIC_OTP_ERROR, {
       code: 'otp_invalid',
     });
@@ -186,6 +225,8 @@ async function verifySignup({ phoneNumber, otp }) {
  * "wrong password" to prevent phone enumeration.
  */
 async function login({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
+  const mockReq = { ip: ipAddress, headers: { 'user-agent': device } };
+  
   // OOM guard: trim any legacy-bloated sessions array in the DB BEFORE we load
   // the document. A doc that accumulated thousands of sessions under the old
   // (pre-cap) code could otherwise blow up memory the moment findOne pulls it
@@ -201,9 +242,17 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
     // Don't reveal whether the phone exists; hash a dummy password to keep
     // response times roughly constant.
     await bcrypt.compare(password, '$2a$12$abcdefghijklmnopqrstuv'); // bogus hash
+    await loginHistoryService.safeLog(
+      loginHistoryService.recordFailedLogin,
+      mockReq, phone, !user ? 'user_not_found' : 'user_not_verified', { loginType: 'password' }
+    );
     throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
   }
   if (user.isLocked) {
+    await loginHistoryService.safeLog(
+      loginHistoryService.recordFailedLogin,
+      mockReq, phone, 'account_locked', { loginType: 'password' }
+    );
     throw ApiError.tooMany('অ্যাকাউন্ট সাময়িকভাবে লক করা হয়েছে। কিছুক্ষণ পর চেষ্টা করুন।', {
       code: 'account_locked',
     });
@@ -216,6 +265,10 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
       user.loginAttempts = 0;
     }
     await user.save();
+    await loginHistoryService.safeLog(
+      loginHistoryService.recordFailedLogin,
+      mockReq, phone, 'wrong_password', { loginType: 'password' }
+    );
     throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
   }
   user.loginAttempts = 0;
@@ -244,6 +297,8 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
  * The account is loaded fresh so we never trust client-supplied role claims.
  */
 async function adminLogin({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
+  const mockReq = { ip: ipAddress, headers: { 'user-agent': device } };
+  
   // OOM guard mirrors login(): trim any legacy-bloated sessions before load.
   await User.updateOne(
     { phone },
@@ -253,9 +308,17 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
   const user = await User.findOne({ phone }).select('+password +loginAttempts +lockUntil +googleAuthSecret');
   if (!user || !user.phoneVerified) {
     await bcrypt.compare(password, '$2a$12$abcdefghijklmnopqrstuv'); // bogus hash — constant-ish timing
+    await loginHistoryService.safeLog(
+      loginHistoryService.recordFailedLogin,
+      mockReq, phone, !user ? 'admin_not_found' : 'admin_not_verified', { loginType: 'password_admin' }
+    );
     throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
   }
   if (user.isLocked) {
+    await loginHistoryService.safeLog(
+      loginHistoryService.recordFailedLogin,
+      mockReq, phone, 'admin_account_locked', { loginType: 'password_admin' }
+    );
     throw ApiError.tooMany('অ্যাকাউন্ট সাময়িকভাবে লক করা হয়েছে। কিছুক্ষণ পর চেষ্টা করুন।', {
       code: 'account_locked',
     });
@@ -268,6 +331,10 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
       user.loginAttempts = 0;
     }
     await user.save();
+    await loginHistoryService.safeLog(
+      loginHistoryService.recordFailedLogin,
+      mockReq, phone, 'wrong_password', { loginType: 'password_admin' }
+    );
     throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
   }
 
@@ -280,11 +347,19 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
     // refuse to issue an admin token.
     user.loginAttempts = 0;
     await user.save();
+    await loginHistoryService.safeLog(
+      loginHistoryService.recordFailedLogin,
+      mockReq, phone, 'admin_rbac_rejected', { loginType: 'password_admin' }
+    );
     throw ApiError.forbidden('এই অ্যাকাউন্টের অ্যাডমিন অ্যাক্সেস নেই।', { code: 'admin_required' });
   }
 
   // A banned admin cannot manage the platform.
   if (user.isBanned) {
+    await loginHistoryService.safeLog(
+      loginHistoryService.recordFailedLogin,
+      mockReq, phone, 'admin_banned', { loginType: 'password_admin' }
+    );
     throw ApiError.forbidden('আপনার অ্যাকাউন্ট স্থগিত।', { code: 'account_banned' });
   }
 
@@ -317,9 +392,34 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
  * issue a fresh OTP and deliver it via sms.net.bd. We ALWAYS resolve
  * successfully (and swallow SMS errors) so the endpoint can return a constant
  * response and never leak whether the account exists.
+ * 
+ * OTP ABUSE PROTECTION:
+ * - Checks IP + phone + device fingerprint before sending
+ * - Progressive enforcement: warning → delay → CAPTCHA → block
  */
-async function forgotPassword({ phoneNumber }) {
+async function forgotPassword({ phoneNumber }, req) {
   const phone = phoneNumber;
+  
+  // ═══ ABUSE PROTECTION CHECK ═══════════════════════════════════════════════
+  // Check abuse even before verifying account exists (prevents enumeration)
+  try {
+    const abuseCheck = await otpAbuseService.checkOtpRequest({
+      phoneNumber: phone,
+      ipAddress: req.ip || '0.0.0.0',
+      req,
+      captchaToken: req.body.captchaToken,
+    });
+    
+    // Apply delay if required (rate limiting)
+    if (abuseCheck.delayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, abuseCheck.delayMs));
+    }
+  } catch (err) {
+    // If abuse check fails, still return success to prevent enumeration
+    // But don't actually send OTP
+    return { ok: true, blocked: true };
+  }
+  
   const user = await User.findOne({ phone });
 
   if (user && user.phoneVerified) {
@@ -341,12 +441,21 @@ async function forgotPassword({ phoneNumber }) {
  * set the new password. Bumps `passwordChangedAt` (which invalidates any
  * previously-issued access tokens via the requireAuth check) and clears any
  * account lock. Deletes the Otp document on success.
+ * 
+ * OTP ABUSE PROTECTION:
+ * - Records failed verification attempts
  */
-async function resetPassword({ phoneNumber, otp, newPassword }) {
+async function resetPassword({ phoneNumber, otp, newPassword }, req) {
   const phone = phoneNumber;
 
   const record = await Otp.findOne({ phoneNumber: phone });
   if (!record || record.otp !== String(otp)) {
+    // Record failed verification for abuse tracking
+    await otpAbuseService.recordFailedVerification({
+      phoneNumber: phone,
+      ipAddress: req.ip || '0.0.0.0',
+    });
+    
     throw ApiError.badRequest(GENERIC_OTP_ERROR, {
       code: 'otp_invalid',
     });
@@ -362,6 +471,11 @@ async function resetPassword({ phoneNumber, otp, newPassword }) {
 
   user.password = await bcrypt.hash(newPassword, env.bcryptRounds);
   user.passwordChangedAt = new Date();
+  
+  // Revoke ALL active sessions for this user (both old JWT sessions array and new refresh tokens)
+  user.sessions = [];
+  await refreshTokenService.revokeAllUserTokens(user._id);
+  
   user.loginAttempts = 0;
   user.lockUntil = null;
   await user.save();
