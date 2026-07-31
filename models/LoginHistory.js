@@ -45,7 +45,7 @@ const loginHistorySchema = new mongoose.Schema(
     // ─── Login Attempt ──────────────────────────────────────────────────────
     loginType: {
       type: String,
-      enum: ['password', 'otp', '2fa', 'refresh_token'],
+      enum: ['password', 'otp', '2fa', 'refresh_token', 'password_admin', '2fa_admin'],
       default: 'password',
     },
     status: {

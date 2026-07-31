@@ -304,7 +304,7 @@ async function safeLog(logFn, ...args) {
     await logFn(...args);
   } catch (err) {
     console.error('[LoginHistory] Failed to write login history:', err.message);
-    console.error('[LoginHistory] Log data:', JSON.stringify(args, null, 2));
+    // Avoid JSON.stringify on args as they often contain circular Express req objects
   }
 }
 
