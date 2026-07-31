@@ -246,7 +246,7 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
       loginHistoryService.recordFailedLogin,
       mockReq, phone, !user ? 'user_not_found' : 'user_not_verified', { loginType: 'password' }
     );
-    throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
+    throw ApiError.unauthorized(!user ? 'এই নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।' : 'অ্যাকাউন্টটি ভেরিফাইড নয়।', { code: !user ? 'user_not_found' : 'user_not_verified' });
   }
   if (user.isLocked) {
     await loginHistoryService.safeLog(
@@ -269,7 +269,7 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
       loginHistoryService.recordFailedLogin,
       mockReq, phone, 'wrong_password', { loginType: 'password' }
     );
-    throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
+    throw ApiError.unauthorized('পাসওয়ার্ড ভুল হয়েছে।', { code: 'wrong_password' });
   }
   user.loginAttempts = 0;
   user.lockUntil = null;
@@ -312,7 +312,7 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
       loginHistoryService.recordFailedLogin,
       mockReq, phone, !user ? 'admin_not_found' : 'admin_not_verified', { loginType: 'password_admin' }
     );
-    throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
+    throw ApiError.unauthorized(!user ? 'এই নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।' : 'অ্যাকাউন্টটি ভেরিফাইড নয়।', { code: !user ? 'admin_not_found' : 'admin_not_verified' });
   }
   if (user.isLocked) {
     await loginHistoryService.safeLog(
@@ -335,7 +335,7 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
       loginHistoryService.recordFailedLogin,
       mockReq, phone, 'wrong_password', { loginType: 'password_admin' }
     );
-    throw ApiError.unauthorized(GENERIC_LOGIN_ERROR, { code: 'invalid_credentials' });
+    throw ApiError.unauthorized('পাসওয়ার্ড ভুল হয়েছে।', { code: 'wrong_password' });
   }
 
   // ── RBAC gate: only privileged roles may hold an admin session ──────────
