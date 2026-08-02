@@ -3,6 +3,7 @@
 const authService = require('../services/auth.service');
 const refreshTokenService = require('../services/refreshToken.service');
 const loginHistory = require('../services/loginHistory.service');
+const refreshCookie = require('../utils/refreshCookie');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -37,12 +38,7 @@ exports.signupVerify = asyncH(async (req, res) => {
     });
     
     // Set refresh token as httpOnly cookie (30 days)
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production', // HTTPS only in production
-      sameSite: 'strict',
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    });
+    res.cookie('refreshToken', refreshToken, refreshCookie.setOptions());
     
     // Record login in history
     await loginHistory.safeLog(
@@ -82,12 +78,7 @@ exports.login = asyncH(async (req, res) => {
     });
     
     // Set refresh token as httpOnly cookie (30 days)
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production', // HTTPS only in production
-      sameSite: 'strict',
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    });
+    res.cookie('refreshToken', refreshToken, refreshCookie.setOptions());
     
     // Record login in history
     await loginHistory.safeLog(
@@ -141,11 +132,7 @@ exports.logout = asyncH(async (req, res) => {
   }
   
   // Clear refresh token cookie
-  res.clearCookie('refreshToken', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-  });
+  res.clearCookie('refreshToken', refreshCookie.clearOptions());
   
   res.json({ ok: true });
 });
@@ -168,11 +155,7 @@ exports.logoutAll = asyncH(async (req, res) => {
   );
   
   // Clear refresh token cookie
-  res.clearCookie('refreshToken', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-  });
+  res.clearCookie('refreshToken', refreshCookie.clearOptions());
   
   res.json({ 
     ok: true, 

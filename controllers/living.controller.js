@@ -319,7 +319,10 @@ async function leaveHousehold(req, res, next) {
     if (!password) throw ApiError.badRequest('পাসওয়ার্ড দিন।', { code: 'password_required' });
     const fresh = await User.findById(req.user._id).select('+password');
     const ok = fresh && fresh.password && (await bcrypt.compare(password, fresh.password));
-    if (!ok) throw ApiError.unauthorized('পাসওয়ার্ড ভুল হয়েছে।', { code: 'invalid_password' });
+    // 403, not 401: the caller's session is fine — they just typed the wrong
+    // password. A 401 here trips the client's global token-refresh/expiry
+    // path and can bounce a perfectly valid session to the login screen.
+    if (!ok) throw ApiError.forbidden('পাসওয়ার্ড ভুল হয়েছে।', { code: 'invalid_password' });
 
     const meId = myMemberId(hh, req.user._id);
     if (meId) hh.members.pull(meId);

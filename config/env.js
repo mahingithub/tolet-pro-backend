@@ -43,6 +43,18 @@ const env = {
 
   mongoUri: process.env.MONGO_URI,
 
+  // ─── Refresh-token cookie ────────────────────────────────────────────────
+  // 'strict' (default) only works when the app and the API are the SAME site.
+  // Split-domain deploys and the Capacitor WebView must set
+  // COOKIE_SAMESITE=none (which also forces Secure) or the browser will never
+  // send the cookie to POST /auth/refresh and every session dies after 15m.
+  cookieSameSite: (() => {
+    const raw = String(process.env.COOKIE_SAMESITE || 'strict').toLowerCase();
+    return ['strict', 'lax', 'none'].includes(raw) ? raw : 'strict';
+  })(),
+  // Optional parent domain (e.g. '.tolet-pro.com') so api.* and www.* share it.
+  cookieDomain: process.env.COOKIE_DOMAIN || '',
+
   jwtSecret: process.env.JWT_SECRET,
   // User access tokens are now short-lived (15m) for security.
   // Refresh tokens (30d) are used to get new access tokens.

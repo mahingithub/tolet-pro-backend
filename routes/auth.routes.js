@@ -11,6 +11,7 @@ const validate = require('../middleware/validate');
 const requireAuth = require('../middleware/requireAuth');
 const rl = require('../middleware/rateLimit');
 const refreshTokenService = require('../services/refreshToken.service');
+const refreshCookie = require('../utils/refreshCookie');
 const loginHistory = require('../services/loginHistory.service');
 
 // Multi-file upload for the landlord-verification submit. We mount a
@@ -71,12 +72,7 @@ router.post('/refresh', rl.refresh, async (req, res, next) => {
     });
     
     // Set new refresh token as httpOnly cookie
-    res.cookie('refreshToken', result.refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    });
+    res.cookie('refreshToken', result.refreshToken, refreshCookie.setOptions());
     
     res.json({
       token: result.accessToken, // New short-lived access token (15m)
@@ -84,11 +80,7 @@ router.post('/refresh', rl.refresh, async (req, res, next) => {
     });
   } catch (err) {
     // Clear cookie on error
-    res.clearCookie('refreshToken', {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-    });
+    res.clearCookie('refreshToken', refreshCookie.clearOptions());
     next(err);
   }
 });
