@@ -75,11 +75,18 @@ exports.getAllAIGuidesForAdmin = asyncH(async (req, res) => {
 	res.status(200).json(guides);
 });
 
+// Accept keywords as either an array or a comma-separated string (what the
+// admin form sends). Normalised to trimmed, non-empty, lowercase strings.
+const parseKeywords = (raw) => {
+	const list = Array.isArray(raw) ? raw : String(raw || "").split(",");
+	return list.map((k) => String(k).trim().toLowerCase()).filter(Boolean);
+};
+
 // @desc    Create a new AI Guide
 // @route   POST /api/ai-guides
 // @access  Private/Admin
 exports.createAIGuide = asyncH(async (req, res) => {
-	const { title, suggestionText, videoUrl, isActive, order, placement, audience } = req.body;
+	const { title, suggestionText, videoUrl, isActive, order, placement, audience, keywords } = req.body;
 
 	const newGuide = new AIGuide({
 		title,
@@ -89,6 +96,7 @@ exports.createAIGuide = asyncH(async (req, res) => {
 		order,
 		placement,
 		audience,
+		keywords: parseKeywords(keywords),
 	});
 
 	const savedGuide = await newGuide.save();
@@ -99,7 +107,7 @@ exports.createAIGuide = asyncH(async (req, res) => {
 // @route   PUT /api/ai-guides/:id
 // @access  Private/Admin
 exports.updateAIGuide = asyncH(async (req, res) => {
-	const { title, suggestionText, videoUrl, isActive, order, placement, audience } = req.body;
+	const { title, suggestionText, videoUrl, isActive, order, placement, audience, keywords } = req.body;
 
 	const guide = await AIGuide.findById(req.params.id);
 	if (!guide) {
@@ -113,6 +121,7 @@ exports.updateAIGuide = asyncH(async (req, res) => {
 	if (order !== undefined) guide.order = order;
 	if (placement !== undefined) guide.placement = placement;
 	if (audience !== undefined) guide.audience = audience;
+	if (keywords !== undefined) guide.keywords = parseKeywords(keywords);
 
 	const updatedGuide = await guide.save();
 	res.status(200).json(updatedGuide);

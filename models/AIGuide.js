@@ -25,6 +25,13 @@ const aiGuideSchema = new mongoose.Schema(
 			type: Number,
 			default: 0,
 		},
+		// Admin-set match keywords (e.g. "বাসা ছাড়া, leave house, notice").
+		// The AI chat matches the user's question against these (plus the
+		// title/suggestionText) to attach the right walkthrough video.
+		keywords: {
+			type: [String],
+			default: [],
+		},
 		// Where this guide is shown.
 		//  'assistant'    = the floating AI Assistant's suggestion list. This is
 		//                   the DEFAULT, so every guide that already exists keeps

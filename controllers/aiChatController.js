@@ -198,9 +198,19 @@ SPECIFIC-LISTING QUESTIONS
 
 If asked about one property ("is this available", "call the owner for me"), only answer using data from a tool result already in this conversation. If it's not there, say you can't confirm that and point to the listing page or contact button.
 
+HOW-TO / GUIDE QUESTIONS
+
+When the user asks HOW to do something on TO-LET PRO (leave a house, rent a house, list a property, pay rent, contact an owner, use a feature), give a COMPLETE but compact answer:
+
+1. Explain the actual steps as a short numbered list (up to 6 steps), in the user's language, naming the real buttons/pages in the app (e.g. 'যোগাযোগ করুন' button, বাড়ি যোগ করুন, ড্যাশবোর্ড).
+
+2. If a matching walkthrough video exists in the VIDEO GUIDES list, ALWAYS attach it with the suggest_video_guide tool and end by inviting them to watch it.
+
+This is the one case where you may exceed the usual length limit — a how-to answer must never be a vague one-liner.
+
 OUTPUT LENGTH
 
-2–4 sentences outside of the property cards. This is a chat window, not a report.`;
+2–4 sentences outside of the property cards and how-to answers. This is a chat window, not a report.`;
 
 // @desc    Ask the AI assistant; it can search live listings via tool-calling
 // @route   POST /api/ai-chat/ask
@@ -273,7 +283,10 @@ exports.askGemini = asyncH(async (req, res) => {
 	let systemInstruction = SYSTEM_INSTRUCTION;
 	if (guides.length) {
 		const catalogue = guides
-			.map((g) => `- id="${g._id}" — ${g.title}: ${g.suggestionText}`)
+			.map((g) => {
+				const kw = Array.isArray(g.keywords) && g.keywords.length ? ` (keywords: ${g.keywords.join(", ")})` : "";
+				return `- id="${g._id}" — ${g.title}: ${g.suggestionText}${kw}`;
+			})
 			.join("\n");
 		systemInstruction += `
 
@@ -348,6 +361,19 @@ Video rules:
 		}
 
 		const replyText = result.response.text() || "দুঃখিত, এই মুহূর্তে উত্তরটি দিতে পারছি না।";
+
+		// Deterministic fallback: if Gemini did NOT attach a guide, match the
+		// admin-set keywords against the user's question ourselves. This is the
+		// guarantee the admin asked for — "বাসা ছাড়া" in the question + that
+		// keyword on a guide ⇒ that video ships with the answer, every time,
+		// regardless of whether the model remembered to call the tool.
+		if (!suggestedGuideId && guides.length) {
+			const q = String(text).toLowerCase();
+			const match = guides.find(
+				(g) => Array.isArray(g.keywords) && g.keywords.some((kw) => kw && q.includes(kw)),
+			);
+			if (match) suggestedGuideId = String(match._id);
+		}
 
 		// Resolve the suggested guide (if any) into the compact shape the client
 		// renders as a "Watch" button that opens the video modal.
