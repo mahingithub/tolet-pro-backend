@@ -45,7 +45,7 @@ const aiGuideSchema = new mongoose.Schema(
 		//                   support" walkthrough video).
 		placement: {
 			type: String,
-			enum: ["assistant", "welcome", "how_it_works", "support"],
+			enum: ["assistant", "welcome", "how_it_works", "support", "subscription", "checkout"],
 			default: "assistant",
 		},
 		// Who the guide targets. Used by 'welcome' and 'how_it_works' placements
