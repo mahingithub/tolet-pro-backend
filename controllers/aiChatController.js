@@ -467,9 +467,54 @@ Video rules:
 		return res.status(200).json({ text: replyText, properties, videoGuide, actions });
 	} catch (error) {
 		console.error("Gemini API Error:", error);
-		return res.status(500).json({
-			message: "Sorry, I am having trouble connecting to my brain right now. Please try again later.",
-		});
+
+		// ── Graceful degradation (free-tier quota, model outage, any Gemini
+		// error). Instead of a 500 + generic "brain" apology, return a REAL
+		// 200 reply: a polite high-volume note in the user's UI language, a
+		// keyword-matched video guide when the admin has one for this question,
+		// 1–2 relevant navigation buttons, and always a route to support.
+		const q = String(text).toLowerCase();
+
+		// Reuse the admin's tracked keywords to still answer with the right video.
+		let videoGuide = null;
+		const guideMatch = guides.find(
+			(g) => Array.isArray(g.keywords) && g.keywords.some((kw) => kw && q.includes(kw)),
+		);
+		if (guideMatch) {
+			videoGuide = {
+				id: String(guideMatch._id),
+				title: guideMatch.title,
+				videoUrl: guideMatch.videoUrl,
+				suggestionText: guideMatch.suggestionText,
+			};
+		}
+
+		// Light keyword → page routing so the user can still get where they
+		// were trying to go.
+		const ACTION_KEYWORD_RULES = [
+			{ id: "list_property",     kws: ["ভাড়া দেবো", "ভাড়া দিতে", "ভাড়া দিব", "বাড়ি যোগ", "লিস্ট", "বিজ্ঞাপন", "list", "post", "add property"] },
+			{ id: "browse_properties", kws: ["ভাড়া নিতে", "ভাড়া নেবো", "বাসা খুঁজ", "খুঁজছি", "find", "looking for", "rent a", "বাসা ভাড়া", "অফিস ভাড়া", "হোস্টেল"] },
+			{ id: "messages",          kws: ["মেসেজ", "চ্যাট", "message", "chat"] },
+		];
+		const actionIds = ACTION_KEYWORD_RULES
+			.filter((r) => r.kws.some((kw) => q.includes(kw)))
+			.map((r) => r.id)
+			.slice(0, 2);
+		if (!actionIds.includes("support")) actionIds.push("support"); // always offer the humans
+		const actions = actionIds.map((id) => ({
+			label: isBnMode ? APP_ACTIONS[id].bn : APP_ACTIONS[id].en,
+			route: APP_ACTIONS[id].route,
+		}));
+
+		const fallbackText = isBnMode
+			? "এই মুহূর্তে অনেক বেশি অনুরোধ আসায় AI অ্যাসিস্ট্যান্ট একটু ব্যস্ত। 🙏 অসুবিধার জন্য দুঃখিত!" +
+			  (videoGuide ? " আপনার প্রশ্নের সাথে মিলে যাওয়া একটি ভিডিও গাইড নিচে দেওয়া হলো।" : "") +
+			  " নিচের বাটনগুলো দিয়ে কাজটি এখনই সেরে নিতে পারেন, অথবা আমাদের সাপোর্ট টিমের সাথে কথা বলুন — তারা সবসময় প্রস্তুত।"
+			: "Our AI assistant is a bit busy right now due to high volume — sorry about that! 🙏" +
+			  (videoGuide ? " Here's a video guide that matches your question." : "") +
+			  " You can use the buttons below to get it done right away, or reach our support team — they're always ready to help.";
+
+		return res.status(200).json({ text: fallbackText, properties: [], videoGuide, actions, degraded: true });
 	}
 });
 
