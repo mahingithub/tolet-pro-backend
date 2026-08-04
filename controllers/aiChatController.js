@@ -91,6 +91,42 @@ const suggestVideoGuideDecl = {
 	},
 };
 
+// ── In-app action buttons ────────────────────────────────────────────────────
+// Fixed catalogue of real app pages the assistant may attach as tap-to-go
+// buttons under its answer (like a support agent sharing a direct link).
+// Only these ids/routes ever reach the client — a hallucinated id is dropped.
+const APP_ACTIONS = {
+	list_property:     { route: "/list-property",               en: "Add Property",       bn: "বাড়ি যোগ করুন" },
+	browse_properties: { route: "/properties/all",              en: "Browse Properties",  bn: "বাসা খুঁজুন" },
+	tenant_dashboard:  { route: "/tenant-dashboard",            en: "Tenant Dashboard",   bn: "ভাড়াটিয়া ড্যাশবোর্ড" },
+	host_dashboard:    { route: "/host-dashboard",              en: "Landlord Dashboard", bn: "বাড়িওয়ালা ড্যাশবোর্ড" },
+	messages:          { route: "/messages",                    en: "Messages",           bn: "মেসেজ" },
+	saved_properties:  { route: "/tenant-dashboard?tab=saved",  en: "Saved Properties",   bn: "সেভ করা বাড়ি" },
+	smart_alerts:      { route: "/smart-alerts",                en: "My Alerts",          bn: "আমার অ্যালার্ট" },
+	support:           { route: "/support",                     en: "Help & Support",     bn: "সহায়তা ও সাপোর্ট" },
+	how_it_works:      { route: "/how-it-works",                en: "How it Works",       bn: "কীভাবে কাজ করে" },
+};
+
+const suggestAppActionsDecl = {
+	name: "suggest_app_actions",
+	description:
+		"Attach up to 2 in-app navigation buttons under your answer so the user can jump straight to the page you " +
+		"just told them about (like a support agent sharing a direct link). Use whenever your answer tells the user " +
+		"to go somewhere or press something — e.g. a how-to answer about listing a property should attach " +
+		"'list_property'. Only ids from the fixed list are valid.",
+	parameters: {
+		type: SchemaType.OBJECT,
+		properties: {
+			actionIds: {
+				type: SchemaType.ARRAY,
+				items: { type: SchemaType.STRING, enum: Object.keys(APP_ACTIONS) },
+				description: "1–2 action ids, most relevant first.",
+			},
+		},
+		required: ["actionIds"],
+	},
+};
+
 // Execute the search the AI asked for, REUSING the same buildSearchFilter the
 // rest of the app uses. OOM-safe: the aggregation collapses any legacy base64
 // coverPhoto to '' inside Mongo, so it never loads into Node memory (matches the
@@ -225,8 +261,12 @@ exports.askGemini = asyncH(async (req, res) => {
 		}
 	}
 
-	const { text, history } = req.body;
+	const { text, history, language } = req.body;
 	if (!text) throw ApiError.badRequest("Message text is required");
+
+	// UI language mode ('bn' | 'en') from the client — drives which button
+	// labels the bot names in text AND which labels the action buttons carry.
+	const isBnMode = String(language || "").toLowerCase().startsWith("bn") || language === "বাংলা";
 
 	// ── Build sanitised, bounded history. Gemini needs roles that alternate,
 	//    must start with 'user', and must NOT include the current message. We
@@ -281,6 +321,25 @@ exports.askGemini = asyncH(async (req, res) => {
 	// Append the video-guide catalogue + rules to the base system instruction,
 	// but only when there are guides to offer.
 	let systemInstruction = SYSTEM_INSTRUCTION;
+
+	// ── UI language mode + real button names ────────────────────────────────
+	// The app is bilingual and every button is labelled differently per mode.
+	// Telling the model which mode is active lets it name the EXACT button the
+	// user is looking at ('যোগাযোগ করুন' vs 'Inquire').
+	systemInstruction += `
+
+UI LANGUAGE MODE
+The user's app interface is currently in ${isBnMode ? "BENGALI (বাংলা)" : "ENGLISH"} mode. Default to replying in that language unless the user clearly writes in the other one. When you name a button or page, use the label of the CURRENT mode — these are the real labels:
+- Contact the owner of a listing: ${isBnMode ? "'যোগাযোগ করুন' বাটন (লিস্টিং কার্ড ও প্রপার্টি পেজে)" : "the 'Inquire' button (on listing cards and the property page)"}
+- View listing details: ${isBnMode ? "'বিস্তারিত'" : "'Details'"}
+- Post/list a property: ${isBnMode ? "'বাড়ি যোগ করুন' / 'বাড়ি দিন'" : "'Add Property' / 'Post Property'"}
+- Landlord dashboard: ${isBnMode ? "'বাড়িওয়ালা ড্যাশবোর্ড'" : "'Landlord Dashboard'"}
+- Tenant dashboard: ${isBnMode ? "'ভাড়াটিয়া ড্যাশবোর্ড'" : "'Tenant Dashboard'"}
+- Search/filter listings: ${isBnMode ? "'খুঁজুন' বাটন ও 'ফিল্টার'" : "the 'Search' button and 'Filters'"}
+- Help center: ${isBnMode ? "'সহায়তা ও সাপোর্ট'" : "'Help & Support'"}
+
+APP ACTION BUTTONS
+After an answer that tells the user to go somewhere in the app, call "suggest_app_actions" with 1–2 of these ids so tappable buttons appear under your reply: ${Object.keys(APP_ACTIONS).join(", ")}. Example: "how do I list my house/hostel/restaurant?" → answer the steps, then attach ["list_property"]. Never write raw URLs or routes in your text — the buttons handle navigation.`;
 	if (guides.length) {
 		const catalogue = guides
 			.map((g) => {
@@ -299,9 +358,9 @@ Video rules:
 - Never write the id or the video URL in your text answer. Just call the tool, and in your text briefly invite them to watch the short guide shown below your reply.`;
 	}
 
-	// Gemini tools: property search is always available; the video-guide tool is
-	// added only when we actually have guides to suggest.
-	const functionDeclarations = [searchPropertiesTool.functionDeclarations[0]];
+	// Gemini tools: property search + app-action buttons are always available;
+	// the video-guide tool is added only when we actually have guides to suggest.
+	const functionDeclarations = [searchPropertiesTool.functionDeclarations[0], suggestAppActionsDecl];
 	if (guides.length) functionDeclarations.push(suggestVideoGuideDecl);
 
 	try {
@@ -319,6 +378,7 @@ Video rules:
 		// it and feed the results back. Bounded to a few rounds for safety.
 		let properties = [];
 		let suggestedGuideId = null;
+		let suggestedActionIds = [];
 		let rounds = 0;
 		while (rounds < 3) {
 			const calls =
@@ -342,6 +402,13 @@ Video rules:
 								})),
 							},
 						},
+					});
+				} else if (call.name === "suggest_app_actions") {
+					// Validate against the fixed catalogue; keep at most 2.
+					const ids = Array.isArray(call.args && call.args.actionIds) ? call.args.actionIds : [];
+					suggestedActionIds = ids.map(String).filter((id) => APP_ACTIONS[id]).slice(0, 2);
+					toolResponses.push({
+						functionResponse: { name: call.name, response: { attached: suggestedActionIds } },
 					});
 				} else if (call.name === "suggest_video_guide") {
 					// Only accept an id we actually published this request — never
@@ -390,7 +457,14 @@ Video rules:
 			}
 		}
 
-		return res.status(200).json({ text: replyText, properties, videoGuide });
+		// Resolve action ids → { label, route } buttons, labelled in the user's
+		// current UI language.
+		const actions = suggestedActionIds.map((id) => ({
+			label: isBnMode ? APP_ACTIONS[id].bn : APP_ACTIONS[id].en,
+			route: APP_ACTIONS[id].route,
+		}));
+
+		return res.status(200).json({ text: replyText, properties, videoGuide, actions });
 	} catch (error) {
 		console.error("Gemini API Error:", error);
 		return res.status(500).json({
