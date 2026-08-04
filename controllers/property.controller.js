@@ -65,6 +65,7 @@ function formatLeanProperty(p) {
   ret.id              = String(ret._id);
   ret.landlordId      = ret.ownerUserId ? String(ret.ownerUserId) : null;
   ret.landlordName    = ret.ownerName  || '';
+  ret.hostTier        = ret.hostTier   || 'free';
   ret.gpsLat          = ret.gps && ret.gps.lat ? ret.gps.lat : null;
   ret.gpsLng          = ret.gps && ret.gps.lng ? ret.gps.lng : null;
   ret.gpsAddress      = ret.gps && ret.gps.address ? ret.gps.address : '';
@@ -100,13 +101,43 @@ exports.getProperties = asyncH(async (req, res) => {
     });
   }
   const out = await propertyService.listProperties(parsed.data);
+  const items = out.items.map((d) => trimForListCard(formatLeanProperty(d)));
+  await attachHostTiers(items);
   res.json({
-    properties: out.items.map((d) => trimForListCard(formatLeanProperty(d))),
+    properties: items,
     total: out.total,
     page:  out.page,
     limit: out.limit,
   });
 });
+
+// Stamp each list item with its host's PAID subscription tier
+// ('free' | 'plus' | 'pro') so cards can render Plus/Pro badges, the gold
+// card and Top Position tags. Looked up fresh per request (one batched query)
+// instead of denormalised onto the property, so an expired subscription drops
+// its badges immediately. Trials deliberately do NOT count — a badge is a
+// paid signal, and during the launch trial every host would otherwise be Pro.
+async function attachHostTiers(items) {
+  try {
+    const ids = [...new Set(items.map((p) => p.landlordId).filter(Boolean))];
+    if (!ids.length) return items;
+    const subs = await Subscription.find({
+      userId: { $in: ids },
+      status: 'active',
+      currentPeriodEnd: { $gt: new Date() },
+    }).select('userId planId').lean();
+    const tierByUser = {};
+    for (const s of subs) {
+      tierByUser[String(s.userId)] = String(s.planId).startsWith('plus') ? 'plus' : 'pro';
+    }
+    items.forEach((p) => { p.hostTier = tierByUser[p.landlordId] || 'free'; });
+  } catch (e) {
+    // Badges are decorative — never let this lookup break the listing feed.
+    console.warn('[properties] hostTier lookup failed:', e.message);
+    items.forEach((p) => { if (!p.hostTier) p.hostTier = 'free'; });
+  }
+  return items;
+}
 
 exports.getPropertyById = asyncH(async (req, res) => {
   const doc = await propertyService.getPropertyById(req.params.id);

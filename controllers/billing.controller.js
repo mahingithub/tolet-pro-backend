@@ -8,12 +8,17 @@
  */
 
 const Subscription = require('../models/Subscription');
+const Property = require('../models/Property');
 const ApiError = require('../utils/ApiError');
 
-// Simulated plans
+// Simulated plans — MUST mirror the frontend catalogue in
+// tolet-pro-frontend/src/services/subscriptionService.js (ids AND prices),
+// otherwise checkout rejects the plan the UI just offered.
 const PLANS = [
-  { id: 'pro_monthly', name: 'Pro Monthly', price: 999, currency: 'BDT', interval: 'month' },
-  { id: 'pro_yearly', name: 'Pro Yearly', price: 9999, currency: 'BDT', interval: 'year' }
+  { id: 'plus_monthly', name: 'Plus Monthly', price: 19,  currency: 'BDT', interval: 'month', tier: 'plus' },
+  { id: 'plus_yearly',  name: 'Plus Yearly',  price: 229, currency: 'BDT', interval: 'year',  tier: 'plus' },
+  { id: 'pro_monthly',  name: 'Pro Monthly',  price: 49,  currency: 'BDT', interval: 'month', tier: 'pro' },
+  { id: 'pro_yearly',   name: 'Pro Yearly',   price: 599, currency: 'BDT', interval: 'year',  tier: 'pro' },
 ];
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -84,6 +89,12 @@ exports.checkout = asyncH(async (req, res) => {
   
   await sub.save();
   
+  // Sync tier to all listings owned by this host for immediate badge/sort updates
+  await Property.updateMany(
+    { ownerUserId: req.user._id },
+    { $set: { hostTier: plan.tier || 'free' } }
+  );
+
   res.json({ 
     success: true, 
     message: 'পেমেন্ট সফল হয়েছে!', // Payment successful!

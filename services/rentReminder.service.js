@@ -18,7 +18,9 @@
  */
 
 const Booking       = require('../models/Booking');
+const User          = require('../models/User');
 const notifications = require('./notification.service');
+const whatsapp      = require('./whatsapp.service');
 const env           = require('../config/env');
 
 let sms = null;
@@ -106,7 +108,13 @@ async function runRentReminders(today = new Date()) {
       const title = `⏰ ভাড়ার রিমাইন্ডার — ${booking.property || 'বাসা'}`;
       const body  = `${m.name ? m.name + ', ' : ''}${label} এর ভাড়া ৳${rent} পরিশোধের সময় হয়েছে।`;
 
+      let userHasApp = false;
       if (m.userId) {
+        const user = await User.findById(m.userId).select('deviceTokens').lean();
+        if (user && user.deviceTokens && user.deviceTokens.length > 0) {
+          userHasApp = true;
+        }
+
         notifications.emit({
           userId: m.userId,
           type:   'payment',
@@ -114,9 +122,17 @@ async function runRentReminders(today = new Date()) {
           body,
           data:   { bookingId: String(booking._id), memberId: String(m._id), monthKey: next.key, kind: 'rent_reminder' },
         });
-      } else if (m.phone && env.smsApiKey && sms) {
-        // Best-effort SMS for placeholder members (no app account). Never throws.
-        sms.sendSms(m.phone, `${title} — ${body}`).catch(() => {});
+      }
+      
+      if (!userHasApp && m.phone) {
+        // Fallback: Try WhatsApp first. If it fails (or is unconfigured), fallback to SMS.
+        whatsapp.sendWhatsAppMessage(m.phone, { body: `${title}\n\n${body}` })
+          .then(waRes => {
+            if (!waRes.success && env.smsApiKey && sms) {
+              sms.sendSms(m.phone, `${title} — ${body}`).catch(() => {});
+            }
+          })
+          .catch(() => {});
       }
       sent += 1;
     }

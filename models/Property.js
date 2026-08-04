@@ -297,6 +297,7 @@ const PropertySchema = new mongoose.Schema(
     ownerUserId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     ownerName:     { type: String, trim: true, default: '', maxlength: 80 },
     ownerPhone:    { type: String, trim: true, default: '', maxlength: 20 },
+    hostTier:      { type: String, enum: ['free', 'plus', 'pro'], default: 'free', index: true },
 
     // ─── Counters (denormalised) ─────────────────────────────────────────
     rating:        { type: Number, default: 0, min: 0, max: 5 },
@@ -401,6 +402,7 @@ PropertySchema.set('toJSON', {
     ret.landlordId      = ret.ownerUserId ? String(ret.ownerUserId) : null;
     ret.landlordName    = ret.ownerName  || '';
     ret.landlordPhone   = ret.ownerPhone || '';
+    ret.hostTier        = ret.hostTier   || 'free';
     ret.gpsLat          = ret.gps && ret.gps.lat ? ret.gps.lat : null;
     ret.gpsLng          = ret.gps && ret.gps.lng ? ret.gps.lng : null;
     ret.gpsAddress      = ret.gps && ret.gps.address ? ret.gps.address : '';

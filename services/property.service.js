@@ -10,6 +10,8 @@ const Receipt  = require('../models/Receipt');
 const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
 const Notification = require('../models/Notification');
+const User = require('../models/User');
+const Subscription = require('../models/Subscription');
 const searchService = require('./searchService');
 const { postToFacebookPage } = require('./facebook.service');
 
@@ -156,6 +158,13 @@ async function createProperty({ body, user }) {
       ? Number(body.floorNumber)
       : Number(body.floor) || 0;
 
+  const sub = await Subscription.findOne({ userId: user._id });
+  let hostTier = 'free';
+  if (sub && (sub.status === 'active' || sub.status === 'trialing')) {
+    if (sub.planId.startsWith('pro_')) hostTier = 'pro';
+    else if (sub.planId.startsWith('plus_')) hostTier = 'plus';
+  }
+
   const doc = new Property({
     title:       body.title,
     description: body.description || '',
@@ -193,6 +202,7 @@ async function createProperty({ body, user }) {
     ownerUserId: user._id,
     ownerName:   user.name  || '',
     ownerPhone:  user.phone || '',
+    hostTier:    hostTier,
   });
   await doc.save();
 
@@ -254,7 +264,10 @@ async function listProperties(query) {
     filter.availabilityStatus = { $nin: ['rented', 'booked'] };
   }
 
-  const sort   = searchService.buildSortOptions(query.sort);
+  const baseSort = searchService.buildSortOptions(query.sort);
+  // Tier-based sort boost: pro (p-r-o) > plus (p-l-u-s) > free (f-r-e-e)
+  // so sorting hostTier: -1 automatically ranks higher tiers first.
+  const sort = { hostTier: -1, ...baseSort };
   const page   = isIdLookup ? 1 : (query.page  || 1);
   // For an id lookup, return every requested doc in one page (no cutoff when a
   // user has more saved than the default 50). Otherwise keep normal paging.

@@ -12,7 +12,7 @@ const mongoose = require('mongoose');
 const SubscriptionSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-    planId: { type: String, enum: ['free', 'pro_monthly', 'pro_yearly'], default: 'free' },
+    planId: { type: String, enum: ['free', 'plus_monthly', 'plus_yearly', 'pro_monthly', 'pro_yearly'], default: 'free' },
     status: { type: String, enum: ['trialing', 'active', 'past_due', 'canceled'], default: 'trialing' },
     
     // The timestamp when the 3-month trial ends
