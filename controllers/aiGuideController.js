@@ -19,7 +19,7 @@ exports.getAIGuides = asyncH(async (req, res) => {
 	// from the Assistant.
 	const guides = await AIGuide.find({
 		isActive: true,
-		placement: { $nin: ["welcome", "how_it_works", "support"] },
+		placement: { $nin: ["welcome", "how_it_works", "support", "subscription", "checkout"] },
 	}).sort({ order: 1 });
 	res.status(200).json(guides);
 });
@@ -32,7 +32,7 @@ exports.getGuidesByPlacement = asyncH(async (req, res) => {
 	const { audience } = req.query;
 
 	// Only page-section placements are fetchable through this public endpoint.
-	const allowed = ["how_it_works", "support"];
+	const allowed = ["how_it_works", "support", "subscription", "checkout"];
 	if (!allowed.includes(placement)) {
 		throw ApiError.badRequest("Unknown guide placement");
 	}
