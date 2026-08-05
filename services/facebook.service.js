@@ -76,8 +76,18 @@ function collectImageUrls(property) {
  * Build a marketing-ready caption from property data.
  * Location goes FIRST (area → district → division).
  */
-function buildCaption(property) {
+function buildCaption(property, { superBoost = false } = {}) {
   const lines = [];
+
+  // ── Pro "Super Boost" banner ──────────────────────────────────────────
+  // Pro listings lead with a featured banner so they stand out in the feed.
+  // NOTE: this is organic differentiation only — it does NOT buy paid reach.
+  // True paid boosting needs the Facebook Marketing API and an ad account
+  // with a funded payment method; see the note in postToFacebookPage.
+  if (superBoost) {
+    lines.push('⭐ FEATURED LISTING ⭐');
+    lines.push('');
+  }
 
   // ── Location block (always first) ─────────────────────────────────────
   const area     = property.area     || '';
@@ -271,8 +281,16 @@ async function publishTextPost(pageId, accessToken, caption, link) {
  * - No images      → text post with link
  *
  * This function NEVER throws. All errors are caught and logged.
+ *
+ * GATING: the caller (services/property.service.js) only invokes this for Plus
+ * and Pro hosts — Facebook posting is a paid perk. `opts.superBoost` marks a
+ * Pro listing so its caption leads with a FEATURED banner.
+ *
+ * LIMITATION: "Boost" here means an organic Page post, not paid reach. Buying
+ * actual ad delivery requires the Facebook Marketing API plus a funded ad
+ * account, which is not wired up.
  */
-async function postToFacebookPage(property) {
+async function postToFacebookPage(property, opts = {}) {
   // Pull the CURRENT (auto-refreshed) token + page id from the token service.
   // These come from the DB row the refresh job keeps fresh, so we never post
   // with a stale/expired env value.
@@ -285,7 +303,7 @@ async function postToFacebookPage(property) {
   }
 
   try {
-    const { text: caption, link } = buildCaption(property);
+    const { text: caption, link } = buildCaption(property, opts);
     const imageUrls = collectImageUrls(property);
 
     if (imageUrls.length > 1) {

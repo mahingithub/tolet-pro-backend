@@ -14,10 +14,13 @@ const SubscriptionSchema = new mongoose.Schema(
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
     planId: { type: String, enum: ['free', 'plus_monthly', 'plus_yearly', 'pro_monthly', 'pro_yearly'], default: 'free' },
     status: { type: String, enum: ['trialing', 'active', 'past_due', 'canceled'], default: 'trialing' },
-    
-    // The timestamp when the 3-month trial ends
+
+    // When the launch trial ends. `planId` stays 'free' during a trial (nothing
+    // was purchased), so the tier the trial GRANTS is recorded separately here
+    // rather than inferred — see utils/subscriptionTier.js → tierOf().
     trialEndsAt: { type: Date, required: true },
-    
+    trialTier: { type: String, enum: ['free', 'plus', 'pro'], default: 'pro' },
+
     // For paid subscriptions
     currentPeriodEnd: { type: Date, default: null },
     autoRenew: { type: Boolean, default: true },

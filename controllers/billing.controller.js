@@ -10,6 +10,8 @@
 const Subscription = require('../models/Subscription');
 const Property = require('../models/Property');
 const ApiError = require('../utils/ApiError');
+const { grantLandlordTrial } = require('../services/subscription.service');
+const { trialEndFrom } = require('../utils/subscriptionTier');
 
 // Simulated plans — MUST mirror the frontend catalogue in
 // tolet-pro-frontend/src/services/subscriptionService.js (ids AND prices),
@@ -23,25 +25,45 @@ const PLANS = [
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
+/** Does this user hold the landlord role? Mirrors landlord.controller.js. */
+function isLandlord(user) {
+  if (!user) return false;
+  return Array.isArray(user.roles)
+    ? user.roles.includes('landlord')
+    : user.role === 'landlord';
+}
+
 /**
- * Helper to ensure a subscription exists for a host.
- * New hosts automatically get a 3-month trial.
+ * Fetch the caller's subscription, provisioning the launch trial if they are a
+ * landlord who somehow never got one (accounts that predate the grant hooks in
+ * services/subscription.service.js).
+ *
+ * Tenants deliberately get NOTHING persisted — subscriptions are a landlord
+ * concept, and creating a row here used to burn a tenant's 2-month trial the
+ * first time they so much as loaded a page that read billing state.
  */
-async function ensureSubscription(userId) {
-  let sub = await Subscription.findOne({ userId });
-  if (!sub) {
-    const trialEndsAt = new Date();
-    trialEndsAt.setMonth(trialEndsAt.getMonth() + 3);
-    
-    sub = await Subscription.create({
-      userId,
-      planId: 'free',
-      status: 'trialing',
-      trialEndsAt,
-      autoRenew: false
-    });
-  }
-  return sub;
+async function ensureSubscription(user) {
+  const sub = await Subscription.findOne({ userId: user._id });
+  if (sub) return sub;
+  if (!isLandlord(user)) return null;
+  return grantLandlordTrial(user._id);
+}
+
+/**
+ * Shape returned to a caller with no subscription row (a tenant). Not persisted
+ * — the frontend's updateCache() maps a null/expired subscription to the free
+ * tier, and this keeps that contract without a DB write.
+ */
+function freeSubscriptionStub(userId) {
+  return {
+    userId: String(userId),
+    planId: 'free',
+    status: 'canceled',
+    trialEndsAt: null,
+    trialTier: 'free',
+    currentPeriodEnd: null,
+    autoRenew: false,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,8 +77,10 @@ exports.getPlans = (req, res) => {
 // GET /api/host/me/subscription
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getMySubscription = asyncH(async (req, res) => {
-  const sub = await ensureSubscription(req.user._id);
-  res.json({ subscription: sub.toJSON() });
+  const sub = await ensureSubscription(req.user);
+  res.json({
+    subscription: sub ? sub.toJSON() : freeSubscriptionStub(req.user._id),
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,8 +94,20 @@ exports.checkout = asyncH(async (req, res) => {
     throw ApiError.badRequest('অবাস্তব প্ল্যান আইডি।'); // Invalid plan ID
   }
   
-  let sub = await ensureSubscription(req.user._id);
-  
+  // Checkout provisions the row if it's missing — a landlord may be paying
+  // straight away without ever having held a trial.
+  let sub = await ensureSubscription(req.user);
+  if (!sub) {
+    sub = await Subscription.create({
+      userId: req.user._id,
+      planId: 'free',
+      status: 'trialing',
+      trialTier: 'free',
+      trialEndsAt: trialEndFrom(),
+      autoRenew: false,
+    });
+  }
+
   // Simulate payment success and update subscription
   const currentPeriodEnd = new Date();
   if (plan.interval === 'month') {
@@ -106,9 +142,9 @@ exports.checkout = asyncH(async (req, res) => {
 // POST /api/billing/cancel
 // ─────────────────────────────────────────────────────────────────────────────
 exports.cancel = asyncH(async (req, res) => {
-  let sub = await ensureSubscription(req.user._id);
-  
-  if (sub.status !== 'active') {
+  let sub = await ensureSubscription(req.user);
+
+  if (!sub || sub.status !== 'active') {
     throw ApiError.badRequest('আপনার কোনো সক্রিয় সাবস্ক্রিপশন নেই।'); // No active subscription
   }
   

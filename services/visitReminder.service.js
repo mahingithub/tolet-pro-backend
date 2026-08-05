@@ -16,12 +16,18 @@
  * Timezone: visit date/time strings are entered in Bangladesh time (BST,
  * UTC+6). We pin them to +06:00 so the computed instant is correct no matter
  * what timezone the server runs in (Render runs in UTC).
+ *
+ * PLAN GATE: visit alerts to the LANDLORD are part of Smart Alerts (Pro only).
+ * The TENANT's reminder is deliberately NOT gated — it is a platform promise to
+ * the person who booked the visit, and silencing it because the landlord is on
+ * a free plan would punish the wrong party.
  */
 
 const Inquiry       = require('../models/Inquiry');
 const User          = require('../models/User');
 const notifications = require('./notification.service');
 const whatsapp      = require('./whatsapp.service');
+const { tiersForUsers } = require('./subscription.service');
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 const BST_OFFSET   = '+06:00';
@@ -54,6 +60,12 @@ async function runVisitReminders() {
     .lean();
 
   let sent = 0;
+
+  // One batched lookup for every property owner in this sweep — the landlord
+  // half of each reminder is Pro-only (see PLAN GATE in the header).
+  const tierByOwner = await tiersForUsers(inquiries.map((i) => i.propertyOwnerId));
+  const landlordHasSmartAlerts = (ownerId) =>
+    (tierByOwner.get(String(ownerId)) || 'free') === 'pro';
 
   for (const inq of inquiries) {
     const vs = inq.visitSchedule || {};
@@ -101,8 +113,8 @@ async function runVisitReminders() {
         data:   meta,
       });
     }
-    // Landlord
-    if (inq.propertyOwnerId) {
+    // Landlord — Smart Alerts, so Pro only.
+    if (inq.propertyOwnerId && landlordHasSmartAlerts(inq.propertyOwnerId)) {
       notifications.emit({
         userId: inq.propertyOwnerId,
         type:   'inquiry',
@@ -116,7 +128,9 @@ async function runVisitReminders() {
     // sendWhatsAppMessage never throws, so a WhatsApp failure can't stop the
     // sweep or undo the reminderSent claim above.
     const tenantPhone   = inq.phone || await resolveUserPhone(inq.inquirerUserId);
-    const landlordPhone = await resolveUserPhone(inq.propertyOwnerId);
+    const landlordPhone = landlordHasSmartAlerts(inq.propertyOwnerId)
+      ? await resolveUserPhone(inq.propertyOwnerId)
+      : '';
     if (tenantPhone) {
       whatsapp.sendWhatsAppMessage(tenantPhone, {
         body: `🗓️ ${prop} — ${label} এ আপনার ভিজিট ২ ঘণ্টার মধ্যে। সময়মতো পৌঁছানোর চেষ্টা করুন।`,

@@ -15,6 +15,10 @@
  *
  * Legacy single-tenant bookings are intentionally skipped here — their monthly
  * invoice + late-fee notifications are already handled by cron.service.
+ *
+ * PLAN GATE: automatic reminders are the "Smart Alerts" feature, which is Pro
+ * only. Plus unlocks the rent-collection LEDGER (manual tracking); it does not
+ * buy the auto-nudges. A landlord on free/plus is skipped entirely.
  */
 
 const Booking       = require('../models/Booking');
@@ -22,6 +26,7 @@ const User          = require('../models/User');
 const notifications = require('./notification.service');
 const whatsapp      = require('./whatsapp.service');
 const env           = require('../config/env');
+const { tiersForUsers } = require('./subscription.service');
 
 let sms = null;
 try { sms = require('./sms.service'); } catch { sms = null; }
@@ -86,9 +91,18 @@ async function runRentReminders(today = new Date()) {
   const bookings = await Booking.find({ status: 'active', autoReminder: true });
   const stamp = dayStamp(today);
   let sent = 0;
+  let skippedTier = 0;
+
+  // One batched query for every landlord in the sweep — Smart Alerts is Pro
+  // only, so most bookings may be filtered out before any work is done.
+  const tierByLandlord = await tiersForUsers(bookings.map((b) => b.landlordId));
 
   for (const booking of bookings) {
     if (!Array.isArray(booking.members) || !booking.members.length) continue; // legacy handled elsewhere
+    if ((tierByLandlord.get(String(booking.landlordId)) || 'free') !== 'pro') {
+      skippedTier += 1;
+      continue;
+    }
     const leadDays = Number(booking.reminderLeadDays) || 3;
     let dirty = false;
 
@@ -115,13 +129,15 @@ async function runRentReminders(today = new Date()) {
           userHasApp = true;
         }
 
+        // Best-effort like the WhatsApp/SMS fallbacks below — a push/socket
+        // hiccup must not reject the whole sweep and skip the remaining members.
         notifications.emit({
           userId: m.userId,
           type:   'payment',
           title,
           body,
           data:   { bookingId: String(booking._id), memberId: String(m._id), monthKey: next.key, kind: 'rent_reminder' },
-        });
+        }).catch(() => {});
       }
       
       if (!userHasApp && m.phone) {
@@ -140,7 +156,12 @@ async function runRentReminders(today = new Date()) {
     if (dirty) await booking.save();
   }
 
-  if (sent) console.log(`[rent-reminder] sent ${sent} member reminder(s)`);
+  if (sent || skippedTier) {
+    console.log(
+      `[rent-reminder] sent ${sent} member reminder(s)` +
+      (skippedTier ? `, skipped ${skippedTier} booking(s) — landlord not on Pro` : ''),
+    );
+  }
   return sent;
 }
 

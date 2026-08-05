@@ -240,6 +240,7 @@ app.use('/api/payment-methods', require('./routes/paymentMethod.routes'));
 app.use('/api/rent-payments',   writeLimiter, require('./routes/rentPayment.routes'));
 app.use('/api/documents',      require('./routes/document.routes'));
 app.use('/api/billing',        require('./routes/billing.routes'));
+app.use('/api/boost',          writeLimiter, require('./routes/boost.routes'));
 // Connected "Roommate Wallet" — shared household ledger (Living tab).
 app.use('/api/living',         require('./routes/living.routes'));
 // MEDIUM limiter on support ticket creation (spam-prone).
@@ -307,21 +308,19 @@ async function start() {
     }, 15 * 60 * 1000);
   }, 15 * 1000);
 
-  // ─── Per-member rent reminders ───────────────────────────────────────────
-  // Daily nudge to each ACTIVE member whose next unpaid month is within its
-  // reminder lead-days (in-app for linked accounts, SMS for phone-only). Runs
-  // in-process like the visit reminders above. member.lastReminderKey de-dupes,
-  // so the interval firing more than once a day still sends at most one nudge
-  // per member+month per day. (The fuller invoice + late-fee automation lives
-  // in services/cron.service.js → startCronJobs(); wire that in too if you also
-  // want auto monthly invoice rows and late-fee enforcement.)
-  const { runRentReminders } = require('./services/rentReminder.service');
-  setTimeout(function bootRentReminders() {
-    runRentReminders().catch((e) => console.warn('[rent-reminder] first run failed:', e.message));
-    setInterval(() => {
-      runRentReminders().catch((e) => console.warn('[rent-reminder] run failed:', e.message));
-    }, 12 * 60 * 60 * 1000);
-  }, 20 * 1000);
+  // ─── Scheduled billing + reminder jobs ───────────────────────────────────
+  // Monthly invoice generation (1st @ 00:00), late-fee enforcement (daily @
+  // 00:00), per-member rent reminders (daily @ 09:00) and lease-expiry
+  // reminders (daily @ 09:30) — all Asia/Dhaka. Started AFTER the mongoose
+  // connect above, because every job queries on its first tick.
+  //
+  // This call was missing entirely, so invoices and late fees never ran in
+  // production. Rent reminders used to be driven by a separate 12-hour
+  // setInterval here; that duplicate has been removed now that the cron owns
+  // the schedule (the per-member de-dupe key made the overlap harmless, but it
+  // was doing the same sweep twice a day for no reason).
+  const { startCronJobs } = require('./services/cron.service');
+  startCronJobs();
 
   // ─── Rented-listing cleanup ──────────────────────────────────────────────
   // A listing flips to 'rented' when its booking is created. We keep it visible
@@ -348,7 +347,18 @@ async function start() {
   startFacebookTokenRefreshJob();
 }
 
-start();
+// Only boot when this file IS the process entry point. Under Jest the module
+// is `require`d to get the Express `app` for supertest, and booting would then
+// open a real Mongo connection, bind a port and start every cron — none of
+// which a test wants (and all of which leave open handles behind).
+if (require.main === module) {
+  start();
+}
+
+// Export the configured Express app for integration tests (supertest drives it
+// directly, with its own mongodb-memory-server connection).
+module.exports = app;
+module.exports.start = start;
 
 // Graceful shutdown so Mongo flushes pending writes.
 process.on('SIGINT', async () => {

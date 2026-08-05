@@ -22,6 +22,7 @@
 
 const User = require('../models/User');
 const auditLog = require('../services/auditLog.service');
+const subscriptionService = require('../services/subscription.service');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function pickPublicUser(u) {
@@ -311,9 +312,18 @@ async function verifyLandlord(req, res, next) {
 
     // Grant the landlord role NOW — they've proven property ownership.
     if (!Array.isArray(user.roles)) user.roles = [user.role || 'tenant'];
-    if (!user.roles.includes('landlord')) user.roles.push('landlord');
+    const becameLandlord = !user.roles.includes('landlord');
+    if (becameLandlord) user.roles.push('landlord');
 
     await user.save();
+
+    // A tenant switching over to landlord gets the same 2-month Pro trial a
+    // landlord signup does, starting from this approval. Idempotent, so an
+    // account that already holds a subscription is left alone.
+    if (becameLandlord) {
+      subscriptionService.grantLandlordTrialQuietly(user._id);
+    }
+
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
     return next(err);

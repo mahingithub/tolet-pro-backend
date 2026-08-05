@@ -12,6 +12,7 @@ const tokenService = require('./token.service');
 const refreshTokenService = require('./refreshToken.service');
 const otpAbuseService = require('./otpAbuse.service');
 const loginHistoryService = require('./loginHistory.service');
+const subscriptionService = require('./subscription.service');
 
 const GENERIC_LOGIN_ERROR = 'ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে।';
 // Combined, non-specific OTP failure message — mirrors GENERIC_LOGIN_ERROR so
@@ -214,6 +215,13 @@ async function verifySignup({ phoneNumber, otp }, req) {
   await user.save();
   await SignupIntent.deleteOne({ phone });
   await Otp.deleteOne({ phoneNumber: phone });
+
+  // A brand-new landlord starts their 2-month Pro trial here, so the clock
+  // begins at signup rather than whenever they first open the billing page.
+  // Best-effort: a trial hiccup must never fail account creation.
+  if (intent.role === 'landlord') {
+    subscriptionService.grantLandlordTrialQuietly(user._id);
+  }
 
   const token = tokenService.signAccessToken(user, sessionId);
   return { token, user };

@@ -186,6 +186,12 @@ const BookingSchema = new mongoose.Schema(
     // so many bookings without a code don't collide.
     inviteCode: { type: String, uppercase: true, trim: true, index: true, unique: true, sparse: true },
 
+    // Lease-expiry reminder de-dupe. Stores the milestone already sent for the
+    // CURRENT leaseEnd, as `<ISO leaseEnd date>@<days>` (e.g. '2026-09-01@7'),
+    // so the daily sweep fires at most once per milestone — and automatically
+    // re-arms if the host extends the lease (a new leaseEnd ⇒ a new key).
+    lastLeaseExpiryReminderKey: { type: String, default: '' },
+
     deletedAt:        { type: Date, default: null },
 
     status: {

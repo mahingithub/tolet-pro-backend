@@ -36,10 +36,6 @@ async function callerHasUnlockLink(callerId, targetId) {
   return !!link;
 }
 
-function isObjectId(v) {
-  return mongoose.Types.ObjectId.isValid(String(v));
-}
-
 async function getLandlord(req, res, next) {
   try {
     const { id } = req.params;

@@ -3,6 +3,12 @@
 const propertyService = require('../services/property.service');
 const propertyValidators = require('../validators/property.validators');
 const ApiError = require('../utils/ApiError');
+// NOTE: both of these were missing, so attachHostTiers() below threw a
+// ReferenceError on EVERY listing request. Its try/catch swallowed it and fell
+// back to hostTier 'free' for everyone — which is why Plus/Pro badges and the
+// Gold Card never appeared on the feed no matter what the host had paid for.
+const Subscription = require('../models/Subscription');
+const { tierOf } = require('../utils/subscriptionTier');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -111,24 +117,30 @@ exports.getProperties = asyncH(async (req, res) => {
   });
 });
 
-// Stamp each list item with its host's PAID subscription tier
+// Stamp each list item with its host's ENTITLED subscription tier
 // ('free' | 'plus' | 'pro') so cards can render Plus/Pro badges, the gold
 // card and Top Position tags. Looked up fresh per request (one batched query)
 // instead of denormalised onto the property, so an expired subscription drops
-// its badges immediately. Trials deliberately do NOT count — a badge is a
-// paid signal, and during the launch trial every host would otherwise be Pro.
+// its badges immediately.
+//
+// The launch trial counts: a landlord on the 2-month free Pro trial is on
+// "Pro Mode", badge and Gold Card included. tierOf() expiry-checks both the
+// paid period and the trial window, so a lapsed host still falls back to free.
 async function attachHostTiers(items) {
   try {
     const ids = [...new Set(items.map((p) => p.landlordId).filter(Boolean))];
     if (!ids.length) return items;
+    const now = new Date();
     const subs = await Subscription.find({
       userId: { $in: ids },
-      status: 'active',
-      currentPeriodEnd: { $gt: new Date() },
-    }).select('userId planId').lean();
+      $or: [
+        { status: 'active' },
+        { status: 'trialing', trialEndsAt: { $gt: now } },
+      ],
+    }).select('userId planId status trialTier trialEndsAt currentPeriodEnd').lean();
     const tierByUser = {};
     for (const s of subs) {
-      tierByUser[String(s.userId)] = String(s.planId).startsWith('plus') ? 'plus' : 'pro';
+      tierByUser[String(s.userId)] = tierOf(s, now);
     }
     items.forEach((p) => { p.hostTier = tierByUser[p.landlordId] || 'free'; });
   } catch (e) {

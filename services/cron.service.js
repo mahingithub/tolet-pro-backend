@@ -24,6 +24,8 @@ const User          = require('../models/User');
 const notifications = require('./notification.service');
 const whatsapp      = require('./whatsapp.service');
 const { runRentReminders } = require('./rentReminder.service');
+const { runLeaseExpiryReminders } = require('./leaseExpiryReminder.service');
+const { resetMonthlyBoostCredits } = require('./boost.service');
 
 const TZ   = process.env.CRON_TZ || 'Asia/Dhaka';
 const TEST = process.env.CRON_TEST === '1';
@@ -236,7 +238,11 @@ async function enforceLateFees() {
 function startCronJobs() {
   const invoiceSchedule  = TEST ? '* * * * *' : '0 0 1 * *'; // 1st of month, 00:00
   const lateFeeSchedule  = TEST ? '* * * * *' : '0 0 * * *'; // every day, 00:00
-  const reminderSchedule = TEST ? '* * * * *' : '0 9 * * *'; // every day, 09:00 — per-member rent nudges
+  const reminderSchedule = TEST ? '* * * * *' : '0 9 * * *';  // every day, 09:00 — per-member rent nudges
+  const leaseSchedule    = TEST ? '* * * * *' : '30 9 * * *'; // every day, 09:30 — lease-expiry warnings
+  // 1st of the month, 00:05 — refill each Plus host's monthly search boost.
+  // Runs a few minutes after the invoice job so the two don't contend.
+  const boostResetSchedule = TEST ? '* * * * *' : '5 0 1 * *';
 
   cron.schedule(invoiceSchedule, () => {
     generateMonthlyInvoices().catch((e) => console.error('[cron] invoice error:', e.message));
@@ -250,11 +256,27 @@ function startCronJobs() {
     runRentReminders().catch((e) => console.error('[cron] rent-reminder error:', e.message));
   }, { timezone: TZ });
 
+  cron.schedule(leaseSchedule, () => {
+    runLeaseExpiryReminders().catch((e) => console.error('[cron] lease-expiry error:', e.message));
+  }, { timezone: TZ });
+
+  cron.schedule(boostResetSchedule, () => {
+    resetMonthlyBoostCredits().catch((e) => console.error('[cron] boost-reset error:', e.message));
+  }, { timezone: TZ });
+
   console.log(
     `[cron] started — invoices: "${invoiceSchedule}", late-fees: "${lateFeeSchedule}", ` +
-    `reminders: "${reminderSchedule}", TZ: ${TZ}` +
+    `reminders: "${reminderSchedule}", lease-expiry: "${leaseSchedule}", ` +
+    `boost-reset: "${boostResetSchedule}", TZ: ${TZ}` +
     (TEST ? '  (TEST MODE: every minute)' : ''),
   );
 }
 
-module.exports = { startCronJobs, generateMonthlyInvoices, enforceLateFees, runRentReminders };
+module.exports = {
+  startCronJobs,
+  generateMonthlyInvoices,
+  enforceLateFees,
+  runRentReminders,
+  runLeaseExpiryReminders,
+  resetMonthlyBoostCredits,
+};

@@ -73,6 +73,30 @@ const roomPhotoSchema = z
     'ছবির URL দেওয়া হয়নি।'
   );
 
+// A walkthrough video entry. Either an uploaded `url` or a YouTube id must be
+// present. `preview` is accepted because the wizard uses that key for a local
+// blob/data URL before upload — same in-and-out symmetry as roomPhotoSchema.
+const videoSchema = z
+  .object({
+    url:       z.union([videoUrlSchema, z.literal('')]).optional(),
+    preview:   z.union([videoUrlSchema, z.literal('')]).optional(),
+    youtubeId: z.string().trim().max(200).optional(),
+    thumbnail: z.union([photoUrlSchema, z.literal('')]).optional(),
+    name:      z.string().trim().max(200).optional(),
+  })
+  .passthrough()
+  .refine(
+    (v) => Boolean(v.url || v.preview || v.youtubeId),
+    'ভিডিও URL বা YouTube ID দেওয়া হয়নি।'
+  );
+
+// Hard ceilings, NOT per-tier limits. These only stop absurd payloads; the
+// actual plan limits (5/15/50 photos, 0/1/5 videos) are enforced per host in
+// services/property.service.js → assertWithinTierLimits(). Keep MAX_PHOTOS at
+// or above the Pro photo cap or Pro's 50 photos become unreachable.
+const MAX_PHOTOS = 50;
+const MAX_VIDEOS = 5;
+
 // ─── Schemas exported to routes ────────────────────────────────────────────
 module.exports = {
   createProperty: z.object({
@@ -98,7 +122,11 @@ module.exports = {
     status:      statusSchema.optional(),
     coverPhoto:  z.union([photoUrlSchema, z.literal('')]).optional().default(''),
     coverPhotoThumb: z.union([photoUrlSchema, z.literal('')]).optional().default(''),
-    roomPhotos:  z.array(roomPhotoSchema).max(20).optional().default([]),
+    roomPhotos:  z.array(roomPhotoSchema).max(MAX_PHOTOS).optional().default([]),
+    // Canonical multi-video field (up to 5 on Pro).
+    videos:      z.array(videoSchema).max(MAX_VIDEOS).optional().default([]),
+    // Legacy single-video fields — still accepted so older clients keep working.
+    // property.service.js wraps them into a one-element videos[].
     videoId:     z.string().trim().max(200).optional().default(''),
     // Locally-uploaded property walkthrough (data: URL OR https URL).
     videoUrl:    z.union([videoUrlSchema, z.literal('')]).optional().default(''),
@@ -132,7 +160,8 @@ module.exports = {
     status:      statusSchema.optional(),
     coverPhoto:  z.union([photoUrlSchema, z.literal('')]).optional(),
     coverPhotoThumb: z.union([photoUrlSchema, z.literal('')]).optional(),
-    roomPhotos:  z.array(roomPhotoSchema).max(20).optional(),
+    roomPhotos:  z.array(roomPhotoSchema).max(MAX_PHOTOS).optional(),
+    videos:      z.array(videoSchema).max(MAX_VIDEOS).optional(),
     videoId:     z.string().trim().max(200).optional(),
     videoUrl:    z.union([videoUrlSchema, z.literal('')]).optional(),
     floorNumber: numField(-5, 200).optional(),

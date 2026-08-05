@@ -14,6 +14,7 @@ const User = require('../models/User');
 const Subscription = require('../models/Subscription');
 const searchService = require('./searchService');
 const { postToFacebookPage } = require('./facebook.service');
+const { tierOf, limitsFor } = require('../utils/subscriptionTier');
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 const MAX_THUMBNAIL_CHARS = 1_000_000;
@@ -32,6 +33,67 @@ function normaliseRoomPhotos(input) {
       thumbUrl: normaliseThumbnail(p && p.thumbUrl),
     }))
     .filter((p) => p.url);
+}
+
+// Walkthrough videos. Plans allow 0 (free) / 1 (plus) / 5 (pro) per property,
+// so this is an array — but the model still mirrors entry [0] onto the legacy
+// `videoUrl` / `videoId` scalars, and this accepts those scalars as a
+// one-element array, so pre-multi-video clients keep working unchanged.
+function normaliseVideos(input, legacy = {}) {
+  const list = Array.isArray(input) ? input : [];
+  const out = list
+    .map((v) => {
+      if (typeof v === 'string') return { url: v.trim(), youtubeId: '', name: '', thumbnail: '' };
+      if (!v || typeof v !== 'object') return null;
+      return {
+        url:       v.url ? String(v.url).trim() : '',
+        youtubeId: v.youtubeId ? String(v.youtubeId).trim().slice(0, 200) : '',
+        thumbnail: normaliseThumbnail(v.thumbnail),
+        name:      v.name ? String(v.name).trim().slice(0, 200) : '',
+      };
+    })
+    .filter((v) => v && (v.url || v.youtubeId));
+
+  if (out.length) return out;
+
+  // Legacy single-video payload → wrap it so downstream code has one shape.
+  const url = legacy.videoUrl ? String(legacy.videoUrl).trim() : '';
+  const youtubeId = legacy.videoId ? String(legacy.videoId).trim().slice(0, 200) : '';
+  return url || youtubeId ? [{ url, youtubeId, thumbnail: '', name: '' }] : [];
+}
+
+/**
+ * Reject a create/update that exceeds the host's plan limits.
+ *
+ * This is the ONLY real enforcement — the matching checks in the AddProperty
+ * wizard are a UX courtesy that a direct API call trivially bypasses.
+ * `existingCount` is omitted on update (media-only checks).
+ */
+function assertWithinTierLimits({ tier, roomPhotos, videos, existingCount }) {
+  const limits = limitsFor(tier);
+
+  if (existingCount != null && existingCount >= limits.maxProperties) {
+    throw ApiError.forbidden(
+      `আপনার প্ল্যানে সর্বোচ্চ ${limits.maxProperties}টি প্রপার্টি যোগ করা যায়। আরও যোগ করতে আপগ্রেড করুন।`,
+      { code: 'tier_limit_properties', details: { tier, limit: limits.maxProperties } },
+    );
+  }
+
+  if (Array.isArray(roomPhotos) && roomPhotos.length > limits.maxPhotos) {
+    throw ApiError.forbidden(
+      `আপনার প্ল্যানে প্রতি প্রপার্টিতে সর্বোচ্চ ${limits.maxPhotos}টি ছবি দেওয়া যায়।`,
+      { code: 'tier_limit_photos', details: { tier, limit: limits.maxPhotos } },
+    );
+  }
+
+  if (Array.isArray(videos) && videos.length > limits.maxVideos) {
+    throw ApiError.forbidden(
+      limits.maxVideos === 0
+        ? 'ভিডিও আপলোড করতে প্লাস বা প্রো প্ল্যানে আপগ্রেড করুন।'
+        : `আপনার প্ল্যানে প্রতি প্রপার্টিতে সর্বোচ্চ ${limits.maxVideos}টি ভিডিও দেওয়া যায়।`,
+      { code: 'tier_limit_videos', details: { tier, limit: limits.maxVideos } },
+    );
+  }
 }
 
 // Intent-specific details are an open-shaped bag (Mixed in the model). The v1
@@ -122,6 +184,13 @@ const LIST_CARD_PROJECT = {
   inquiries: 1,
   verified: 1,
   slug: 1,
+  // Plan signals the card renders: hostTier drives the Plus/Pro badge and the
+  // Gold Card border; boosted/boostedUntil drive the host dashboard's Boost
+  // button state ("Boosted" vs spendable). Without these projected the client
+  // received undefined and every listing looked free / un-boosted.
+  hostTier: 1,
+  boosted: 1,
+  boostedUntil: 1,
   createdAt: 1,
   updatedAt: 1,
   // NOTE: specificDetails is intentionally NOT projected onto list cards — it
@@ -158,12 +227,21 @@ async function createProperty({ body, user }) {
       ? Number(body.floorNumber)
       : Number(body.floor) || 0;
 
+  // Plan entitlement drives BOTH the badge stamped on the listing and the
+  // limits enforced below. tierOf() expiry-checks the paid period and the
+  // 2-month launch trial, so a lapsed host is back on free limits immediately.
   const sub = await Subscription.findOne({ userId: user._id });
-  let hostTier = 'free';
-  if (sub && (sub.status === 'active' || sub.status === 'trialing')) {
-    if (sub.planId.startsWith('pro_')) hostTier = 'pro';
-    else if (sub.planId.startsWith('plus_')) hostTier = 'plus';
-  }
+  const hostTier = tierOf(sub);
+
+  const roomPhotos = normaliseRoomPhotos(body.roomPhotos);
+  const videos = normaliseVideos(body.videos, body);
+
+  assertWithinTierLimits({
+    tier: hostTier,
+    roomPhotos,
+    videos,
+    existingCount: await Property.countDocuments({ ownerUserId: user._id }),
+  });
 
   const doc = new Property({
     title:       body.title,
@@ -189,10 +267,11 @@ async function createProperty({ body, user }) {
     furnishing:  body.furnishing  || 'Unfurnished',
     amenities:   Array.isArray(body.amenities) ? body.amenities : [],
     coverPhoto:  body.coverPhoto  || '',
-    roomPhotos:  normaliseRoomPhotos(body.roomPhotos),
+    roomPhotos,
     coverPhotoThumb: normaliseThumbnail(body.coverPhotoThumb),
-    videoId:     body.videoId     || '',
-    videoUrl:    body.videoUrl    || '',
+    // videos[] is canonical; the model's pre('validate') hook mirrors entry [0]
+    // onto videoId/videoUrl so legacy readers keep working.
+    videos,
     // Intent-specific details bag (rent/sale/commercial fields). Sanitised to a
     // plain object; the model stores it as Mixed. undefined/garbage → {}.
     specificDetails: normaliseSpecificDetails(body.specificDetails),
@@ -206,9 +285,15 @@ async function createProperty({ body, user }) {
   });
   await doc.save();
 
-  // Fire-and-forget: post to Facebook Page in background.
-  // Errors are caught inside — never blocks or fails property creation.
-  postToFacebookPage(doc).catch(() => {});
+  // Facebook auto-post is a PAID perk: "Facebook Boost Post" on Plus and
+  // "Facebook Super Boost Post" on Pro. Free listings are not posted.
+  // `hostTier` was already resolved above, so this costs no extra query.
+  //
+  // Fire-and-forget: errors are caught inside — never blocks or fails
+  // property creation.
+  if (hostTier === 'plus' || hostTier === 'pro') {
+    postToFacebookPage(doc, { superBoost: hostTier === 'pro' }).catch(() => {});
+  }
 
   return doc;
 }
@@ -265,9 +350,31 @@ async function listProperties(query) {
   }
 
   const baseSort = searchService.buildSortOptions(query.sort);
-  // Tier-based sort boost: pro (p-r-o) > plus (p-l-u-s) > free (f-r-e-e)
-  // so sorting hostTier: -1 automatically ranks higher tiers first.
-  const sort = { hostTier: -1, ...baseSort };
+  // Ranking: an ACTIVE paid boost wins, then plan tier, then whatever the
+  // caller asked to sort by.
+  //
+  // `activeBoost` is computed per-request from boostedUntil rather than read
+  // off the stored `boosted` flag, so a boost expires on its own schedule with
+  // no un-boost sweep to run (and no window where a stale flag keeps a listing
+  // pinned). The stored flag is kept for cheap filtering/indexing only.
+  //
+  // hostTier sorts pro (p-r-o) > plus (p-l-u-s) > free (f-r-e-e) alphabetically
+  // descending, so -1 ranks higher tiers first without a lookup table.
+  const sort = { activeBoost: -1, hostTier: -1, ...baseSort };
+  const boostField = {
+    $addFields: {
+      activeBoost: {
+        $cond: [
+          { $and: [
+            { $eq: ['$boosted', true] },
+            { $gt: ['$boostedUntil', new Date()] },
+          ] },
+          1,
+          0,
+        ],
+      },
+    },
+  };
   const page   = isIdLookup ? 1 : (query.page  || 1);
   // For an id lookup, return every requested doc in one page (no cutoff when a
   // user has more saved than the default 50). Otherwise keep normal paging.
@@ -286,7 +393,8 @@ async function listProperties(query) {
       // Project out the massive base64 strings BEFORE sorting. This prevents the
       // 32MB in-memory sort limit (OOM) on MongoDB Free Tier (M0) which doesn't
       // support allowDiskUse: true.
-      { $project: { coverPhoto: 0, coverPhotoThumb: 0, roomPhotos: 0, videoUrl: 0, description: 0, searchHaystack: 0 } },
+      { $project: { coverPhoto: 0, coverPhotoThumb: 0, roomPhotos: 0, videoUrl: 0, videos: 0, description: 0, searchHaystack: 0 } },
+      boostField,
       { $sort: sort },
       { $skip: skip },
       { $limit: limit }
@@ -338,7 +446,10 @@ async function updateProperty({ idOrSlug, body, user }) {
     'title', 'description', 'intent', 'type', 'category',
     'division', 'district', 'area', 'location',
     'beds', 'baths', 'sqft', 'floor', 'floorNumber', 'furnishing',
-    'amenities', 'price', 'status', 'coverPhoto', 'coverPhotoThumb', 'videoId', 'videoUrl',
+    // videoId / videoUrl are deliberately NOT here — they are mirrors of
+    // videos[0] now, written by the model hook. The videos block below owns
+    // them (and accepts a legacy videoUrl/videoId payload as a 1-item array).
+    'amenities', 'price', 'status', 'coverPhoto', 'coverPhotoThumb',
   ];
   for (const f of scalarFields) {
     if (Object.prototype.hasOwnProperty.call(body, f)) {
@@ -355,8 +466,27 @@ async function updateProperty({ idOrSlug, body, user }) {
              !Object.prototype.hasOwnProperty.call(body, 'floorNumber')) {
     doc.floorNumber = body.floor;
   }
-  if (Object.prototype.hasOwnProperty.call(body, 'roomPhotos')) {
-    doc.roomPhotos = normaliseRoomPhotos(body.roomPhotos);
+  // Media edits are tier-limited exactly like creation is — otherwise a free
+  // host could create a compliant listing and then PATCH 40 photos onto it.
+  const touchesPhotos = Object.prototype.hasOwnProperty.call(body, 'roomPhotos');
+  const touchesVideos = Object.prototype.hasOwnProperty.call(body, 'videos') ||
+    Object.prototype.hasOwnProperty.call(body, 'videoUrl') ||
+    Object.prototype.hasOwnProperty.call(body, 'videoId');
+
+  if (touchesPhotos || touchesVideos) {
+    const sub = await Subscription.findOne({ userId: user._id });
+    const tier = tierOf(sub);
+    const nextPhotos = touchesPhotos ? normaliseRoomPhotos(body.roomPhotos) : null;
+    const nextVideos = touchesVideos ? normaliseVideos(body.videos, body) : null;
+
+    assertWithinTierLimits({
+      tier,
+      roomPhotos: nextPhotos,
+      videos: nextVideos,
+    });
+
+    if (nextPhotos) doc.roomPhotos = nextPhotos;
+    if (nextVideos) doc.videos = nextVideos;
   }
   // specificDetails is a Mixed bag — REPLACE it wholesale when (and only when)
   // the caller sends it. The wizard re-bundles the complete object on every
@@ -488,5 +618,8 @@ module.exports = {
   // Reused by the rented-listing cleanup sweep (no owner check — see fn doc).
   purgePropertyCascade,
   // Exported for tests / future controllers.
-  _internal: { normaliseRoomPhotos, normaliseSpecificDetails, gpsFromBody, findIdOrSlug },
+  _internal: {
+    normaliseRoomPhotos, normaliseSpecificDetails, gpsFromBody, findIdOrSlug,
+    normaliseVideos, assertWithinTierLimits,
+  },
 };

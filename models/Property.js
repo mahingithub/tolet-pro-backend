@@ -197,6 +197,19 @@ const RoomPhotoSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// A single walkthrough video. Plans allow 0 / 1 / 5 per property (free / plus /
+// pro) — enforced in services/property.service.js, not here, so the schema stays
+// a storage concern. Either an uploaded `url` OR a `youtubeId` is present.
+const VideoSchema = new mongoose.Schema(
+  {
+    url:       { type: String, trim: true, default: '', maxlength: 8192, validate: inlineMediaValidator },
+    youtubeId: { type: String, trim: true, default: '', maxlength: 200 },
+    thumbnail: { type: String, trim: true, default: '', maxlength: 8192, validate: inlineMediaValidator },
+    name:      { type: String, trim: true, default: '', maxlength: 200 },
+  },
+  { _id: false }
+);
+
 const GpsSchema = new mongoose.Schema(
   {
     lat:     { type: Number, default: null },
@@ -249,7 +262,13 @@ const PropertySchema = new mongoose.Schema(
     // Optional card-sized cover image used only by listing/dashboard payloads.
     coverPhotoThumb: { type: String, trim: true, default: '', maxlength: 8192, validate: inlineMediaValidator },
     roomPhotos:  { type: [RoomPhotoSchema], default: [] },
-    // YouTube ID (e.g. 'O-P_J_gvALE'). Optional second video source.
+    // Canonical walkthrough video list (up to 5 on Pro). `videoId` / `videoUrl`
+    // below are LEGACY MIRRORS of videos[0], kept in lockstep by the
+    // pre('validate') hook so every existing listing and every reader that
+    // predates multi-video keeps working with no migration.
+    videos:      { type: [VideoSchema], default: [] },
+
+    // YouTube ID (e.g. 'O-P_J_gvALE'). Mirror of videos[0].youtubeId.
     videoId:     { type: String, trim: true, default: '', maxlength: 200 },
     // Locally-recorded video walkthrough — uploaded to Cloudinary, stored as an
     // https URL. Sits alongside videoId so a host can attach a raw clip even
@@ -298,6 +317,15 @@ const PropertySchema = new mongoose.Schema(
     ownerName:     { type: String, trim: true, default: '', maxlength: 80 },
     ownerPhone:    { type: String, trim: true, default: '', maxlength: 20 },
     hostTier:      { type: String, enum: ['free', 'plus', 'pro'], default: 'free', index: true },
+
+    // ─── Search boost (Plus perk) ────────────────────────────────────────
+    // A Plus host may spend one monthly credit to pin a listing to the top of
+    // the feed for 24h. `boosted` is the sort key; `boostedUntil` is the truth.
+    // A sweep is deliberately NOT required to un-boost: the feed query filters
+    // on boostedUntil > now, so an expired boost stops ranking on its own even
+    // if `boosted` is still true. See services/boost.service.js.
+    boosted:      { type: Boolean, default: false, index: true },
+    boostedUntil: { type: Date, default: null },
 
     // ─── Counters (denormalised) ─────────────────────────────────────────
     rating:        { type: Number, default: 0, min: 0, max: 5 },
@@ -364,6 +392,25 @@ PropertySchema.pre('validate', function preValidate(next) {
     this.floor = this.floorNumber;
   } else if (Number.isFinite(this.floor) && this.floor !== 0 && !this.floorNumber) {
     this.floorNumber = this.floor;
+  }
+
+  // Keep the legacy single-video columns in lockstep with `videos[]`, exactly
+  // as `floor` / `floorNumber` above. Whichever side the caller wrote wins:
+  //   videos[] present  → mirror entry [0] down onto videoUrl / videoId
+  //   only the scalars  → lift them into a one-element videos[]
+  // Existing documents (written before videos[] existed) hit the second branch
+  // the first time they are saved, so they self-migrate on next edit.
+  if (Array.isArray(this.videos) && this.videos.length) {
+    const first = this.videos[0] || {};
+    this.videoUrl = first.url || '';
+    this.videoId  = first.youtubeId || '';
+  } else if (this.videoUrl || this.videoId) {
+    this.videos = [{
+      url:       this.videoUrl || '',
+      youtubeId: this.videoId  || '',
+      thumbnail: '',
+      name:      '',
+    }];
   }
 
   if (!this.slug) {
