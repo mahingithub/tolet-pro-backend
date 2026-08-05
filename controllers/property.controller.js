@@ -8,6 +8,7 @@ const ApiError = require('../utils/ApiError');
 // back to hostTier 'free' for everyone — which is why Plus/Pro badges and the
 // Gold Card never appeared on the feed no matter what the host had paid for.
 const Subscription = require('../models/Subscription');
+const Review = require('../models/Review');
 const { tierOf } = require('../utils/subscriptionTier');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -142,7 +143,28 @@ async function attachHostTiers(items) {
     for (const s of subs) {
       tierByUser[String(s.userId)] = tierOf(s, now);
     }
-    items.forEach((p) => { p.hostTier = tierByUser[p.landlordId] || 'free'; });
+    
+    // Batch lookup landlord reviews
+    const mongoose = require('mongoose');
+    const objectIds = ids.filter(id => mongoose.Types.ObjectId.isValid(id)).map(id => new mongoose.Types.ObjectId(String(id)));
+    const reviewStats = await Review.aggregate([
+      { $match: { revieweeId: { $in: objectIds }, revieweeRole: 'landlord' } },
+      { $group: { _id: '$revieweeId', avg: { $avg: '$rating' }, count: { $sum: 1 } } }
+    ]);
+    const reviewsByLandlord = {};
+    for (const r of reviewStats) {
+      reviewsByLandlord[String(r._id)] = {
+        rating: Math.round(r.avg * 10) / 10,
+        reviews: r.count
+      };
+    }
+
+    items.forEach((p) => { 
+      p.hostTier = tierByUser[p.landlordId] || 'free'; 
+      const stats = reviewsByLandlord[p.landlordId];
+      p.rating = stats ? stats.rating : 0;
+      p.reviews = stats ? stats.reviews : 0;
+    });
   } catch (e) {
     // Badges are decorative — never let this lookup break the listing feed.
     console.warn('[properties] hostTier lookup failed:', e.message);
@@ -153,7 +175,11 @@ async function attachHostTiers(items) {
 
 exports.getPropertyById = asyncH(async (req, res) => {
   const doc = await propertyService.getPropertyById(req.params.id);
-  res.json({ property: doc.toJSON() });
+  const property = doc.toJSON();
+  const summary = await Review.summaryFor(property.ownerUserId, 'landlord');
+  property.rating = summary.avg;
+  property.reviews = summary.count;
+  res.json({ property });
 });
 
 exports.updateProperty = asyncH(async (req, res) => {
@@ -175,5 +201,7 @@ exports.deleteProperty = asyncH(async (req, res) => {
 
 exports.getHostProperties = asyncH(async (req, res) => {
   const items = await propertyService.listMyProperties(req.user);
-  res.json({ properties: items.map((d) => trimForListCard(formatLeanProperty(d))) });
+  const formattedItems = items.map((d) => trimForListCard(formatLeanProperty(d)));
+  await attachHostTiers(formattedItems);
+  res.json({ properties: formattedItems });
 });
