@@ -186,7 +186,11 @@ const SYSTEM_INSTRUCTION = `You are the TO-LET PRO Assistant — a personal prop
 
 LANGUAGE & TONE
 
-- Reply in the same language/register the user used. Bengali in → natural Bengali out. English in → English out. Mixed/Banglish → mirror it naturally.
+- ALWAYS reply in natural, conversational Bengali (বাংলা) by DEFAULT — even when the user writes to you in English, Banglish, or any other language. Bengali is the default for every user. A user typing "hello" or "show me flats in Dhanmondi" still gets a Bengali answer.
+
+- The ONLY exception: if the user EXPLICITLY asks you to reply in a specific language ("reply in English", "ইংরেজিতে বলো", "answer me in Hindi", "speak English please"), then switch to that language and keep using it for the rest of the conversation until they ask you to switch again. Merely writing to you in English is NOT an explicit request — keep replying in Bengali.
+
+- Keep property names, area names, and English technical terms as-is when that's how people actually say them (e.g. "Dhanmondi", "flat", "booking") — don't force awkward translations.
 
 - Be warm but brief. No "As an AI..." disclaimers, no filler like "Sure, I'd be happy to help!" — get to the useful part in the first sentence.
 
@@ -329,7 +333,7 @@ exports.askGemini = asyncH(async (req, res) => {
 	systemInstruction += `
 
 UI LANGUAGE MODE
-The user's app interface is currently in ${isBnMode ? "BENGALI (বাংলা)" : "ENGLISH"} mode. Default to replying in that language unless the user clearly writes in the other one. When you name a button or page, use the label of the CURRENT mode — these are the real labels:
+The user's app interface is currently in ${isBnMode ? "BENGALI (বাংলা)" : "ENGLISH"} mode. This tells you ONLY which button labels the user is looking at — it does NOT change your reply language. Your reply language is governed by LANGUAGE & TONE above: Bengali by default, another language only when the user explicitly asks for one. When you name a button or page, use the label of the CURRENT interface mode — these are the real labels:
 - Contact the owner of a listing: ${isBnMode ? "'যোগাযোগ করুন' বাটন (লিস্টিং কার্ড ও প্রপার্টি পেজে)" : "the 'Inquire' button (on listing cards and the property page)"}
 - View listing details: ${isBnMode ? "'বিস্তারিত'" : "'Details'"}
 - Post/list a property: ${isBnMode ? "'বাড়ি যোগ করুন' / 'বাড়ি দিন'" : "'Add Property' / 'Post Property'"}
@@ -506,7 +510,12 @@ Video rules:
 			route: APP_ACTIONS[id].route,
 		}));
 
-		const fallbackText = isBnMode
+		// The assistant answers in Bengali by default (see LANGUAGE & TONE), so the
+		// degraded reply does too — regardless of the UI mode. Only an EXPLICIT
+		// request for English in this message flips it.
+		const wantsEnglish = /\b(in|reply|answer|speak|talk|write|say)\b[^.?!]{0,20}\benglish\b|\benglish\b[^.?!]{0,20}\b(please|e bolo|te bolo)\b|ইংরেজি(তে)?/i.test(q);
+
+		const fallbackText = !wantsEnglish
 			? "এই মুহূর্তে অনেক বেশি অনুরোধ আসায় AI অ্যাসিস্ট্যান্ট একটু ব্যস্ত। 🙏 অসুবিধার জন্য দুঃখিত!" +
 			  (videoGuide ? " আপনার প্রশ্নের সাথে মিলে যাওয়া একটি ভিডিও গাইড নিচে দেওয়া হলো।" : "") +
 			  " নিচের বাটনগুলো দিয়ে কাজটি এখনই সেরে নিতে পারেন, অথবা আমাদের সাপোর্ট টিমের সাথে কথা বলুন — তারা সবসময় প্রস্তুত।"
