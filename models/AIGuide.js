@@ -43,9 +43,13 @@ const aiGuideSchema = new mongoose.Schema(
 		//                   video sections (e.g. "How to rent a house").
 		//  'support'      = the public "Help & Support" page (e.g. a "How to use
 		//                   support" walkthrough video).
+		//  'free_trial_mode' = the Free Pro Trial task popup (listing wizard +
+		//                   host dashboard). The video explains the share task
+		//                   that unlocks the trial, so admins can swap it
+		//                   without a redeploy.
 		placement: {
 			type: String,
-			enum: ["assistant", "welcome", "how_it_works", "support", "subscription", "checkout"],
+			enum: ["assistant", "welcome", "how_it_works", "support", "subscription", "checkout", "free_trial_mode"],
 			default: "assistant",
 		},
 		// Who the guide targets. Used by 'welcome' and 'how_it_works' placements

@@ -17,7 +17,7 @@ const Subscription = require('../models/Subscription');
 const Property = require('../models/Property');
 const propertyService = require('../services/property.service');
 const subService = require('../services/subscription.service');
-const { tierOf } = require('../utils/subscriptionTier');
+const { tierOf, trialEndFrom } = require('../utils/subscriptionTier');
 
 let mem;
 
@@ -52,15 +52,29 @@ const baseBody = (title) => ({
   category: 'family',
 });
 
-describe('Trial grant', () => {
-  test('landlord gets 2 months of Pro', async () => {
+// The share task is now the ONLY way to get a trial (there is no auto-grant on
+// signup). Tests that need a Pro-trial host mint the exact row
+// controllers/billing.controller.js → claimShareTrial writes.
+const grantShareTrial = async (userId) => Subscription.create({
+  userId,
+  planId: 'free',
+  status: 'trialing',
+  trialTier: 'pro',
+  trialEndsAt: trialEndFrom(),
+  autoRenew: false,
+  shareTrialClaimedAt: new Date(),
+});
+
+describe('Share-task trial grant', () => {
+  test('share trial gives 2 months of Pro', async () => {
     const landlord = await mkUser(['landlord']);
-    await subService.grantLandlordTrial(landlord._id);
+    await grantShareTrial(landlord._id);
     const sub = await Subscription.findOne({ userId: landlord._id });
 
     expect(sub).toBeTruthy();
     expect(sub.status).toBe('trialing');
     expect(sub.trialTier).toBe('pro');
+    expect(sub.shareTrialClaimedAt).toBeTruthy();
 
     const months = (sub.trialEndsAt.getFullYear() - new Date().getFullYear()) * 12
       + (sub.trialEndsAt.getMonth() - new Date().getMonth());
@@ -68,25 +82,29 @@ describe('Trial grant', () => {
     expect(tierOf(sub)).toBe('pro');
   });
 
-  test('grant is idempotent (no trial farming)', async () => {
+  test('the claim latch survives the trial lapsing (no re-grant)', async () => {
+    // The CTA is hidden on `shareTrialClaimedAt`, NOT on the tier — otherwise
+    // a host would be re-offered the reward the moment their trial ran out.
     const landlord = await mkUser(['landlord']);
-    await subService.grantLandlordTrial(landlord._id);
-    const sub1 = await Subscription.findOne({ userId: landlord._id });
-    const firstEnd = sub1.trialEndsAt.getTime();
+    await Subscription.create({
+      userId: landlord._id,
+      planId: 'free',
+      status: 'trialing',
+      trialTier: 'pro',
+      trialEndsAt: new Date(Date.now() - 864e5),
+      shareTrialClaimedAt: new Date(Date.now() - 60 * 864e5),
+    });
 
-    await subService.grantLandlordTrial(landlord._id);
-    await subService.grantLandlordTrial(landlord._id);
-
-    const sub2 = await Subscription.findOne({ userId: landlord._id });
-    expect(sub2.trialEndsAt.getTime()).toBe(firstEnd);
-    expect(await Subscription.countDocuments({ userId: landlord._id })).toBe(1);
+    const sub = await Subscription.findOne({ userId: landlord._id });
+    expect(tierOf(sub)).toBe('free');        // trial has lapsed
+    expect(sub.shareTrialClaimedAt).toBeTruthy(); // but the reward is spent
   });
 });
 
 describe('Trial landlord — unlimited listings + Pro badge', () => {
   test('creates 4 listings on trial', async () => {
     const landlord = await mkUser(['landlord']);
-    await subService.grantLandlordTrial(landlord._id);
+    await grantShareTrial(landlord._id);
 
     for (let i = 0; i < 4; i++) {
       await propertyService.createProperty({ body: baseBody(`Trial listing ${i}`), user: landlord });
@@ -258,7 +276,7 @@ describe('Expired trial → back to free limits, listings stay live', () => {
 
   test('trial host keeps all 4 listings live', async () => {
     const landlord = await mkUser(['landlord']);
-    await subService.grantLandlordTrial(landlord._id);
+    await grantShareTrial(landlord._id);
 
     for (let i = 0; i < 4; i++) {
       await propertyService.createProperty({ body: baseBody(`Trial listing ${i}`), user: landlord });
@@ -269,11 +287,26 @@ describe('Expired trial → back to free limits, listings stay live', () => {
   });
 });
 
-describe('Tenants get NO subscription row', () => {
-  test('grantLandlordTrial is role-agnostic (controller gates)', async () => {
-    const tenant = await mkUser(['tenant']);
-    const result = await subService.grantLandlordTrial(tenant._id);
-    expect(result).toBeTruthy();
+describe('No automatic trial — everyone starts on Free', () => {
+  test('a brand-new landlord has NO subscription row', async () => {
+    const landlord = await mkUser(['landlord']);
+    expect(await Subscription.countDocuments({ userId: landlord._id })).toBe(0);
+  });
+
+  test('a landlord with no row resolves to the free tier', async () => {
+    const landlord = await mkUser(['landlord']);
+    const sub = await Subscription.findOne({ userId: landlord._id });
+    expect(sub).toBeNull();
+    expect(tierOf(sub)).toBe('free');
+  });
+
+  test('a brand-new landlord is held to free limits (1 listing)', async () => {
+    const landlord = await mkUser(['landlord']);
+    await propertyService.createProperty({ body: baseBody('Signup listing 1'), user: landlord });
+
+    await expect(
+      propertyService.createProperty({ body: baseBody('Signup listing 2'), user: landlord }),
+    ).rejects.toMatchObject({ code: 'tier_limit_properties', status: 403 });
   });
 
   test('untouched tenant has no row', async () => {
@@ -285,7 +318,7 @@ describe('Tenants get NO subscription row', () => {
 describe('attachHostTiers batch lookup includes trials', () => {
   test('batch tier resolution', async () => {
     const landlord = await mkUser(['landlord']);
-    await subService.grantLandlordTrial(landlord._id);
+    await grantShareTrial(landlord._id);
 
     const proHost = await mkUser(['landlord']);
     await Subscription.create({

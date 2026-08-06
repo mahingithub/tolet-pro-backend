@@ -1,65 +1,25 @@
 'use strict';
 
 /**
- * subscription.service — trial provisioning.
+ * subscription.service — tier lookup.
  * ──────────────────────────────────────────────────────────────────────────
- * Every landlord gets 2 months of full Pro, free. The clock starts when they
- * actually BECOME a landlord, which is one of three moments:
+ * There is NO automatic trial. Every account — landlord or tenant — starts on
+ * the free plan, which is represented by the absence of a Subscription row
+ * (`tierOf(null) === 'free'`, see utils/subscriptionTier.js).
  *
- *   1. signing up with role 'landlord'          → services/auth.service.js
- *   2. an admin approving their verification    → controllers/admin.controller.js
- *   3. self-serve role add after that approval  → controllers/auth.controller.additions.js
+ * The only way to obtain a Pro trial is to complete the share task:
+ * POST /api/billing/share-trial → controllers/billing.controller.js. That
+ * handler is deliberately the sole writer of a trialing row, so the reward
+ * stays one-per-account (latched by `shareTrialClaimedAt`) and can't be farmed
+ * by toggling roles.
  *
- * It used to be granted lazily the first time anyone opened the subscription
- * page, which meant the clock started at an arbitrary moment (and tenants got
- * trials they could never use).
+ * This previously granted 2 months of Pro at signup / on landlord approval /
+ * on self-serve role add. Those hooks are gone; a row now appears only on
+ * checkout or a share-trial claim.
  */
 
 const Subscription = require('../models/Subscription');
-const { TRIAL_TIER, trialEndFrom, tierOf } = require('../utils/subscriptionTier');
-
-/**
- * Give `userId` the landlord launch trial, once.
- *
- * Idempotent: if the user already has ANY subscription row — an in-flight
- * trial, a paid plan, or a lapsed one — it is returned untouched. Re-granting
- * would hand a lapsed landlord a fresh 2 months every time they toggled roles.
- *
- * @param {import('mongoose').Types.ObjectId|string} userId
- * @returns {Promise<object|null>} the subscription, or null if it couldn't be created
- */
-async function grantLandlordTrial(userId) {
-  if (!userId) return null;
-
-  const existing = await Subscription.findOne({ userId });
-  if (existing) return existing;
-
-  try {
-    return await Subscription.create({
-      userId,
-      planId: 'free',
-      status: 'trialing',
-      trialTier: TRIAL_TIER,
-      trialEndsAt: trialEndFrom(),
-      autoRenew: false,
-    });
-  } catch (err) {
-    // `userId` is unique — a concurrent grant (e.g. signup racing a first page
-    // load) loses the insert. Return whatever the winner wrote.
-    if (err && err.code === 11000) return Subscription.findOne({ userId });
-    throw err;
-  }
-}
-
-/**
- * Fire-and-forget wrapper for call sites where the trial is a side effect and
- * must never fail the surrounding request (signup, admin approval, role add).
- */
-function grantLandlordTrialQuietly(userId) {
-  grantLandlordTrial(userId).catch((e) =>
-    console.warn('[subscription] trial grant failed for', String(userId), '—', e.message),
-  );
-}
+const { tierOf } = require('../utils/subscriptionTier');
 
 /**
  * Batch-resolve the current tier for many users in ONE query.
@@ -85,4 +45,4 @@ async function tiersForUsers(userIds) {
   return out;
 }
 
-module.exports = { grantLandlordTrial, grantLandlordTrialQuietly, tiersForUsers };
+module.exports = { tiersForUsers };

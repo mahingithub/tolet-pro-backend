@@ -17,7 +17,6 @@ const User = require('../models/User');
 // at a different location (commonly `../services/` or `../utils/`).
 const cloudinary = require('../services/cloudinary.service');
 const notificationService = require('../services/notification.service');
-const subscriptionService = require('../services/subscription.service');
 
 // ─── Whitelisted top-level fields ──────────────────────────────────────────
 const PATCH_ME_TOP_LEVEL = ['name', 'email', 'dateOfBirth', 'avatar'];
@@ -180,16 +179,9 @@ async function addRole(req, res, next) {
       }
     }
 
-    const becameLandlord = requested === 'landlord' && !me.roles.includes('landlord');
     if (!me.roles.includes(requested)) me.roles.push(requested);
 
     await me.save();
-
-    // Switching from tenant to landlord starts the 2-month Pro trial, same as
-    // a landlord signup. Idempotent — an existing subscription is left alone.
-    if (becameLandlord) {
-      subscriptionService.grantLandlordTrialQuietly(me._id);
-    }
 
     return res.json({ user: me.toJSON() });
   } catch (err) {

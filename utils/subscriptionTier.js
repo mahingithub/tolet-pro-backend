@@ -16,8 +16,9 @@
  * the browser.
  */
 
-// Length and tier of the launch trial: a new landlord — whether they signed up
-// as one or switched over from a tenant account — gets 2 months of full Pro.
+// Length and tier of the share-task reward trial: a host who shares the app
+// link (POST /api/billing/share-trial) gets 2 months of full Pro. This is the
+// ONLY trial in the system — signing up as a landlord grants nothing.
 const TRIAL_TIER = 'pro';
 const TRIAL_MONTHS = 2;
 
