@@ -9,6 +9,7 @@ const ApiError = require('../utils/ApiError');
 // Gold Card never appeared on the feed no matter what the host had paid for.
 const Subscription = require('../models/Subscription');
 const Review = require('../models/Review');
+const User = require('../models/User');
 const { tierOf } = require('../utils/subscriptionTier');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -159,11 +160,40 @@ async function attachHostTiers(items) {
       };
     }
 
-    items.forEach((p) => { 
-      p.hostTier = tierByUser[p.landlordId] || 'free'; 
+    // Landlord avatars for the card's owner chip. The Property document only
+    // ever snapshotted ownerName/ownerPhone — never an avatar — so
+    // `landlordAvatar` was undefined on every card and the chip always fell
+    // back to the name's first letter. Read it live from the owner instead of
+    // snapshotting: it's one indexed _id lookup per PAGE (ids are already
+    // de-duplicated above, ≤1 per card), it stays correct when a landlord
+    // changes their photo, and it needs no backfill for existing listings.
+    //
+    // Scoped to its own try/catch: this runs BEFORE the assignment loop below,
+    // so letting it throw into the outer handler would cost every card its
+    // tier badge and rating too. An avatar is the least important thing here —
+    // it must never take the rest of the chip down with it.
+    const avatarByUser = {};
+    try {
+      const users = await User.find({ _id: { $in: objectIds } }).select('avatar').lean();
+      for (const u of users) {
+        const a = String(u.avatar || '').trim();
+        // Ship http(s) URLs ONLY — the same rule the listing pipeline's
+        // httpOnly() applies to photos. User.avatar also accepts an inline
+        // `data:` URL of up to 2MB, and 50 of those in one feed response is
+        // precisely the payload/OOM blowup that guard exists to prevent. Those
+        // cards keep the initial-letter fallback, which is a fine degradation.
+        if (/^https?:\/\//i.test(a)) avatarByUser[String(u._id)] = a;
+      }
+    } catch (e) {
+      console.warn('[properties] landlord avatar lookup failed:', e.message);
+    }
+
+    items.forEach((p) => {
+      p.hostTier = tierByUser[p.landlordId] || 'free';
       const stats = reviewsByLandlord[p.landlordId];
       p.rating = stats ? stats.rating : 0;
       p.reviews = stats ? stats.reviews : 0;
+      p.landlordAvatar = avatarByUser[p.landlordId] || '';
     });
   } catch (e) {
     // Badges are decorative — never let this lookup break the listing feed.
