@@ -22,6 +22,7 @@
 
 const User = require('../models/User');
 const auditLog = require('../services/auditLog.service');
+const cloud = require('../services/cloudinary.service');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function pickPublicUser(u) {
@@ -35,6 +36,14 @@ function pickPublicUser(u) {
   const j = u.toJSON ? u.toJSON() : u;
   const tp = j.tenantProfile || {};
   const lp = j.landlordProfile || {};
+
+  const tv = tp.verification || {};
+  if (tv.nidFrontPublicId) tv.nidFrontUrl = cloud.generateSignedViewUrl(tv.nidFrontPublicId) || tv.nidFrontUrl;
+  if (tv.nidBackPublicId)  tv.nidBackUrl  = cloud.generateSignedViewUrl(tv.nidBackPublicId) || tv.nidBackUrl;
+  if (tv.photoPublicId)    tv.photoUrl    = cloud.generateSignedViewUrl(tv.photoPublicId) || tv.photoUrl;
+
+  const lv = lp.verification || {};
+  if (lv.utilityBillPublicId) lv.utilityBillUrl = cloud.generateSignedViewUrl(lv.utilityBillPublicId) || lv.utilityBillUrl;
 
   return {
     // ── Identity ─────────────────────────────────────────────────────
@@ -75,7 +84,7 @@ function pickPublicUser(u) {
       memberSinceYear:  tp.memberSinceYear  || null,
       // The verification sub-doc already carries the Cloudinary URLs
       // and the per-doc boolean flags admins toggle through.
-      verification:     tp.verification     || {},
+      verification:     tv,
       trustScore:       tp.trustScore       ?? 0,
       trustTier:        tp.trustTier        || 'bronze',
     },
@@ -91,6 +100,7 @@ function pickPublicUser(u) {
       communication:    lp.communication    || [],
       houseRules:       lp.houseRules       || [],
       serviceCharge:    lp.serviceCharge    ?? null,
+      verification:     lv,
       trustScore:       lp.trustScore       ?? 0,
       trustTier:        lp.trustTier        || 'bronze',
     },

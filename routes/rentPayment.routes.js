@@ -37,6 +37,7 @@ function handleUpload(req, res, next) {
 // Tenant.
 router.post('/',                  requireAuth, ctrl.submitPayment);
 router.post('/:id/screenshot',    requireAuth, handleUpload, ctrl.uploadScreenshot);
+router.post('/:id/direct-screenshot', requireAuth, ctrl.saveDirectScreenshot);
 router.get('/tenant',             requireAuth, ctrl.listTenantSubmissions);
 
 // Landlord.

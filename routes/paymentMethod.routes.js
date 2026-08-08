@@ -46,6 +46,7 @@ router.delete('/:id',      requireAuth, ctrl.deleteMethod);
 
 // QR image.
 router.post('/:id/qr',     requireAuth, handleUpload, ctrl.uploadQr);
+router.post('/:id/direct-qr', requireAuth, ctrl.saveDirectQr);
 router.delete('/:id/qr',   requireAuth, ctrl.deleteQr);
 
 module.exports = router;

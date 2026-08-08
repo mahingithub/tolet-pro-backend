@@ -17,6 +17,8 @@ services:
     autoDeploy: true            # redeploy on every push to `branch`
 
     envVars:
+      - key: COOKIE_SAMESITE
+        value: none
       - key: NODE_ENV
         value: production
 

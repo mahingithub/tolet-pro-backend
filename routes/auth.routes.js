@@ -4,7 +4,7 @@ const express = require('express');
 const multer  = require('multer');
 const ctl = require('../controllers/auth.controller');
 const additions = require('../controllers/auth.controller.additions');
-const { uploadDoc, deleteDoc } = require('../controllers/verification.controller');
+const { uploadDoc, deleteDoc, saveDirectUploadDoc } = require('../controllers/verification.controller');
 const { uploadSingle } = require('../middleware/uploadMiddleware');
 const v = require('../validators/auth.validators');
 const validate = require('../middleware/validate');
@@ -192,6 +192,7 @@ router.post(
 );
 
 router.post ('/me/verification/upload/:kind', requireAuth, uploadSingle, uploadDoc);
+router.post ('/me/verification/direct-upload/:kind', requireAuth, saveDirectUploadDoc);
 router.delete('/me/verification/upload/:kind', requireAuth, deleteDoc);
 
 module.exports = router;

@@ -144,3 +144,57 @@ exports.deleteDoc = asyncH(async (req, res) => {
 
   res.json({ ok: true, kind, user: me.toJSON() });
 });
+
+// ─── POST /api/auth/me/verification/direct-upload/:kind ───────────────────
+// Accepts the result of a Direct Cloudinary Upload (browser → Cloudinary).
+// The frontend uploads the file straight to Cloudinary using a signed credential
+// from /api/upload/signature or /api/upload/signature/private, then calls this
+// endpoint with the resulting URL + public_id so we can persist it on the user
+// document. No file bytes touch this server.
+exports.saveDirectUploadDoc = asyncH(async (req, res) => {
+  const me = req.user;
+  if (!me) throw ApiError.unauthorized('Unauthenticated');
+
+  const kind = String(req.params.kind || '');
+  const slot = DOC_KINDS[kind];
+  if (!slot) throw ApiError.badRequest(`Unknown verification kind: ${kind}`);
+
+  const { secureUrl, publicId } = req.body || {};
+  if (!secureUrl || !publicId) {
+    throw ApiError.badRequest('secureUrl and publicId are required.');
+  }
+
+  // ─── Replace flow ─────────────────────────────────────────────────────
+  // If the user already has a doc for this slot, destroy the old one from
+  // Cloudinary to free quota.
+  const verif = me.tenantProfile?.verification?.toObject?.()
+              || me.tenantProfile?.verification
+              || {};
+  const previousPublicId = verif[`${slot.field}PublicId`];
+  if (previousPublicId && previousPublicId !== publicId) {
+    await cloud.destroy(previousPublicId, {
+      resourceType: 'image',
+    });
+  }
+
+  // ─── Persist on the user doc ──────────────────────────────────────────
+  me.tenantProfile = me.tenantProfile || {};
+  if (kind === 'photo') me.avatar = secureUrl;
+  me.tenantProfile.verification = {
+    ...(verif),
+    [slot.field]:                  true,
+    [`${slot.field}Url`]:          secureUrl,
+    [`${slot.field}PublicId`]:     publicId,
+    status: verif.status === 'rejected' ? 'unverified' : (verif.status || 'unverified'),
+    submittedForReview: false,
+    rejectionReason: '',
+  };
+  await me.save();
+
+  res.json({
+    ok: true,
+    kind,
+    url:      secureUrl,
+    user:     me.toJSON(),
+  });
+});

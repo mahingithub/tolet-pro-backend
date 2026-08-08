@@ -4,7 +4,7 @@ const express     = require('express');
 const multer      = require('multer');
 const router      = express.Router();
 const requireAuth = require('../middleware/requireAuth');
-const { uploadDocument, listDocuments, deleteDocument } = require('../controllers/document.controller');
+const { uploadDocument, listDocuments, deleteDocument, saveDirectDocument } = require('../controllers/document.controller');
 
 // Memory storage → hand the buffer straight to Cloudinary (no disk writes,
 // works on Render's ephemeral filesystem).
@@ -34,6 +34,7 @@ function handleUpload(req, res, next) {
 
 router.get('/',        requireAuth, listDocuments);
 router.post('/',       requireAuth, handleUpload, uploadDocument);
+router.post('/direct', requireAuth, saveDirectDocument);
 router.delete('/:id',  requireAuth, deleteDocument);
 
 module.exports = router;

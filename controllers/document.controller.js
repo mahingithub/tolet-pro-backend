@@ -14,6 +14,7 @@
 const mongoose   = require('mongoose');
 const Document    = require('../models/Document');
 const cloudinary  = require('../services/cloudinary.service');
+const ApiError    = require('../utils/ApiError');
 
 function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
@@ -66,6 +67,45 @@ async function uploadDocument(req, res, next) {
   }
 }
 
+// ── POST /api/documents/direct ────────────────────────────────────────────────
+async function saveDirectDocument(req, res, next) {
+  try {
+    const { secureUrl, publicId, fileName, folder, format, bytes } = req.body || {};
+    
+    if (!secureUrl || !publicId) {
+      throw ApiError.badRequest('secureUrl and publicId are required.');
+    }
+
+    // Determine fileType from format
+    const isPdf = format === 'pdf';
+    const isDoc = ['doc', 'docx'].includes(format);
+    const isImage = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(format);
+    
+    let fileType = 'other';
+    if (isPdf) fileType = 'pdf';
+    else if (isDoc) fileType = 'doc';
+    else if (isImage) fileType = 'image';
+
+    const doc = await Document.create({
+      landlordId: req.user._id,
+      folder: folder || 'Uncategorized',
+      fileName: fileName || 'Uploaded Document',
+      fileType,
+      fileSize: bytes || 0,
+      fileUrl: secureUrl,
+      publicId: publicId,
+    });
+
+    res.status(201).json({
+      ok: true,
+      message: 'Document saved successfully.',
+      document: doc,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // ── GET /api/documents ───────────────────────────────────────────────────────
 async function listDocuments(req, res, next) {
   try {
@@ -97,4 +137,4 @@ async function deleteDocument(req, res, next) {
   }
 }
 
-module.exports = { uploadDocument, listDocuments, deleteDocument };
+module.exports = { uploadDocument, listDocuments, deleteDocument, saveDirectDocument };

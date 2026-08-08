@@ -212,6 +212,37 @@ async function uploadQr(req, res, next) {
   }
 }
 
+// ── POST /api/payment-methods/:id/direct-qr ──────────────────────────────────
+async function saveDirectQr(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { secureUrl, publicId } = req.body || {};
+
+    if (!secureUrl || !publicId) {
+      throw ApiError.badRequest('secureUrl and publicId are required.');
+    }
+
+    const method = await PaymentMethod.findOne({ _id: id, landlordId: req.user._id });
+    if (!method) throw ApiError.notFound('Payment method not found.');
+
+    if (method.qrImagePublicId && method.qrImagePublicId !== publicId) {
+      await cloudinary.destroy(method.qrImagePublicId).catch(() => {});
+    }
+
+    method.qrImageUrl = secureUrl;
+    method.qrImagePublicId = publicId;
+    await method.save();
+
+    res.json({
+      ok: true,
+      message: 'QR Code saved.',
+      paymentMethod: method,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // ── DELETE /api/payment-methods/:id/qr ───────────────────────────────────────
 async function deleteQr(req, res, next) {
   try {
@@ -273,6 +304,7 @@ module.exports = {
   deleteMethod,
   uploadQr,
   deleteQr,
+  saveDirectQr,
   listForBooking,
   labelForType,
 };

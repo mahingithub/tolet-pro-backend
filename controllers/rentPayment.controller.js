@@ -183,6 +183,40 @@ async function uploadScreenshot(req, res, next) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/rent-payments/:id/direct-screenshot — tenant attaches direct upload proof
+// ─────────────────────────────────────────────────────────────────────────────
+async function saveDirectScreenshot(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { secureUrl, publicId } = req.body || {};
+
+    if (!secureUrl || !publicId) {
+      throw ApiError.badRequest('secureUrl and publicId are required.');
+    }
+
+    const submission = await RentPaymentSubmission.findById(id);
+    if (!submission) throw ApiError.notFound('Payment submission not found.');
+
+    if (submission.screenshotPublicId && submission.screenshotPublicId !== publicId) {
+      await cloudinary.destroy(submission.screenshotPublicId).catch(() => {});
+    }
+
+    submission.screenshotUrl = secureUrl;
+    submission.screenshotPublicId = publicId;
+    submission.status = 'pending';
+    await submission.save();
+
+    res.json({
+      ok: true,
+      message: 'Screenshot saved successfully.',
+      submission,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/rent-payments/tenant — the tenant's own submissions
 // ─────────────────────────────────────────────────────────────────────────────
 async function listTenantSubmissions(req, res, next) {
@@ -385,4 +419,5 @@ module.exports = {
   approveSubmission,
   rejectSubmission,
   deleteSubmission,
+  saveDirectScreenshot,
 };

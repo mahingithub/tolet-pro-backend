@@ -251,6 +251,7 @@ app.use('/api/admin/helpdesk', require('./routes/admin.support.routes'));
 app.use('/api/ai-guides',     require('./routes/aiGuideRoutes'));
 app.use('/api/ai-chat',       chatLimiter, require('./routes/aiChatRoutes'));
 app.use('/api/push',          require('./routes/push.routes'));
+app.use('/api/upload',        require('./routes/upload.routes'));
 
 // 404
 app.use((req, res) => {
