@@ -1,5 +1,9 @@
 'use strict';
 
+const path = require('path');
+const os   = require('os');
+const fs   = require('fs');
+
 // ─── Facebook Page Auto-Post Service ───────────────────────────────────────
 // Posts property listings to a Facebook Page automatically when a new property
 // is created.  Uses the Facebook Graph API v21.0.
@@ -68,6 +72,51 @@ function collectImageUrls(property) {
   }
 
   return urls;
+}
+
+/**
+ * Collect every uploadable video URL from the property document.
+ * Only Cloudinary-hosted (https) URLs are returned — YouTube IDs are handled
+ * separately in the caption.
+ */
+function collectVideoUrls(property) {
+  const urls = [];
+
+  // Legacy single-video field
+  const legacy = property.videoUrl || '';
+  if (legacy && legacy.startsWith('http')) {
+    urls.push(legacy);
+  }
+
+  // Multi-video array
+  const videos = Array.isArray(property.videos) ? property.videos : [];
+  for (const v of videos) {
+    const url = (v && v.url) || '';
+    if (url && url.startsWith('http') && !urls.includes(url)) {
+      urls.push(url);
+    }
+  }
+
+  return urls;
+}
+
+/**
+ * Collect YouTube video IDs from the property document.
+ * Used to add YouTube links in the caption when no uploadable video exists.
+ */
+function collectYoutubeIds(property) {
+  const ids = [];
+
+  const legacy = property.videoId || '';
+  if (legacy) ids.push(legacy);
+
+  const videos = Array.isArray(property.videos) ? property.videos : [];
+  for (const v of videos) {
+    const ytId = (v && v.youtubeId) || '';
+    if (ytId && !ids.includes(ytId)) ids.push(ytId);
+  }
+
+  return ids;
 }
 
 // ─── Caption Builder ────────────────────────────────────────────────────────
@@ -154,6 +203,16 @@ function buildCaption(property, { superBoost = false } = {}) {
   // ── CTA + link ────────────────────────────────────────────────────────
   const propertyId = property._id || property.id;
   const link = FRONTEND_URL ? `${FRONTEND_URL}/property/${propertyId}` : '';
+
+  // ── YouTube walkthrough link(s) ───────────────────────────────────
+  const ytIds = collectYoutubeIds(property);
+  if (ytIds.length) {
+    lines.push('');
+    lines.push('🎬 Video walkthrough:');
+    for (const ytId of ytIds) {
+      lines.push(`▶️ https://youtu.be/${ytId}`);
+    }
+  }
 
   lines.push('');
   lines.push('👉 Full details, more photos & owner contact:');
@@ -271,6 +330,64 @@ async function publishTextPost(pageId, accessToken, caption, link) {
   return res.json();
 }
 
+// ─── Video Upload Helpers ───────────────────────────────────────────────────
+
+/**
+ * Download a video from a URL (e.g. Cloudinary) into a temporary file.
+ * Returns the absolute path to the temp file. Caller MUST delete it when done.
+ */
+async function downloadToTempFile(videoUrl) {
+  const ext = path.extname(new URL(videoUrl).pathname) || '.mp4';
+  const tmpFile = path.join(os.tmpdir(), `fb_upload_${Date.now()}${ext}`);
+
+  const res = await fetch(videoUrl);
+  if (!res.ok) {
+    throw new Error(`Failed to download video (${res.status}): ${videoUrl}`);
+  }
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  fs.writeFileSync(tmpFile, buffer);
+  return tmpFile;
+}
+
+/**
+ * Upload a video file to a Facebook Page using multipart/form-data.
+ *
+ * Facebook's /{page-id}/videos endpoint requires the actual binary file data
+ * sent as the `source` field in a multipart form. We download the Cloudinary
+ * video to a temp file, build the multipart body manually (using the built-in
+ * FormData available in Node 18+), and POST it.
+ *
+ * The response includes the video post's `id`.
+ */
+async function publishVideoPost(pageId, accessToken, caption, videoFilePath) {
+  const url = `${FB_API}/${pageId}/videos`;
+
+  const formData = new FormData();
+
+  const videoBuffer = fs.readFileSync(videoFilePath);
+  const fileName = path.basename(videoFilePath);
+
+  // Create a Blob from the buffer (globalThis.Blob available in Node 18+)
+  const videoBlob = new Blob([videoBuffer], { type: 'video/mp4' });
+
+  formData.set('access_token', accessToken);
+  formData.set('description', caption);
+  formData.set('source', videoBlob, fileName);
+
+  const res = await fetch(url, {
+    method: 'POST',
+    body:   formData,
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`FB video upload failed (${res.status}): ${err}`);
+  }
+
+  return res.json();
+}
+
 // ─── Main Entry Point ───────────────────────────────────────────────────────
 
 /**
@@ -305,9 +422,50 @@ async function postToFacebookPage(property, opts = {}) {
   try {
     const { text: caption, link } = buildCaption(property, opts);
     const imageUrls = collectImageUrls(property);
+    const videoUrls = collectVideoUrls(property);
 
-    if (imageUrls.length > 1) {
-      // ── Multi-photo gallery post ──────────────────────────────────────
+    // ── 1) Video post (highest priority — video walkthroughs are the
+    //       primary listing media per the design brief) ──────────────────
+    if (videoUrls.length > 0) {
+      let tmpFile = null;
+      try {
+        // Download the first video from Cloudinary to a temp file
+        tmpFile = await downloadToTempFile(videoUrls[0]);
+        const result = await publishVideoPost(pageId, accessToken, caption, tmpFile);
+        console.log('[FacebookService] Video post published:', result.id);
+      } finally {
+        // Always clean up the temp file
+        if (tmpFile) {
+          try { fs.unlinkSync(tmpFile); } catch (_) { /* best-effort cleanup */ }
+        }
+      }
+
+      // If there are also images, publish them as a separate gallery post
+      // so the listing gets maximum visibility on the Page feed.
+      if (imageUrls.length > 1) {
+        try {
+          const uploadPromises = imageUrls.map((imgUrl) =>
+            uploadUnpublishedPhoto(pageId, accessToken, imgUrl),
+          );
+          const mediaFbIds = await Promise.all(uploadPromises);
+          const galCaption = `📸 More photos — ${property.title || 'Property'}\n\n🔗 ${link || ''}`;
+          const result = await publishMultiPhotoPost(pageId, accessToken, galCaption, mediaFbIds);
+          console.log('[FacebookService] Gallery post (alongside video) published:', result.id);
+        } catch (galErr) {
+          console.warn('[FacebookService] Gallery alongside video failed (video was posted):', galErr.message);
+        }
+      } else if (imageUrls.length === 1) {
+        try {
+          const imgCaption = `📸 Cover photo — ${property.title || 'Property'}\n\n🔗 ${link || ''}`;
+          const result = await publishSinglePhotoPost(pageId, accessToken, imgCaption, imageUrls[0]);
+          console.log('[FacebookService] Photo post (alongside video) published:', result.id || result.post_id);
+        } catch (imgErr) {
+          console.warn('[FacebookService] Photo alongside video failed (video was posted):', imgErr.message);
+        }
+      }
+
+    // ── 2) Multi-photo gallery post ─────────────────────────────────────
+    } else if (imageUrls.length > 1) {
       const uploadPromises = imageUrls.map((imgUrl) =>
         uploadUnpublishedPhoto(pageId, accessToken, imgUrl),
       );
@@ -315,13 +473,13 @@ async function postToFacebookPage(property, opts = {}) {
       const result = await publishMultiPhotoPost(pageId, accessToken, caption, mediaFbIds);
       console.log('[FacebookService] Multi-photo post published:', result.id);
 
+    // ── 3) Single photo post ────────────────────────────────────────────
     } else if (imageUrls.length === 1) {
-      // ── Single photo post ─────────────────────────────────────────────
       const result = await publishSinglePhotoPost(pageId, accessToken, caption, imageUrls[0]);
       console.log('[FacebookService] Single-photo post published:', result.id || result.post_id);
 
+    // ── 4) Text-only post (with link) ───────────────────────────────────
     } else {
-      // ── Text-only post ────────────────────────────────────────────────
       const result = await publishTextPost(pageId, accessToken, caption, link);
       console.log('[FacebookService] Text post published:', result.id);
     }
