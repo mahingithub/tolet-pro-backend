@@ -12,6 +12,7 @@
 
 const express = require('express');
 const ctl = require('../controllers/admin.controller');
+const subCtl = require('../controllers/admin.subscription.controller');
 const teamCtl = require('../controllers/admin.team.controller');
 const sellInterestCtl = require('../controllers/sellInterest.controller');
 const requireAdminAuth = require('../middleware/requireAdminAuth');
@@ -68,6 +69,14 @@ router.post('/reports/:id/status',          ctl.updateReportStatus);
 router.get ('/properties',                  ctl.listAllProperties);
 router.post('/properties/:id/moderate',     ctl.moderateProperty);
 router.delete('/properties/:id',            ctl.deleteProperty);
+
+// ─── Subscriptions + marketing ─────────────────────────────────────────────
+// The plan/reachability table and the multi-channel "special offer" blast.
+// Sending is gated to super admins: it spends real money (SMS) and reaches
+// users outside the app, so it is not something a support agent should be
+// able to trigger. Reading the table stays open to the whole console.
+router.get ('/subscriptions',            subCtl.listSubscriptions);
+router.post('/subscriptions/send-offer', requireSuperAdmin, subCtl.sendOffer);
 
 // ─── Admin team management (SUPER ADMIN ONLY) ───────────────────────────────
 // Designate other users as admins/sub-admins and revoke that access. The

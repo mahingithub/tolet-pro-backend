@@ -105,7 +105,7 @@ exports.revokeAllOtherSessions = asyncH(async (req, res) => {
 
 // Cross-cutting flat fields the rest of the server reads directly.
 const FLAT_KEYS     = ['aiLearningOptIn', 'marketingEmails', 'smsAlerts', 'callNotifications', 'theme', 'language'];
-const NOTIF_KEYS    = ['push', 'email', 'sound', 'frequency', 'messages', 'bookings', 'payments', 'inquiries', 'visits', 'priceAlerts'];
+const NOTIF_KEYS    = ['push', 'email', 'sound', 'frequency', 'messages', 'bookings', 'payments', 'inquiries', 'visits', 'priceAlerts', 'whatsappOptIn', 'marketingPush'];
 const APP_KEYS      = ['currency', 'autoplayVideos', 'reduceMotion', 'defaultLandingRole'];
 const TENANT_KEYS   = ['profileVisibility', 'showContactToLandlords', 'savedSearchAlerts', 'defaultCity', 'defaultArea', 'defaultBudgetMin', 'defaultBudgetMax', 'defaultPropertyType'];
 const LANDLORD_KEYS = ['inquiryNotifications', 'autoReplyEnabled', 'autoReplyMessage', 'showPhoneOnListings', 'instantBooking', 'allowVisitRequests', 'defaultListingType'];

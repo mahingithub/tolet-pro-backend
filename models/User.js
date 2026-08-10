@@ -209,6 +209,23 @@ const NotificationPrefsSchema = new mongoose.Schema(
     inquiries:   { type: Boolean, default: true },
     visits:      { type: Boolean, default: true },
     priceAlerts: { type: Boolean, default: true },
+
+    // ── Marketing consent (admin "special offer" blasts) ─────────────────
+    // Separate from the transactional switches above: a user who wants rent
+    // reminders has NOT thereby agreed to promotions, and the two must be
+    // revocable independently.
+    //
+    // `whatsappOptIn` defaults to FALSE because Meta requires explicit opt-in
+    // before a business may send a marketing template, and messaging users
+    // who never agreed is what gets a WhatsApp sender quality-rated down and
+    // ultimately blocked. It is the flag the admin Subscriptions table shows
+    // as "WhatsApp Active", and the one the send-offer endpoint filters on.
+    //
+    // `marketingPush` defaults to TRUE — an in-app/push promo is low-risk and
+    // dismissible, matching `marketingEmails` above. Marketing SMS reuses the
+    // existing `smsAlerts` flat field rather than adding a third switch.
+    whatsappOptIn: { type: Boolean, default: false },
+    marketingPush: { type: Boolean, default: true },
   },
   { _id: false },
 );

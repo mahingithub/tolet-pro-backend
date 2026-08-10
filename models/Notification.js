@@ -14,6 +14,7 @@
  *   - 'rent_receipt'     → tenant receives a new rent receipt
  *   - 'rent_invoice'     → tenant receives a new rent invoice
  *   - 'rent_overdue'     → tenant receives a notification about an overdue rent payment
+ *   - 'marketing'        → admin-composed promotional blast (Subscriptions console)
  *
  * `data` is a free-form payload that lets the frontend deep-link without a
  * second round-trip — e.g. inquiryId, conversationId, propertyTitle.
@@ -29,7 +30,8 @@ const NotificationSchema = new mongoose.Schema(
       enum: [
         'inquiry_new', 'inquiry_status', 'message_new', 'system', 'rent_receipt', 'rent_invoice', 'rent_overdue',
         'message', 'inquiry', 'booking', 'payment', 'receipt', 'property', 'review',
-        'support_ticket', 'support_message', 'kyc_tenant', 'kyc_landlord'
+        'support_ticket', 'support_message', 'kyc_tenant', 'kyc_landlord',
+        'marketing',
       ],
       required: true,
     },
