@@ -5,9 +5,13 @@
  * ──────────────────────────────────────────────────────────────────────────
  * Daily sweep. For each ACTIVE booking that has members and autoReminder on,
  * find every active member's next UNPAID month; if that month's due date is
- * within `reminderLeadDays` (or already past), nudge the member:
+ * within `reminderLeadDays` (or already past), nudge the member on every
+ * channel we have for them:
  *   • linked account  → in-app notification (+ push via notification.service)
- *   • phone only      → SMS (best-effort, only when the gateway is configured)
+ *   • phone number    → WhatsApp, with SMS as a fallback if WhatsApp fails or
+ *                       is unconfigured (best-effort)
+ * A member with both a linked account and a phone gets both — WhatsApp is not
+ * a fallback for the app, it runs alongside it.
  *
  * De-dupe: member.lastReminderKey stores `${monthKey}@${YYYY-MM-DD}` so the
  * same member+month is never reminded twice on the same day (Requirement 5.3),
@@ -22,7 +26,6 @@
  */
 
 const Booking       = require('../models/Booking');
-const User          = require('../models/User');
 const notifications = require('./notification.service');
 const whatsapp      = require('./whatsapp.service');
 const env           = require('../config/env');
@@ -122,14 +125,8 @@ async function runRentReminders(today = new Date()) {
       const title = `⏰ ভাড়ার রিমাইন্ডার — ${booking.property || 'বাসা'}`;
       const body  = `${m.name ? m.name + ', ' : ''}${label} এর ভাড়া ৳${rent} পরিশোধের সময় হয়েছে।`;
 
-      let userHasApp = false;
       if (m.userId) {
-        const user = await User.findById(m.userId).select('deviceTokens').lean();
-        if (user && user.deviceTokens && user.deviceTokens.length > 0) {
-          userHasApp = true;
-        }
-
-        // Best-effort like the WhatsApp/SMS fallbacks below — a push/socket
+        // Best-effort like the WhatsApp/SMS sends below — a push/socket
         // hiccup must not reject the whole sweep and skip the remaining members.
         notifications.emit({
           userId: m.userId,
@@ -139,9 +136,11 @@ async function runRentReminders(today = new Date()) {
           data:   { bookingId: String(booking._id), memberId: String(m._id), monthKey: next.key, kind: 'rent_reminder' },
         }).catch(() => {});
       }
-      
-      if (!userHasApp && m.phone) {
-        // Fallback: Try WhatsApp first. If it fails (or is unconfigured), fallback to SMS.
+
+      if (m.phone) {
+        // Sent alongside the in-app push, not as a fallback to it: any member
+        // with a phone gets WhatsApp too. If WhatsApp fails (or is
+        // unconfigured), fall back to SMS.
         whatsapp.sendWhatsAppMessage(m.phone, { body: `${title}\n\n${body}` })
           .then(waRes => {
             if (!waRes.success && env.smsApiKey && sms) {
