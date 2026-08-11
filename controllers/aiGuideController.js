@@ -7,29 +7,28 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 // @route   GET /api/ai-guides
 // @access  Public
 exports.getAIGuides = asyncH(async (req, res) => {
-	// Public route → only active guides, sorted by order.
-	//
-	// IMPORTANT: we must EXCLUDE every non-Assistant placement here, otherwise
-	// welcome / how-it-works / support videos would leak into the Assistant's
-	// suggestion list. We use `$nin` (not `placement: "assistant"`) on purpose:
-	// guides created before the placement field existed have NO placement field
-	// at all in MongoDB (the schema default only applies on save, not to old
-	// documents). `$nin` matches "assistant" guides AND those older field-less
-	// guides (a missing field is treated as not-in-array), so nothing disappears
-	// from the Assistant.
-	const guides = await AIGuide.find({
+	const { deviceCategory } = req.query;
+	const filter = {
 		isActive: true,
 		placement: { $nin: ["welcome", "how_it_works", "support", "subscription", "checkout", "free_trial_mode"] },
-	}).sort({ order: 1 });
+	};
+	if (deviceCategory === "mobile" || deviceCategory === "desktop" || deviceCategory === "tablet") {
+		if (deviceCategory === "desktop" || deviceCategory === "tablet") {
+			filter.deviceCategory = { $in: [deviceCategory, "desktop_tablet", "all"] };
+		} else {
+			filter.deviceCategory = { $in: [deviceCategory, "all"] };
+		}
+	}
+	const guides = await AIGuide.find(filter).sort({ order: 1 });
 	res.status(200).json(guides);
 });
 
 // @desc    Get active guides for a public page section (How it Works / Support)
-// @route   GET /api/ai-guides/section/:placement?audience=tenant|landlord
+// @route   GET /api/ai-guides/section/:placement?audience=tenant|landlord&deviceCategory=mobile|desktop|tablet
 // @access  Public
 exports.getGuidesByPlacement = asyncH(async (req, res) => {
 	const { placement } = req.params;
-	const { audience } = req.query;
+	const { audience, deviceCategory } = req.query;
 
 	// Only page-section placements are fetchable through this public endpoint.
 	const allowed = ["how_it_works", "support", "subscription", "checkout", "free_trial_mode"];
@@ -45,22 +44,36 @@ exports.getGuidesByPlacement = asyncH(async (req, res) => {
 	if (audience === "tenant" || audience === "landlord") {
 		filter.audience = { $in: [audience, "all"] };
 	}
+	if (deviceCategory === "mobile" || deviceCategory === "desktop" || deviceCategory === "tablet") {
+		if (deviceCategory === "desktop" || deviceCategory === "tablet") {
+			filter.deviceCategory = { $in: [deviceCategory, "desktop_tablet", "all"] };
+		} else {
+			filter.deviceCategory = { $in: [deviceCategory, "all"] };
+		}
+	}
 
 	const guides = await AIGuide.find(filter).sort({ order: 1 });
 	res.status(200).json(guides);
 });
 
 // @desc    Get active Welcome-Robot guides (shown in the post-login popup)
-// @route   GET /api/ai-guides/welcome?audience=tenant|landlord
+// @route   GET /api/ai-guides/welcome?audience=tenant|landlord&deviceCategory=mobile|desktop|tablet
 // @access  Public
 exports.getWelcomeGuides = asyncH(async (req, res) => {
-	const { audience } = req.query;
+	const { audience, deviceCategory } = req.query;
 	const filter = { isActive: true, placement: "welcome" };
 
 	// If a valid role is given, return guides for that role PLUS "all"-audience
 	// guides. Anything else → return every active welcome guide.
 	if (audience === "tenant" || audience === "landlord") {
 		filter.audience = { $in: [audience, "all"] };
+	}
+	if (deviceCategory === "mobile" || deviceCategory === "desktop" || deviceCategory === "tablet") {
+		if (deviceCategory === "desktop" || deviceCategory === "tablet") {
+			filter.deviceCategory = { $in: [deviceCategory, "desktop_tablet", "all"] };
+		} else {
+			filter.deviceCategory = { $in: [deviceCategory, "all"] };
+		}
 	}
 
 	const guides = await AIGuide.find(filter).sort({ order: 1 });
@@ -86,7 +99,7 @@ const parseKeywords = (raw) => {
 // @route   POST /api/ai-guides
 // @access  Private/Admin
 exports.createAIGuide = asyncH(async (req, res) => {
-	const { title, suggestionText, videoUrl, isActive, order, placement, audience, keywords } = req.body;
+	const { title, suggestionText, videoUrl, isActive, order, placement, audience, deviceCategory, keywords } = req.body;
 
 	const newGuide = new AIGuide({
 		title,
@@ -96,6 +109,7 @@ exports.createAIGuide = asyncH(async (req, res) => {
 		order,
 		placement,
 		audience,
+		deviceCategory,
 		keywords: parseKeywords(keywords),
 	});
 
@@ -107,7 +121,7 @@ exports.createAIGuide = asyncH(async (req, res) => {
 // @route   PUT /api/ai-guides/:id
 // @access  Private/Admin
 exports.updateAIGuide = asyncH(async (req, res) => {
-	const { title, suggestionText, videoUrl, isActive, order, placement, audience, keywords } = req.body;
+	const { title, suggestionText, videoUrl, isActive, order, placement, audience, deviceCategory, keywords } = req.body;
 
 	const guide = await AIGuide.findById(req.params.id);
 	if (!guide) {
@@ -121,6 +135,7 @@ exports.updateAIGuide = asyncH(async (req, res) => {
 	if (order !== undefined) guide.order = order;
 	if (placement !== undefined) guide.placement = placement;
 	if (audience !== undefined) guide.audience = audience;
+	if (deviceCategory !== undefined) guide.deviceCategory = deviceCategory;
 	if (keywords !== undefined) guide.keywords = parseKeywords(keywords);
 
 	const updatedGuide = await guide.save();

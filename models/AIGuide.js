@@ -59,6 +59,12 @@ const aiGuideSchema = new mongoose.Schema(
 			enum: ["tenant", "landlord", "all"],
 			default: "all",
 		},
+		// Target device category (mobile, desktop, tablet, desktop_tablet, or all)
+		deviceCategory: {
+			type: String,
+			enum: ["mobile", "desktop", "tablet", "desktop_tablet", "all"],
+			default: "all",
+		},
 	},
 	{
 		timestamps: true,
