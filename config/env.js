@@ -44,13 +44,22 @@ const env = {
   mongoUri: process.env.MONGO_URI,
 
   // ─── Refresh-token cookie ────────────────────────────────────────────────
-  // 'strict' (default) only works when the app and the API are the SAME site.
-  // Split-domain deploys and the Capacitor WebView must set
-  // COOKIE_SAMESITE=none (which also forces Secure) or the browser will never
-  // send the cookie to POST /auth/refresh and every session dies after 15m.
+  // COOKIE_SAMESITE is an OPTIONAL override. When it is unset,
+  // utils/refreshCookie.js derives SameSite per request: 'lax' for same-site
+  // callers (so a plain-HTTP LAN/dev setup keeps working) and 'none' + Secure
+  // for cross-site ones (split-domain deploys, the Capacitor WebView) — the
+  // only combination a browser will actually send cross-site.
+  //
+  // This used to default to 'strict', which a browser refuses to attach to any
+  // cross-site request. POST /auth/refresh then answered 401
+  // missing_refresh_token and every session died the moment the 15-minute
+  // access token expired. Deriving it from the request means a typo in .env can
+  // no longer silently log every user out.
+  cookieSameSiteExplicit: ['strict', 'lax', 'none']
+    .includes(String(process.env.COOKIE_SAMESITE || '').toLowerCase()),
   cookieSameSite: (() => {
-    const raw = String(process.env.COOKIE_SAMESITE || 'strict').toLowerCase();
-    return ['strict', 'lax', 'none'].includes(raw) ? raw : 'strict';
+    const raw = String(process.env.COOKIE_SAMESITE || '').toLowerCase();
+    return ['strict', 'lax', 'none'].includes(raw) ? raw : 'lax';
   })(),
   // Optional parent domain (e.g. '.tolet-pro.com') so api.* and www.* share it.
   cookieDomain: process.env.COOKIE_DOMAIN || '',

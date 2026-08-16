@@ -32,10 +32,11 @@ const rateLimit = require('express-rate-limit');
  * Generic rate limiter factory. Keys by IP. For phone-scoped limiting we
  * compose with a custom `keyGenerator` per route.
  */
-function make({ windowMs, max, message }) {
+function make({ windowMs, max, message, skipSuccessfulRequests = false }) {
   return rateLimit({
     windowMs,
     max,
+    skipSuccessfulRequests,
     standardHeaders: true,
     legacyHeaders: false,
     message: { message },
@@ -144,11 +145,23 @@ const reset = make({
  */
 
 /**
- * 20 token refresh attempts per IP per 15 minutes.
+ * 100 FAILED token refresh attempts per IP per 15 minutes.
+ *
+ * This was 20 per IP counting *every* refresh, successful ones included, which
+ * is a session-killer rather than a security control:
+ *   - Refresh tokens are 256-bit random values, so brute force is not a threat
+ *     this limiter meaningfully protects against.
+ *   - Bangladeshi mobile networks put thousands of subscribers behind
+ *     carrier-grade NAT, so one shared IP burns through 20 legitimate refreshes
+ *     in minutes. Every user behind it then got 429s, could not mint a new
+ *     access token, and was treated as logged out.
+ *
+ * skipSuccessfulRequests keeps the bucket for genuine flooding only.
  */
 const refresh = make({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,
+  max: 100,
+  skipSuccessfulRequests: true,
   message: 'অনেক বেশি রিফ্রেশ অনুরোধ। কিছুক্ষণ পর চেষ্টা করুন।',
 });
 

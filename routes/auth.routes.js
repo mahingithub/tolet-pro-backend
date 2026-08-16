@@ -55,11 +55,15 @@ router.post('/logout-all', requireAuth, ctl.logoutAll);
 // POST /api/auth/refresh (reads refreshToken from httpOnly cookie)
 // Rotates refresh token and issues new access token
 router.post('/refresh', rl.refresh, async (req, res, next) => {
+  const cookieName = refreshCookie.USER_COOKIE;
   try {
     // Read refresh token from cookie (not body)
-    const refreshToken = req.cookies?.refreshToken;
+    const refreshToken = req.cookies?.[cookieName];
     
     if (!refreshToken) {
+      // Deliberately non-destructive: an absent cookie almost always means the
+      // browser declined to SEND it (cross-site / SameSite) rather than the
+      // session being over, so nothing is revoked and the client may retry.
       return res.status(401).json({
         code: 'missing_refresh_token',
         message: 'Refresh token not found. Please log in again.',
@@ -72,15 +76,21 @@ router.post('/refresh', rl.refresh, async (req, res, next) => {
     });
     
     // Set new refresh token as httpOnly cookie
-    res.cookie('refreshToken', result.refreshToken, refreshCookie.setOptions());
+    res.cookie(cookieName, result.refreshToken, refreshCookie.setOptions(req));
     
     res.json({
       token: result.accessToken, // New short-lived access token (15m)
       user: result.user,
     });
   } catch (err) {
-    // Clear cookie on error
-    res.clearCookie('refreshToken', refreshCookie.clearOptions());
+    // Only drop the cookie when the session is genuinely finished. This used to
+    // clear unconditionally, so a single transient failure — a DB blip, a
+    // replica failover, an unexpected 5xx — permanently destroyed a session
+    // whose refresh token was still perfectly valid, and the user was bounced
+    // to the login screen for no reason.
+    if (refreshTokenService.isTerminalRefreshError(err)) {
+      res.clearCookie(cookieName, refreshCookie.clearOptions(req));
+    }
     next(err);
   }
 });

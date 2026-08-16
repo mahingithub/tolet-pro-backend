@@ -465,18 +465,33 @@ async function updateBooking(req, res, next) {
       throw ApiError.forbidden('এই বুকিং আপনার নয়।');
     }
 
-    // Whitelist mutable fields
+    // Whitelist mutable fields.
+    // leaseStart / leaseEnd are editable so the host can (a) renew a tenancy in
+    // place and (b) CLOSE ONE OUT when the tenant leaves early — the tenant-change
+    // flow pulls leaseEnd back to the move-out date and flips status to
+    // 'completed', which retires the lease without deleting its rent history.
     const whitelist = [
       'autoReminder', 'reminderLeadDays', 'rentDueDay', 'monthlyRent',
       'notes', 'serviceCharge', 'securityDeposit', 'status',
       'tenant', 'tenantPhone', 'tenantId', 'tenantsCount',
       'advancePayment', 'paymentMethod', 'location',
       'floorNumber', 'roomNumber', 'propertyType',
+      'leaseStart', 'leaseEnd',
     ];
+    const DATE_FIELDS = new Set(['leaseStart', 'leaseEnd']);
     for (const key of whitelist) {
-      if (req.body[key] !== undefined) {
-        booking[key] = req.body[key];
+      if (req.body[key] === undefined) continue;
+      if (DATE_FIELDS.has(key)) {
+        const d = new Date(req.body[key]);
+        if (Number.isNaN(d.getTime())) throw ApiError.badRequest('লিজের তারিখ সঠিক নয়।');
+        booking[key] = d;
+        continue;
       }
+      booking[key] = req.body[key];
+    }
+    // Keep the term coherent: a lease can't end before it starts.
+    if (booking.leaseEnd && booking.leaseStart && booking.leaseEnd < booking.leaseStart) {
+      throw ApiError.badRequest('লিজ শেষের তারিখ শুরুর আগে হতে পারে না।');
     }
 
     await booking.save();

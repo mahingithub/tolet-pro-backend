@@ -38,7 +38,7 @@ exports.signupVerify = asyncH(async (req, res) => {
     });
     
     // Set refresh token as httpOnly cookie (30 days)
-    res.cookie('refreshToken', refreshToken, refreshCookie.setOptions());
+    res.cookie('refreshToken', refreshToken, refreshCookie.setOptions(req));
     
     // Record login in history
     await loginHistory.safeLog(
@@ -78,7 +78,7 @@ exports.login = asyncH(async (req, res) => {
     });
     
     // Set refresh token as httpOnly cookie (30 days)
-    res.cookie('refreshToken', refreshToken, refreshCookie.setOptions());
+    res.cookie('refreshToken', refreshToken, refreshCookie.setOptions(req));
     
     // Record login in history
     await loginHistory.safeLog(
@@ -132,7 +132,7 @@ exports.logout = asyncH(async (req, res) => {
   }
   
   // Clear refresh token cookie
-  res.clearCookie('refreshToken', refreshCookie.clearOptions());
+  res.clearCookie('refreshToken', refreshCookie.clearOptions(req));
   
   res.json({ ok: true });
 });
@@ -155,7 +155,7 @@ exports.logoutAll = asyncH(async (req, res) => {
   );
   
   // Clear refresh token cookie
-  res.clearCookie('refreshToken', refreshCookie.clearOptions());
+  res.clearCookie('refreshToken', refreshCookie.clearOptions(req));
   
   res.json({ 
     ok: true, 

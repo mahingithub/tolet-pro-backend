@@ -35,7 +35,14 @@ module.exports = async function requireAdminAuth(req, _res, next) {
     try {
       decoded = tokenService.verifyAdminToken(token);
     } catch (err) {
-      throw ApiError.unauthorized('Admin token অবৈধ বা মেয়াদ শেষ।', { code: 'invalid_token' });
+      // Same split as requireAuth: an expired admin token is refreshable, an
+      // invalid one is not. Collapsing both into `invalid_token` left the
+      // console unable to tell them apart, so it logged the admin out either way.
+      const expired = err?.name === 'TokenExpiredError';
+      throw ApiError.unauthorized(
+        expired ? 'Admin token-এর মেয়াদ শেষ।' : 'Admin token অবৈধ।',
+        { code: expired ? 'token_expired' : 'invalid_token' },
+      );
     }
 
     const user = await User.findById(decoded.sub);

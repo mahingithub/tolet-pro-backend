@@ -20,7 +20,15 @@ module.exports = async function requireAuth(req, _res, next) {
     try {
       decoded = tokenService.verifyAccessToken(token);
     } catch (err) {
-      throw ApiError.unauthorized('Token অবৈধ বা মেয়াদ শেষ।', { code: 'invalid_token' });
+      // Expiry and genuine invalidity used to collapse into one `invalid_token`
+      // code, so a client had no way to tell "refresh me" from "give up and log
+      // out". An expired access token is the NORMAL state 15 minutes after
+      // login — it must never be read as a dead session.
+      const expired = err?.name === 'TokenExpiredError';
+      throw ApiError.unauthorized(
+        expired ? 'Token-এর মেয়াদ শেষ।' : 'Token অবৈধ।',
+        { code: expired ? 'token_expired' : 'invalid_token' },
+      );
     }
     const user = await User.findById(decoded.sub);
     if (!user) throw ApiError.unauthorized('অ্যাকাউন্ট পাওয়া যায়নি।', { code: 'user_missing' });

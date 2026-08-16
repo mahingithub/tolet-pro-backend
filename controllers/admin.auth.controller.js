@@ -14,6 +14,7 @@ const QRCode = require('qrcode');
 const authService = require('../services/auth.service');
 const tokenService = require('../services/token.service');
 const refreshTokenService = require('../services/refreshToken.service');
+const refreshCookie = require('../utils/refreshCookie');
 const auditLog = require('../services/auditLog.service');
 const loginHistory = require('../services/loginHistory.service');
 const User = require('../models/User');
@@ -63,14 +64,18 @@ exports.login = asyncH(async (req, res) => {
     ? result.user.sessions[result.user.sessions.length - 1].sessionId 
     : null;
   
-  let refreshToken = null;
   if (sessionId) {
-    refreshToken = await refreshTokenService.issueRefreshToken({
+    const refreshToken = await refreshTokenService.issueRefreshToken({
       userId: result.user._id,
       sessionId,
       ipAddress: req.ip || '0.0.0.0',
       userAgent: req.headers['user-agent'],
     });
+
+    // httpOnly cookie, NOT the JSON body. The body copy was dead weight — the
+    // console never stored it, and there was no admin refresh route to spend it
+    // on — so the session simply ended when the 12h access token expired.
+    res.cookie(refreshCookie.ADMIN_COOKIE, refreshToken, refreshCookie.setOptions(req));
     
     // Record login in history
     await loginHistory.safeLog(
@@ -80,8 +85,7 @@ exports.login = asyncH(async (req, res) => {
   }
 
   res.json({ 
-    token: result.token, // Access token
-    refreshToken, // NEW: Refresh token
+    token: result.token, // Short-lived admin access token (12h)
     admin: toAdminDTO(result.user) 
   });
 });
@@ -89,6 +93,53 @@ exports.login = asyncH(async (req, res) => {
 // GET /api/admin/auth/me  (requireAdminAuth) — validate token + hydrate admin.
 exports.me = asyncH(async (req, res) => {
   res.json({ admin: toAdminDTO(req.user) });
+});
+
+// POST /api/admin/auth/refresh — rotate the admin refresh cookie and mint a
+// fresh admin-scoped access token.
+//
+// Deliberately NOT behind requireAdminAuth: the entire point is to be callable
+// once the access token has already expired. Authority comes from the httpOnly
+// cookie, and rotateRefreshToken({ scope: 'admin' }) re-checks the account's
+// admin role before signing anything.
+//
+// This endpoint did not exist. Admin login minted a refresh token, returned it
+// in a JSON body nothing read, and the console had no way to renew a session —
+// so every admin was thrown back to the login screen once the 12h token
+// expired, and the client's 401 handler (which posted to a URL that did not
+// resolve, then cleared the session) turned any single 401 into a logout.
+exports.refresh = asyncH(async (req, res, next) => {
+  const cookieName = refreshCookie.ADMIN_COOKIE;
+  const refreshToken = req.cookies?.[cookieName];
+
+  if (!refreshToken) {
+    return res.status(401).json({
+      code: 'missing_refresh_token',
+      message: 'Refresh token not found. Please log in again.',
+    });
+  }
+
+  try {
+    const result = await refreshTokenService.rotateRefreshToken(refreshToken, {
+      ipAddress: req.ip || '0.0.0.0',
+      userAgent: req.headers['user-agent'],
+      scope: 'admin',
+    });
+
+    res.cookie(cookieName, result.refreshToken, refreshCookie.setOptions(req));
+
+    res.json({
+      token: result.accessToken,
+      admin: toAdminDTO(result.user),
+    });
+  } catch (err) {
+    // Only abandon the session when it is genuinely over. A transient failure
+    // must leave the cookie intact so the next attempt can still succeed.
+    if (refreshTokenService.isTerminalRefreshError(err)) {
+      res.clearCookie(cookieName, refreshCookie.clearOptions(req));
+    }
+    next(err);
+  }
 });
 
 // POST /api/admin/auth/logout (requireAdminAuth) — revoke THIS session so the
@@ -104,6 +155,10 @@ exports.logout = asyncH(async (req, res) => {
     // Record logout in history
     await loginHistory.safeLog(loginHistory.recordLogout, req.sessionId);
   }
+
+  // An explicit logout IS the one place the refresh cookie must go.
+  res.clearCookie(refreshCookie.ADMIN_COOKIE, refreshCookie.clearOptions(req));
+
   res.json({ ok: true });
 });
 
@@ -177,6 +232,9 @@ exports.changePassword = asyncH(async (req, res) => {
     description: `Admin ${user.name} changed their password`,
     metadata: { allSessionsRevoked: true },
   });
+
+  // Every refresh token was just revoked, so the cookie is dead weight.
+  res.clearCookie(refreshCookie.ADMIN_COOKIE, refreshCookie.clearOptions(req));
 
   res.json({ ok: true, code: 'password_changed' });
 });
@@ -263,6 +321,10 @@ exports.verify2FALogin = asyncH(async (req, res) => {
     userAgent: device,
   });
 
+  // httpOnly cookie so POST /api/admin/auth/refresh can rotate it. Same
+  // treatment as the non-2FA login path above.
+  res.cookie(refreshCookie.ADMIN_COOKIE, refreshToken, refreshCookie.setOptions(req));
+
   // Record login in history
   await loginHistory.safeLog(
     loginHistory.recordSuccessfulLogin,
@@ -271,7 +333,6 @@ exports.verify2FALogin = asyncH(async (req, res) => {
 
   res.json({ 
     token: accessToken, 
-    refreshToken, // NEW: Refresh token
     admin: toAdminDTO(user),
     message: 'লগইন সফল হয়েছে।'
   });
