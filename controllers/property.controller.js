@@ -11,6 +11,7 @@ const Subscription = require('../models/Subscription');
 const Review = require('../models/Review');
 const User = require('../models/User');
 const { tierOf } = require('../utils/subscriptionTier');
+const { warmNearbyPlaces } = require('../services/nearbyPlaces.service');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -209,6 +210,14 @@ exports.getPropertyById = asyncH(async (req, res) => {
   const summary = await Review.summaryFor(property.ownerUserId, 'landlord');
   property.rating = summary.avg;
   property.reviews = summary.count;
+
+  // Start filling the "What's nearby" cache for this location NOW, before the
+  // browser has even parsed this response and asked for it. The nearby lookup
+  // is deduped per ~110 m cell, so this is free when the area is already warm
+  // and shaves the whole Overpass round-trip off a genuinely cold one.
+  // Fire-and-forget by design — it must never delay or fail this response.
+  warmNearbyPlaces(Number(property.gpsLat), Number(property.gpsLng));
+
   res.json({ property });
 });
 

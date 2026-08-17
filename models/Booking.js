@@ -138,15 +138,29 @@ const BookingSchema = new mongoose.Schema(
 
     // Lease terms
     leaseStart:       { type: Date, required: true },
-    leaseEnd:         { type: Date, required: true },
+    // OPEN-ENDED BY DEFAULT (null = no expiry). A Bangladeshi tenancy has no
+    // renewal ritual: the tenant moves in, pays monthly, and stays for years
+    // without anyone signing a new paper. Forcing an end date made the lease
+    // "expire" on its own and told the landlord to re-create the SAME tenant —
+    // busywork for something that never happened in real life. The tenancy now
+    // runs until the host hands the unit over (tenant change closes it out and
+    // stamps the real move-out date here) or types a term on purpose, which is
+    // what a commercial deal with a fixed tenure does.
+    leaseEnd:         { type: Date, default: null },
     monthlyRent:      { type: Number, required: true, min: 0 },
     // One-time advance / booking money collected up front, plus the channel it
     // was collected through (bKash | Nagad | Rocket | Bank Transfer | Cash).
     advancePayment:   { type: Number, default: 0, min: 0 },
     paymentMethod:    { type: String, trim: true, default: '', maxlength: 40 },
     rentDueDay:       { type: Number, default: 5, min: 1, max: 28 },
+    // Days after the due date before the rent counts as late.
     gracePeriodDays:  { type: Number, default: 5, min: 0, max: 28 },
-    lateFeeAmount:    { type: Number, default: 500, min: 0 },
+    // Late fee — OPT-IN, so it defaults to 0 (none). A landlord who wants one
+    // sets the amount on the lease; only then is a fee added to an overdue month
+    // and only then does the rent reminder mention it. Charging money the
+    // landlord never asked for (this used to default to ৳500) is not a default
+    // we get to pick on their behalf.
+    lateFeeAmount:    { type: Number, default: 0, min: 0 },
     reminderLeadDays: { type: Number, default: 3 },
     autoReminder:     { type: Boolean, default: true },
     serviceCharge:    { type: Number, default: 0 },
@@ -191,6 +205,13 @@ const BookingSchema = new mongoose.Schema(
     // so the daily sweep fires at most once per milestone — and automatically
     // re-arms if the host extends the lease (a new leaseEnd ⇒ a new key).
     lastLeaseExpiryReminderKey: { type: String, default: '' },
+
+    // Rent-reminder de-dupe for SINGLE-TENANT bookings (flat / single room /
+    // commercial — anything with an empty members[]). Same `<monthKey>@<day>`
+    // shape as MemberSchema.lastReminderKey: at most one nudge per tenant per
+    // day, repeating on later days until the rent is paid.
+    lastReminderKey: { type: String, default: '' },
+    lastReminderAt:  { type: Date, default: null },
 
     deletedAt:        { type: Date, default: null },
 

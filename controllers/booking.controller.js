@@ -158,15 +158,28 @@ async function createBooking(req, res, next) {
       reminderLeadDays, autoReminder, serviceCharge,
       securityDeposit, advancePayment, paymentMethod, notes, chatId, tenantId,
       members, floorNumber, roomNumber, dealType, commercialTerms,
+      lateFeeAmount, gracePeriodDays,
     } = req.body;
 
     // Either a linked listing (propertyId) OR a manually typed property name.
     if (!propertyId && !(property && String(property).trim())) {
       throw ApiError.badRequest('প্রপার্টি আবশ্যক (লিস্টিং বাছুন অথবা নাম লিখুন)।');
     }
-    if (!leaseStart || !leaseEnd) throw ApiError.badRequest('লিজের তারিখ আবশ্যক।');
-    if (new Date(leaseStart) >= new Date(leaseEnd)) {
-      throw ApiError.badRequest('লিজ শুরুর তারিখ শেষের আগে হতে হবে।');
+    // Lease dates are OPTIONAL, and an omitted end date means OPEN-ENDED — not
+    // "assume 12 months". A tenant here moves in and stays; the landlord never
+    // signs a renewal, so inventing an expiry only made the lease die on its own
+    // and demand a duplicate entry for the same tenant. The tenancy runs until
+    // the host hands the unit to someone else. An explicit end date (a fixed
+    // commercial tenure, say) is still honoured — and still has to make sense.
+    const effLeaseStart = leaseStart ? new Date(leaseStart) : new Date();
+    if (Number.isNaN(effLeaseStart.getTime())) throw ApiError.badRequest('লিজ শুরুর তারিখ সঠিক নয়।');
+    let effLeaseEnd = null;
+    if (leaseEnd) {
+      effLeaseEnd = new Date(leaseEnd);
+      if (Number.isNaN(effLeaseEnd.getTime())) throw ApiError.badRequest('লিজ শেষের তারিখ সঠিক নয়।');
+      if (effLeaseStart >= effLeaseEnd) {
+        throw ApiError.badRequest('লিজ শুরুর তারিখ শেষের আগে হতে হবে।');
+      }
     }
     const rent = Number(monthlyRent);
     if (!rent || rent <= 0) throw ApiError.badRequest('মাসিক ভাড়া ০ এর বেশি হতে হবে।');
@@ -233,12 +246,16 @@ async function createBooking(req, res, next) {
       tenant:           tenant || '',
       tenantPhone:      (tenantPhone && tenantPhone.trim().length >= 10) ? tenantPhone.trim() : null,
       tenantsCount:     Math.max(1, Number(tenantsCount) || 1),
-      leaseStart:       new Date(leaseStart),
-      leaseEnd:         new Date(leaseEnd),
+      leaseStart:       effLeaseStart,
+      leaseEnd:         effLeaseEnd,
       monthlyRent:      rent,
       advancePayment:   Math.max(0, Number(advancePayment) || 0),
       paymentMethod:    paymentMethod || '',
       rentDueDay:       Number(rentDueDay) || 5,
+      // Late fee is opt-in: absent / 0 / junk ⇒ no fee is ever charged and the
+      // reminders never mention one. Capped so a typo can't invent a ৳9,99,999 fee.
+      lateFeeAmount:    Math.max(0, Math.min(100000, Number(lateFeeAmount) || 0)),
+      gracePeriodDays:  Math.max(0, Math.min(28, Number(gracePeriodDays) ?? 5)),
       reminderLeadDays: Number(reminderLeadDays) || 3,
       autoReminder:     autoReminder !== false,
       serviceCharge:    Number(serviceCharge) || 0,
@@ -477,11 +494,22 @@ async function updateBooking(req, res, next) {
       'advancePayment', 'paymentMethod', 'location',
       'floorNumber', 'roomNumber', 'propertyType',
       'leaseStart', 'leaseEnd',
+      // Late-fee terms stay editable — a landlord can add one later, or drop it
+      // back to 0 to stop charging it.
+      'lateFeeAmount', 'gracePeriodDays',
     ];
     const DATE_FIELDS = new Set(['leaseStart', 'leaseEnd']);
     for (const key of whitelist) {
       if (req.body[key] === undefined) continue;
       if (DATE_FIELDS.has(key)) {
+        // An explicitly empty leaseEnd means OPEN-ENDED — the host dropped the
+        // expiry so the tenancy simply keeps running. leaseStart is required, so
+        // clearing that one stays an error.
+        if (req.body[key] === null || req.body[key] === '') {
+          if (key === 'leaseStart') throw ApiError.badRequest('লিজ শুরুর তারিখ আবশ্যক।');
+          booking[key] = null;
+          continue;
+        }
         const d = new Date(req.body[key]);
         if (Number.isNaN(d.getTime())) throw ApiError.badRequest('লিজের তারিখ সঠিক নয়।');
         booking[key] = d;
