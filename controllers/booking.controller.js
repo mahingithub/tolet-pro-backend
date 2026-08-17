@@ -275,6 +275,18 @@ async function createBooking(req, res, next) {
         // days from now. It stays visible (badged "rented") until then.
         { $set: { status: 'rented', availabilityStatus: 'rented', rentedAt: new Date() } },
       ).catch(() => {});
+
+      // The listing just dropped out of public search (listProperties filters
+      // on status 'active' + availabilityStatus not rented/booked). Without this
+      // it would keep showing as available in cached search pages, and other
+      // tenants would keep enquiring about a place that is already taken.
+      //
+      // The slug isn't loaded on this path, so only the _id form of the detail
+      // key is cleared here; a slug-keyed entry expires on its own 10-min TTL.
+      await require('../services/cacheInvalidation').onPropertyChanged({
+        id: String(propertyId),
+        affectsCounts: true, // active → rented moves two overview buckets
+      });
     }
 
     // If converted from an inquiry, mark it 'final_booking' AND tell the tenant

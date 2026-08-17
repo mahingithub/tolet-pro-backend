@@ -176,6 +176,90 @@ async function authorizeCallEvent(userId, callId, role, eventName) {
   return { call, callerId, receiverId, peerId: isCaller ? receiverId : callerId };
 }
 
+// Pub/sub clients, kept at module scope so shutdownSocketRedis() can close them.
+let pubClient = null;
+let subClient = null;
+let redisAdapterActive = false;
+
+/**
+ * Wire the Socket.IO Redis adapter, if Redis is configured.
+ *
+ * GRACEFUL DEGRADATION IS THE WHOLE POINT: this function never throws. If
+ * REDIS_URL is unset, ioredis/@socket.io/redis-adapter aren't installed, or the
+ * connection fails, we log and return — `io` then uses its default in-memory
+ * adapter, which is precisely how this server behaved before. Signaling must
+ * not depend on a cache being up.
+ *
+ * The adapter needs TWO dedicated connections: a Redis client in subscribe mode
+ * can't run normal commands, so publishing and subscribing cannot share one.
+ * Neither is the cache connection from config/redis.js — mixing pub/sub traffic
+ * into the cache client would stall cache reads behind subscription delivery.
+ */
+function attachRedisAdapter(io) {
+  if (!env.useRedis) {
+    console.log('[socket.io] no REDIS_URL — using in-memory adapter (single instance)');
+    return false;
+  }
+
+  try {
+    const Redis = require('ioredis');
+    const { createAdapter } = require('@socket.io/redis-adapter');
+
+    const opts = {
+      // Socket.IO pub/sub must survive blips indefinitely — if these clients
+      // give up, cross-instance delivery stops silently.
+      retryStrategy: (times) => Math.min(times * 200, 5000),
+      maxRetriesPerRequest: null,
+      enableOfflineQueue: true,
+      connectTimeout: 10_000,
+      keepAlive: 30_000,
+      ...(env.redisUrl.startsWith('rediss://') ? { tls: {} } : {}),
+    };
+
+    pubClient = new Redis(env.redisUrl, opts);
+    subClient = pubClient.duplicate();
+
+    // Log, but do NOT tear anything down: ioredis reconnects on its own, and
+    // in the meantime the local in-process delivery still works.
+    pubClient.on('error', (err) => console.warn('[socket.io][redis pub]', err.message));
+    subClient.on('error', (err) => console.warn('[socket.io][redis sub]', err.message));
+    pubClient.on('ready', () => console.log('[socket.io] Redis pub client ready'));
+
+    io.adapter(createAdapter(pubClient, subClient));
+    redisAdapterActive = true;
+    console.log('[socket.io] Redis adapter attached — multi-instance ready');
+    return true;
+  } catch (err) {
+    console.warn(
+      `[socket.io] Redis adapter unavailable (${err.message}) — ` +
+      'falling back to the in-memory adapter. Chat, calls and presence still work.'
+    );
+    // Don't leave half-open sockets behind on a partial failure.
+    try { pubClient?.disconnect(); } catch { /* noop */ }
+    try { subClient?.disconnect(); } catch { /* noop */ }
+    pubClient = null;
+    subClient = null;
+    redisAdapterActive = false;
+    return false;
+  }
+}
+
+/** Is cross-instance delivery live? Surfaced by /healthz. */
+function isRedisAdapterActive() {
+  return redisAdapterActive;
+}
+
+/** Close the adapter's pub/sub clients during graceful shutdown. */
+async function shutdownSocketRedis() {
+  const clients = [pubClient, subClient].filter(Boolean);
+  pubClient = null;
+  subClient = null;
+  redisAdapterActive = false;
+  await Promise.all(clients.map(async (c) => {
+    try { await c.quit(); } catch { try { c.disconnect(); } catch { /* gone */ } }
+  }));
+}
+
 /**
  * Attach Socket.IO to an existing HTTP server.
  * Called once from server.js during boot.
@@ -207,6 +291,25 @@ function initSocket(httpServer) {
     },
   });
   ioInstance = io;
+
+  // ─── Redis adapter (horizontal scaling) ─────────────────────────────────
+  // Everything below this block is UNCHANGED. The adapter only swaps out how
+  // `io.to(room).emit(...)` reaches sockets; the chat, call and presence
+  // handlers keep working exactly as written.
+  //
+  // WHY: every emit here targets a ROOM (`user:<id>`), and by default room
+  // membership lives in this process's memory. With more than one instance,
+  // the caller and receiver of a call can land on different instances — the
+  // emit then finds an empty room locally and the event silently goes nowhere.
+  // That is the failure mode that makes "accept" and "hang up" stop working
+  // after a scale-up. The Redis adapter publishes each emit over pub/sub so
+  // every instance delivers to its own local members.
+  //
+  // ONE CAVEAT worth knowing: `onlineUsers` (the presence Map) is still
+  // per-process, so isUserOnline() only sees THIS instance's sockets. With a
+  // single instance — the current setup — that is exactly right. Before scaling
+  // past one, move that counter into Redis too, or presence will under-report.
+  attachRedisAdapter(io);
 
   // ─── Authentication middleware ──────────────────────────────────────────
   io.use((socket, next) => {
@@ -590,4 +693,9 @@ function initSocket(httpServer) {
 
 function getIo() { return ioInstance; }
 
-module.exports = { initSocket, getIo, getSocketsForUser, emitToUser, notifyCallRejected, clearRingTimer, roomFor, isUserOnline, getOnlineUserIds };
+module.exports = {
+  initSocket, getIo, getSocketsForUser, emitToUser, notifyCallRejected,
+  clearRingTimer, roomFor, isUserOnline, getOnlineUserIds,
+  // Redis adapter helpers (health check + graceful shutdown).
+  isRedisAdapterActive, shutdownSocketRedis,
+};

@@ -23,6 +23,8 @@
 const User = require('../models/User');
 const auditLog = require('../services/auditLog.service');
 const cloud = require('../services/cloudinary.service');
+const cache = require('../config/redis');
+const invalidate = require('../services/cacheInvalidation');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function pickPublicUser(u) {
@@ -110,8 +112,40 @@ function pickPublicUser(u) {
 // ─── GET /api/admin/overview ────────────────────────────────────────────────
 // Real numbers for the dashboard. Replaces the hard-coded "2,845 users"
 // placeholder shown in AdminOverview.jsx.
+/**
+ * GET /api/admin/overview — CACHE-ASIDE, 15 min TTL.
+ *
+ * Thirteen countDocuments in one request. On a free M0 Atlas tier an unindexed
+ * count is a collection scan, and the admin dashboard polls this on every
+ * visit — the single most expensive read in the app per call.
+ *
+ * Not user-specific: these are global platform totals, identical for every
+ * admin, so one shared key serves all of them.
+ *
+ * ── WHY A LONG TTL IS SAFE HERE ──────────────────────────────────────────
+ * The numbers move from two directions. The admin's OWN actions (verify,
+ * reject, ban, role change, delete, property moderation) invalidate the key
+ * explicitly, so the dashboard updates the instant they act on something —
+ * which is the only freshness an admin actually perceives. Background drift
+ * (anonymous sell-interest leads, cron-created records) is bounded by the TTL
+ * instead, because invalidating on those would mean clearing this key on
+ * ordinary public traffic and never getting a hit.
+ */
 async function getOverview(req, res, next) {
   try {
+    const stats = await cache.getOrSet(
+      cache.KEY.adminStats('default'),
+      cache.TTL.ADMIN_STATS,
+      () => buildOverviewStats(),
+    );
+    return res.json({ stats });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function buildOverviewStats() {
+  {
     const Property = require('../models/Property');
     const SellInterest = require('../models/SellInterest');
     const [
@@ -150,31 +184,27 @@ async function getOverview(req, res, next) {
     // listings don't transition through a 'pending' state.)
     const pendingModeration = pendingKyc + pendingLandlordKyc;
 
-    return res.json({
-      stats: {
-        totalUsers,
-        totalLandlords,
-        totalTenants,
-        pendingKyc,
-        pendingLandlordKyc,
-        bannedUsers,
-        activeProperties,
-        pausedProperties,
-        rentedProperties,
-        draftProperties,
-        totalProperties,
-        pendingModeration,
-        // "Interested in selling" demand gauge (Coming Soon lead capture).
-        sellInterestTotal,
-        sellInterestRegistered,
-        sellInterestGuests: sellInterestTotal - sellInterestRegistered,
-        // Revenue is wired up once the subscription / billing pipeline
-        // exists. Until then we return 0 honestly rather than fake a number.
-        monthlyRevenueFormatted: '৳ 0',
-      },
-    });
-  } catch (err) {
-    return next(err);
+    return {
+      totalUsers,
+      totalLandlords,
+      totalTenants,
+      pendingKyc,
+      pendingLandlordKyc,
+      bannedUsers,
+      activeProperties,
+      pausedProperties,
+      rentedProperties,
+      draftProperties,
+      totalProperties,
+      pendingModeration,
+      // "Interested in selling" demand gauge (Coming Soon lead capture).
+      sellInterestTotal,
+      sellInterestRegistered,
+      sellInterestGuests: sellInterestTotal - sellInterestRegistered,
+      // Revenue is wired up once the subscription / billing pipeline
+      // exists. Until then we return 0 honestly rather than fake a number.
+      monthlyRevenueFormatted: '৳ 0',
+    };
   }
 }
 
@@ -267,6 +297,13 @@ async function verifyUser(req, res, next) {
     // Mongoose's pre-save hook on User recomputes trust score from the
     // updated verification block, so we don't have to touch it manually.
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
 
     // Audit log
     await auditLog.safeLog(auditLog.logUserAction, req, {
@@ -324,6 +361,13 @@ async function verifyLandlord(req, res, next) {
     if (!user.roles.includes('landlord')) user.roles.push('landlord');
 
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
 
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
@@ -350,6 +394,13 @@ async function rejectLandlord(req, res, next) {
     user.landlordProfile.verification.submittedForReview = false;
 
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
     return next(err);
@@ -377,6 +428,13 @@ async function rejectUser(req, res, next) {
     user.tenantProfile.verification.submittedForReview = false;
 
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
     
     // Audit log
     await auditLog.safeLog(auditLog.logUserAction, req, {
@@ -420,6 +478,13 @@ async function banUser(req, res, next) {
     user.bannedAt  = new Date();
     user.bannedBy  = req.user._id;
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
 
     // Audit log
     await auditLog.safeLog(auditLog.logUserAction, req, {
@@ -450,6 +515,13 @@ async function unbanUser(req, res, next) {
     user.bannedAt  = null;
     user.bannedBy  = null;
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
 
     // Audit log
     await auditLog.safeLog(auditLog.logUserAction, req, {
@@ -502,6 +574,13 @@ async function updateUserRole(req, res, next) {
     
     user.roles = [...new Set(newRoles)];
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
 
     // Audit log
     await auditLog.safeLog(auditLog.logUserAction, req, {
@@ -599,6 +678,17 @@ async function moderateProperty(req, res, next) {
     prop.moderatedBy = req.user._id;
 
     await prop.save();
+
+    // Moderation flips status between 'active' and 'inactive', which decides
+    // whether the listing appears in public search at all — the single most
+    // important thing not to serve from a stale cache. Clears the detail entry
+    // (id + slug), every cached search page, and the dashboard counts.
+    await invalidate.onPropertyChanged({
+      id: String(prop._id),
+      slug: prop.slug,
+      affectsCounts: true,
+    });
+
     return res.json({ property: prop.toJSON ? prop.toJSON() : prop });
   } catch (err) {
     return next(err);
@@ -613,6 +703,16 @@ async function deleteProperty(req, res, next) {
 
     const prop = await Property.findByIdAndDelete(id);
     if (!prop) return res.status(404).json({ message: 'Property not found' });
+
+    // NOTE: this handler deletes the document directly instead of going through
+    // propertyService.purgePropertyCascade, so it does NOT inherit that
+    // function's invalidation (or its child-document cleanup — a pre-existing
+    // gap worth fixing separately). Invalidate explicitly here.
+    await invalidate.onPropertyChanged({
+      id: String(prop._id),
+      slug: prop.slug,
+      affectsCounts: true,
+    });
 
     return res.json({ message: 'Property permanently deleted', id });
   } catch (err) {
@@ -691,6 +791,13 @@ async function suspectUser(req, res, next) {
     user.suspectedAt     = new Date();
     user.suspectedBy     = req.user._id;
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
 
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
@@ -710,6 +817,13 @@ async function unsuspectUser(req, res, next) {
     user.suspectedAt     = null;
     user.suspectedBy     = null;
     await user.save();
+    // Refresh the dashboard counts this action moved (KYC queues, landlord /
+    // tenant totals, banned users). Applied to EVERY admin user write rather
+    // than only the ones that provably move a number: these endpoints fire a
+    // handful of times a day, so a redundant invalidation costs nothing, and
+    // the alternative is a per-field audit that silently rots the moment the
+    // overview starts counting another field.
+    await invalidate.onAdminStatsChanged();
 
     return res.json({ user: pickPublicUser(user) });
   } catch (err) {
@@ -741,6 +855,14 @@ async function deleteUser(req, res, next) {
 
     // Delete the user
     await User.findByIdAndDelete(id);
+
+    // Their listings are gone from search, and totalUsers moved. Pattern-wipe
+    // the search namespace because a bulk delete gives us no single id to
+    // target, and drop the deleted user's own cached surfaces.
+    await Promise.all([
+      invalidate.onPropertyChanged({ affectsCounts: true }),
+      invalidate.onUserChanged(id),
+    ]);
 
     // Audit log
     await auditLog.safeLog(auditLog.logUserAction, req, {

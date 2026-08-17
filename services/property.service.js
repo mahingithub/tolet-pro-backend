@@ -15,6 +15,8 @@ const Subscription = require('../models/Subscription');
 const searchService = require('./searchService');
 const { postToFacebookPage } = require('./facebook.service');
 const { tierOf, limitsFor } = require('../utils/subscriptionTier');
+const cache = require('../config/redis');
+const invalidate = require('./cacheInvalidation');
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 const MAX_THUMBNAIL_CHARS = 1_000_000;
@@ -295,6 +297,16 @@ async function createProperty({ body, user }) {
     postToFacebookPage(doc, { superBoost: hostTier === 'pro' }).catch(() => {});
   }
 
+  // A new listing must appear in search on the host's very next page load, so
+  // every cached search page is dropped. Awaited (not fire-and-forget) so the
+  // 201 response can't beat the invalidation and let the host reload into a
+  // cached feed that is missing the listing they just created.
+  await invalidate.onPropertyChanged({
+    id: String(doc._id),
+    slug: doc.slug,
+    affectsCounts: true, // moves totalProperties + the status buckets
+  });
+
   return doc;
 }
 
@@ -322,7 +334,43 @@ async function getSuggestions(q) {
   }));
 }
 
+/**
+ * Public property search — CACHE-ASIDE, 2 min TTL.
+ *
+ * This is the hot path: two aggregations plus a countDocuments on every call,
+ * over a collection where legacy docs carry base64 media. It is also the most
+ * repeated query on the platform (every visitor hits the default feed), which
+ * is exactly the shape caching pays off on.
+ *
+ * ── WHY THE CACHE STOPS HERE, NOT AT THE RESPONSE ────────────────────────
+ * We cache the DB result only. The controller then runs attachHostTiers() on
+ * the returned items, which reads Subscription, Review and User.avatar LIVE.
+ * That split is deliberate: a landlord whose subscription just lapsed must lose
+ * their Plus/Pro badge immediately (the comment on attachHostTiers spells this
+ * out), and caching the finished response for 2 minutes would keep serving the
+ * badge. Splitting it means the expensive part is cached and the entitlement
+ * part stays correct.
+ *
+ * ── WHY 2 MINUTES AND NOT LONGER ─────────────────────────────────────────
+ * Search ordering is `activeBoost DESC`, and activeBoost is computed per
+ * request from `boostedUntil` — there is no write when a boost expires, so
+ * there is nothing to invalidate on. The TTL is the ONLY thing that retires an
+ * expired boost from a cached page, so it has to stay short.
+ *
+ * Deliberately NOT invalidated on inquiry-count changes: services/inquiry.service.js
+ * does `$inc: { inquiries: 1 }` and that field is on the list card, but flushing
+ * every cached search page whenever anyone sends an inquiry would keep the hit
+ * rate near zero to keep a counter 2 minutes fresher. Not a worthwhile trade.
+ */
 async function listProperties(query) {
+  return cache.getOrSet(
+    cache.KEY.search(invalidate.hashQuery(query)),
+    cache.TTL.SEARCH,
+    () => listPropertiesFromDb(query),
+  );
+}
+
+async function listPropertiesFromDb(query) {
   const filter = searchService.buildSearchFilter(query);
 
   // Detect a by-id lookup (saved-list sync): the client asked for specific
@@ -440,6 +488,15 @@ async function updateProperty({ idOrSlug, body, user }) {
     });
   }
 
+  // Snapshot BEFORE mutating, for cache invalidation after the save.
+  //   prevStatus → tells us whether the admin overview counts moved.
+  //   prevSlug   → defensive. The slug is stable today (the model builds one
+  //                only `if (!this.slug)`), so a rename keeps it; capturing it
+  //                anyway means the old detail cache key is already handled if
+  //                slug regeneration is ever enabled.
+  const prevSlug = doc.slug;
+  const prevStatus = doc.status;
+
   // Apply only the fields the caller actually sent. Re-running the model's
   // pre('validate') hook on .save() rebuilds the slug-and-haystack pair.
   const scalarFields = [
@@ -511,6 +568,17 @@ async function updateProperty({ idOrSlug, body, user }) {
     };
   }
   await doc.save();
+
+  // Clear the detail entry under the new slug, the old slug AND the _id, plus
+  // every cached search page. `affectsCounts` only when status moved, since that
+  // is the sole field on this path the admin overview counts.
+  await invalidate.onPropertyChanged({
+    id: String(doc._id),
+    slug: doc.slug,
+    prevSlug: prevSlug !== doc.slug ? prevSlug : null,
+    affectsCounts: prevStatus !== doc.status,
+  });
+
   return doc;
 }
 
@@ -559,6 +627,18 @@ async function purgePropertyCascade(doc) {
   if (conversationIds.length) notifClauses.push({ 'data.conversationId': { $in: conversationIds } });
   if (receiptIds.length)      notifClauses.push({ 'data.receiptId':      { $in: receiptIds } });
 
+  // Who is about to lose notifications? Their cached unread badge has to be
+  // cleared, and this is the ONLY moment we can find out — once the deleteMany
+  // below runs, the rows are gone and the affected users are unknowable. The
+  // set is arbitrary (tenants who inquired, both chat participants, …), not
+  // just the owner. Non-fatal: a failure here costs a stale badge for one TTL.
+  let notifiedUserIds = [];
+  try {
+    notifiedUserIds = await Notification.find({ $or: notifClauses }).distinct('userId');
+  } catch (err) {
+    console.warn('[property] could not collect notified users for cache invalidation:', err.message);
+  }
+
   // ── Delete children + parents (Property removed last, below) ───────────
   const [
     delMessages,
@@ -583,6 +663,17 @@ async function purgePropertyCascade(doc) {
   ]);
 
   await doc.deleteOne();
+
+  // Runs for BOTH callers of this cascade — the host's DELETE route and the
+  // rented-cleanup cron — which is why the hook belongs here rather than in the
+  // controller. Clears the detail entry (id + slug), every search page, the
+  // admin counts, and the unread badge of each affected user.
+  await invalidate.onPropertyDeleted({
+    id: String(propertyId),
+    slug: doc.slug,
+    affectedUserIds: notifiedUserIds,
+  });
+
   return {
     id: String(propertyId),
     deletedInquiries:     delInquiries.deletedCount,

@@ -435,13 +435,21 @@ async function deleteInquiry({ id, user }) {
   let idObj = null;
   try { idObj = new mongoose.Types.ObjectId(idStr); } catch { /* not a castable id */ }
   const idForms = idObj ? [idStr, idObj] : [idStr];
-  Notification.deleteMany({
+  const notifFilter = {
     $or: [
       { 'data.targetId':      { $in: idForms } },
       { 'data.inquiryId':     { $in: idForms } },
       { 'metadata.inquiryId': { $in: idForms } },
     ],
-  }).catch((err) => console.warn('[inquiry] notification cleanup failed:', err.message));
+  };
+  // Collect the owners BEFORE deleting — these notifications belong to BOTH
+  // parties (the tenant who enquired and the landlord who was notified), and
+  // their cached unread badges have to be cleared. After the delete there is no
+  // way to work out whose counts changed.
+  Notification.find(notifFilter).distinct('userId')
+    .then((userIds) => Notification.deleteMany(notifFilter)
+      .then(() => require('./cacheInvalidation').onUnreadChangedMany(userIds)))
+    .catch((err) => console.warn('[inquiry] notification cleanup failed:', err.message));
 
   // We deliberately DO NOT delete the chat/conversation here: a conversation is
   // a property-level thread between the two users and can outlive any single

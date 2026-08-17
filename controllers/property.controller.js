@@ -12,6 +12,7 @@ const Review = require('../models/Review');
 const User = require('../models/User');
 const { tierOf } = require('../utils/subscriptionTier');
 const { warmNearbyPlaces } = require('../services/nearbyPlaces.service');
+const cache = require('../config/redis');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -204,12 +205,62 @@ async function attachHostTiers(items) {
   return items;
 }
 
+/**
+ * GET /api/properties/:id — CACHE-ASIDE, 10 min TTL.
+ *
+ * The heaviest single-document read in the app: the full property including
+ * specificDetails, videos and roomPhotos (legacy docs can carry base64 media),
+ * and the most-shared URL on the platform, so the same listing is fetched over
+ * and over by different visitors. Ideal cache shape.
+ *
+ * ── WHAT IS CACHED ───────────────────────────────────────────────────────
+ * The serialized document only. `Review.summaryFor()` still runs live on every
+ * request, for the same reason attachHostTiers stays live on the search feed: a
+ * newly posted review must show up immediately, not up to 10 minutes later.
+ *
+ * ── THE KEY IS THE REQUESTED IDENTIFIER, ON PURPOSE ──────────────────────
+ * The route resolves an ObjectId OR a slug (property.service findIdOrSlug), so
+ * one listing legitimately caches under two keys. Normalising to the _id would
+ * need the DB read we are trying to avoid, so instead the write paths clear
+ * BOTH forms — including the pre-edit slug (see cacheInvalidation
+ * onPropertyChanged). Two entries for a hot listing is a fine price for not
+ * querying Mongo to build a cache key.
+ *
+ * NOT cached: the 404. A missing id must stay a live lookup, otherwise a
+ * listing created moments later keeps 404-ing for the rest of the TTL. The
+ * cache manager already declines to store null/undefined, so the ApiError
+ * thrown by the service propagates on every attempt.
+ */
 exports.getPropertyById = asyncH(async (req, res) => {
-  const doc = await propertyService.getPropertyById(req.params.id);
-  const property = doc.toJSON();
+  const property = await cache.getOrSet(
+    cache.KEY.property(req.params.id),
+    cache.TTL.PROPERTY,
+    async () => {
+      const doc = await propertyService.getPropertyById(req.params.id);
+      return doc.toJSON();
+    },
+  );
+
   const summary = await Review.summaryFor(property.ownerUserId, 'landlord');
   property.rating = summary.avg;
   property.reviews = summary.count;
+
+  // ── View counter: WRITE-BACK ────────────────────────────────────────────
+  // Incremented in Redis and flushed to Mongo every 10 min by the interval in
+  // server.js (flushToDB). This is the one place write-back is the right call:
+  // a view is worth far less than the Mongo write it would cost on the hottest
+  // read path in the app, and losing a few minutes of counts to a crash is
+  // acceptable in a way that losing a booking never would be.
+  //
+  // Keyed by the property's REAL _id, not req.params.id — otherwise the same
+  // listing accumulates separate counters under its slug and its id, and
+  // flushToDB would try to $inc a Property whose _id is actually a slug string.
+  //
+  // Fire-and-forget: a counter must never delay or fail the page it counts.
+  if (property.id) {
+    cache.incrementWriteBack(cache.KEY.viewCount(property.id), cache.TTL.VIEW_COUNT)
+      .catch(() => { /* counter is best-effort */ });
+  }
 
   // Start filling the "What's nearby" cache for this location NOW, before the
   // browser has even parsed this response and asked for it. The nearby lookup

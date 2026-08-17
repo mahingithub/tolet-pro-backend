@@ -43,6 +43,32 @@ const env = {
 
   mongoUri: process.env.MONGO_URI,
 
+  // ─── Redis (cache + rate limiting + Socket.IO adapter) ───────────────────
+  // OPTIONAL BY DESIGN. When REDIS_URL is absent (local dev without a Redis
+  // running, or a deploy where the add-on was removed) every Redis-backed
+  // feature degrades gracefully instead of failing:
+  //   • config/redis.js       → cache reads go straight to Mongo, writes skip
+  //                             the cache entirely (no stale data, just slower).
+  //   • advancedRateLimiter   → falls back to the in-memory express-rate-limit
+  //                             limiters, so abuse protection never disappears.
+  //   • socket.js             → runs without the Redis adapter (single-instance
+  //                             broadcast only, which is what it did before).
+  //
+  // Format: redis://:password@host:port  or  rediss://... (TLS).
+  // On Render, the Redis add-on injects this automatically once you attach it.
+  // NOTE: Render's internal Redis URL is only reachable from inside the same
+  // region — that's why a local `npm run dev` normally has no REDIS_URL and
+  // must keep working without it.
+  redisUrl: process.env.REDIS_URL || '',
+
+  // Master kill-switch: set REDIS_ENABLED=false to ignore REDIS_URL entirely
+  // (useful to A/B a production issue without deleting the add-on).
+  redisEnabled: process.env.REDIS_ENABLED !== 'false',
+
+  // Key prefix so a shared Redis instance can host several environments
+  // without one flushing the other's keys.
+  redisKeyPrefix: process.env.REDIS_KEY_PREFIX || 'toletpro',
+
   // ─── Refresh-token cookie ────────────────────────────────────────────────
   // COOKIE_SAMESITE is an OPTIONAL override. When it is unset,
   // utils/refreshCookie.js derives SameSite per request: 'lax' for same-site
@@ -179,6 +205,20 @@ const env = {
 };
 
 env.isProd = env.nodeEnv === 'production';
+env.isTest = env.nodeEnv === 'test';
+
+// Single source of truth for "should we even try to talk to Redis?".
+// Tests never touch Redis: the suite runs against mongodb-memory-server and a
+// live connection would leave an open handle behind (jest detectOpenHandles).
+env.useRedis = Boolean(env.redisUrl) && env.redisEnabled && !env.isTest;
+
+if (!env.useRedis && !env.isTest) {
+  console.warn(
+    '[env] ⚠️  REDIS_URL not set (or REDIS_ENABLED=false) — running WITHOUT Redis. ' +
+    'Caching is bypassed, rate limiting falls back to in-memory, and Socket.IO ' +
+    'runs single-instance. The app works, just without the Redis speedups.'
+  );
+}
 
 if (env.otpDevMode) {
   console.warn(

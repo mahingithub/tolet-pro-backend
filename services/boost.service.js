@@ -176,6 +176,20 @@ async function boostProperty({ propertyId, user, now = new Date() }) {
   property.boostedUntil = new Date(now.getTime() + BOOST_DURATION_MS);
   await property.save();
 
+  // A boost is a PAID perk whose entire value is appearing at the top of
+  // search, so the host must see it take effect on their next page load rather
+  // than up to 2 minutes later. Search ranking sorts on activeBoost, so every
+  // cached page is now mis-ordered.
+  //
+  // Note the asymmetry: boosts START with a write (invalidated here) but EXPIRE
+  // with no write at all — activeBoost is recomputed per request from
+  // boostedUntil. Nothing can invalidate on expiry, which is why the search TTL
+  // is kept short enough to retire a finished boost on its own.
+  await require('./cacheInvalidation').onPropertyChanged({
+    id: String(property._id),
+    slug: property.slug,
+  });
+
   return {
     boosted: true,
     creditsRemaining: claimed.creditsRemaining,

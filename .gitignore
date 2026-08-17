@@ -2,3 +2,12 @@ node_modules/
 .DS_Store
 .env
 .env.*
+
+# MongoDB Atlas dumps (mongodump output). These are full copies of production
+# data — real user phone numbers, hashed passwords, messages, documents. They
+# must never reach a git remote, and they're large binary blobs that would
+# bloat the repo permanently even if later deleted.
+backup_*/
+*.bson.gz
+*.bson
+dump/

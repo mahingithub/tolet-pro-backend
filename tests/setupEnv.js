@@ -20,3 +20,10 @@ process.env.WHATSAPP_PHONE_NUMBER_ID = '';
 process.env.FACEBOOK_PAGE_ACCESS_TOKEN = '';
 process.env.FACEBOOK_PAGE_ID = '';
 process.env.CRON_TEST = '';
+
+// No Redis in tests. config/redis.js + middleware/advancedRateLimiter.js both
+// degrade gracefully when REDIS_URL is empty (Mongo fallback for reads,
+// in-memory limiters for abuse protection), so the suite exercises the same
+// code paths without opening a real Redis socket that jest would flag as an
+// open handle.
+process.env.REDIS_URL = '';
