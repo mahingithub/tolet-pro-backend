@@ -14,41 +14,81 @@ const firebaseAdmin = require('./firebaseAdmin');
 const cache = require('../config/redis');
 const invalidate = require('./cacheInvalidation');
 
-async function sendPushToDevice(deviceRecord, payload) {
-  const platform = deviceRecord.platform || 'web';
+// Pulled off the schema rather than hardcoded so the two can never drift.
+const MAX_TITLE = Notification.schema.path('title')?.options?.maxlength || 160;
+const MAX_BODY  = Notification.schema.path('body')?.options?.maxlength  || 600;
 
-  if (platform === 'android' || platform === 'ios') {
-    // Native FCM via Firebase Admin
-    const message = {
-      token: deviceRecord.token,
-      notification: {
-        title: payload.title,
-        body: payload.body,
-      },
-      data: payload.data || {},
-    };
-    const adminApp = firebaseAdmin.init();
-    if (adminApp) return adminApp.messaging().send(message);
-    return null;
-  } else {
-    // Existing web-push path — unchanged
-    // Note: The previous code used firebaseAdmin.sendToUser for everything.
-    // We preserve that behavior for web tokens here.
-    return null;
+// Grapheme segmentation so a cut never lands inside a user-perceived character.
+// This app's copy is Bengali, where a naive slice can separate a vowel sign or
+// hasant from its base consonant and render as a broken glyph. Built once —
+// constructing a Segmenter per notification would be wasteful.
+const graphemes = typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter('bn', { granularity: 'grapheme' })
+  : null;
+
+/**
+ * Clamp copy to the schema's maxlength.
+ *
+ * Without this, an over-long title/body raises a Mongoose ValidationError that
+ * emit()'s catch swallows — the notification vanishes with only a console
+ * warning. That is a real failure mode for any caller that personalises copy
+ * AFTER length-checking it (the admin marketing blast expands {{name}}/{{tier}}
+ * into an already-600-char body), so we truncate instead of dropping: a
+ * slightly shortened notification beats no notification at all.
+ *
+ * `maxlength` counts UTF-16 code units, so the budget is measured in those, but
+ * the cut is made on grapheme boundaries — slicing at an arbitrary unit can
+ * leave an unpaired surrogate (half an emoji), which is not valid UTF-8 and can
+ * get the payload rejected downstream, reintroducing the very delivery failure
+ * this guard exists to prevent. One unit is reserved for an ellipsis so the
+ * truncation is visible to the reader instead of silently altering the copy.
+ */
+function clamp(text, max) {
+  const s = String(text == null ? '' : text);
+  if (s.length <= max) return s;
+
+  const budget = Math.max(0, max - 1);
+  const units = graphemes
+    ? Array.from(graphemes.segment(s), (seg) => seg.segment)
+    : Array.from(s); // code points — still surrogate-safe, just not grapheme-aware
+
+  let out = '';
+  for (const g of units) {
+    if (out.length + g.length > budget) break;
+    out += g;
   }
+  return `${out}…`;
 }
 
 async function emit({ userId, type, title, body, data, skipPush }) {
   if (!userId) return null;
+
+  let doc;
   try {
-    const doc = await Notification.create({
+    doc = await Notification.create({
       userId,
       type,
-      title: title || '',
-      body:  body  || '',
+      title: clamp(title, MAX_TITLE),
+      body:  clamp(body,  MAX_BODY),
       data:  data  || {},
     });
-    
+  } catch (err) {
+    // The row was never written — this is the only genuine emit failure, and
+    // the only case where returning null is truthful. An unknown `type` lands
+    // here (the enum in models/Notification.js is the source of truth), so name
+    // it explicitly: this used to be near-impossible to spot in the logs.
+    console.warn(`[notif] emit failed (type=${type}):`, err.message);
+    return null;
+  }
+
+  // ── Post-create side effects ────────────────────────────────────────────
+  // Deliberately OUTSIDE the try above. These are best-effort delivery
+  // concerns; the notification is already durably stored and WILL be picked up
+  // by the client's next poll/refetch. Sharing a try block with the create made
+  // emit() return null for notifications that genuinely existed, which lied to
+  // callers that check the return value (the marketing blast reports those as
+  // 'emit_failed' and shows the admin a failure for a delivered message).
+  try {
     // Drop the cached unread badge BEFORE announcing the notification. The
     // socket event below makes the client refetch its count almost instantly,
     // and if that refetch won the race it would re-cache the pre-create value
@@ -59,8 +99,12 @@ async function emit({ userId, type, title, body, data, skipPush }) {
     // the cron jobs (invoices, late fees, rent + lease reminders) that create
     // notifications with no HTTP request to hang an invalidation off.
     await invalidate.onUnreadChanged(userId);
+  } catch (err) {
+    console.warn('[notif] unread cache invalidation failed:', err.message);
+  }
 
-    // Broadcast real-time to the user's active sockets
+  // Broadcast real-time to the user's active sockets
+  try {
     const { getIo, emitToUser } = require('../socket');
     const io = getIo();
     if (io) {
@@ -75,28 +119,26 @@ async function emit({ userId, type, title, body, data, skipPush }) {
         createdAt: doc.createdAt
       });
     }
-
-    // Fan out to the user's phone(s) via FCM — fire-and-forget so a push
-    // failure never blocks the in-app notification. Callers that already send
-    // their own push (e.g. the call ringer) can pass skipPush:true to opt out.
-    if (!skipPush) {
-      const User = require('../models/User');
-      User.findById(userId).select('deviceTokens').lean().then(user => {
-        const tokens = user?.deviceTokens || [];
-        tokens.forEach(deviceRecord => {
-          sendPushToDevice(deviceRecord, { title, body, data }).catch(() => {});
-        });
-        
-        // Also call the original method to ensure web tokens and legacy behavior is fully preserved
-        firebaseAdmin.sendToUser(userId, { title, body, data }).catch(() => {});
-      }).catch(() => {});
-    }
-    
-    return doc;
   } catch (err) {
-    console.warn('[notif] emit failed:', err.message);
-    return null;
+    console.warn('[notif] socket broadcast failed:', err.message);
   }
+
+  // Fan out to the user's phone(s) via FCM — fire-and-forget so a push failure
+  // never blocks the in-app notification. Callers that already send their own
+  // push (e.g. the call ringer, the marketing blast's separate push channel)
+  // can pass skipPush:true to opt out.
+  //
+  // sendToUser() multicasts to EVERY registered token (native + web) and prunes
+  // the dead ones, so it is the single fan-out path. An earlier version also
+  // looped the tokens and sent to each android/ios one individually before
+  // calling this, which delivered every notification TWICE on native devices.
+  if (!skipPush) {
+    firebaseAdmin
+      .sendToUser(userId, { title: doc.title, body: doc.body, data })
+      .catch(() => {});
+  }
+
+  return doc;
 }
 
 async function emitToAdmins({ type, title, body, data, skipPush }) {
@@ -212,4 +254,9 @@ module.exports = {
   markRead,
   markAllRead,
   remove,
+  // Pure helper, exported for tests: its boundary behaviour is the difference
+  // between a truncated notification and a silently dropped one.
+  clamp,
+  MAX_TITLE,
+  MAX_BODY,
 };

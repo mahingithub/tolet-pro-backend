@@ -146,6 +146,7 @@ function buildSearchHaystack(doc) {
     doc.description,
     doc.division,
     doc.district,
+    doc.thana,
     doc.area,
     doc.location,
     doc.gps && doc.gps.address,
@@ -233,6 +234,12 @@ const PropertySchema = new mongoose.Schema(
 
     division:    { type: String, enum: DIVISIONS, required: true, lowercase: true, trim: true, index: true },
     district:    { type: String, trim: true, default: '', maxlength: 80 },
+    // Thana / upazila — the level tenants actually search by, since a district
+    // like Dhaka or Bhola is far too broad. Stored as the English display label
+    // (e.g. 'Dhanmondi', 'Lalmohan'), matching `area`. Deliberately NOT an enum:
+    // the picker ships 613 thanas but a host may legitimately type one we don't
+    // have, and rejecting that would leave them unable to list at all.
+    thana:       { type: String, trim: true, default: '', maxlength: 100 },
     area:        { type: String, trim: true, default: '', maxlength: 120 },
     location:    { type: String, trim: true, default: '', maxlength: 200 },
     gps:         { type: GpsSchema, default: () => ({}) },

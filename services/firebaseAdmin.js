@@ -40,20 +40,31 @@ function init() {
  *
  * Requires FIREBASE_SERVICE_ACCOUNT_BASE64 (already set for OTP). No-op if absent.
  *
+ * Because this never throws, a rejected promise tells the caller nothing — the
+ * outcome lives entirely in the return value. `sent: 0` alone is ambiguous, so
+ * `skipped`/`reason` say WHY nothing went out: FCM isn't configured in this
+ * environment, or the user simply has no registered device. Callers that report
+ * delivery to a human (the admin marketing console) need that distinction;
+ * without it an unconfigured gateway is indistinguishable from a successful send.
+ *
  * @param {string|ObjectId} userId
  * @param {{ title?: string, body?: string, data?: object }} payload
- * @returns {Promise<{ sent: number, pruned: number }>}
+ * @returns {Promise<{ sent: number, failed: number, pruned: number, tokens: number,
+ *                     skipped?: boolean, reason?: 'not_configured'|'no_token'|'error' }>}
  */
 async function sendToUser(userId, { title = '', body = '', data = {} } = {}) {
+  const base = { sent: 0, failed: 0, pruned: 0, tokens: 0 };
   try {
     const a = init();
-    if (!a || !userId) return { sent: 0, pruned: 0 };
+    if (!a) return { ...base, skipped: true, reason: 'not_configured' };
+    if (!userId) return { ...base, skipped: true, reason: 'no_token' };
 
     // Lazy require avoids any model/boot-order coupling.
     const User = require('../models/User');
     const user = await User.findById(userId).select('deviceTokens').lean();
     const tokens = (user?.deviceTokens || []).map((d) => d && d.token).filter(Boolean);
-    if (tokens.length === 0) return { sent: 0, pruned: 0 };
+    if (tokens.length === 0) return { ...base, skipped: true, reason: 'no_token' };
+    base.tokens = tokens.length;
 
     // FCM `data` must be a flat map of string → string.
     const stringData = {};
@@ -97,10 +108,15 @@ async function sendToUser(userId, { title = '', body = '', data = {} } = {}) {
       pruned = dead.length;
     }
 
-    return { sent: resp.successCount, pruned };
+    return {
+      ...base,
+      sent: resp.successCount,
+      failed: resp.failureCount,
+      pruned,
+    };
   } catch (err) {
     console.warn('[firebase-admin] sendToUser failed:', err.message);
-    return { sent: 0, pruned: 0 };
+    return { ...base, reason: 'error', error: err.message };
   }
 }
 

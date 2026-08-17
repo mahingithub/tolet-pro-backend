@@ -141,6 +141,7 @@ const LIST_CARD_PROJECT = {
   category: 1,
   division: 1,
   district: 1,
+  thana: 1,
   area: 1,
   location: 1,
   gps: 1,
@@ -255,6 +256,7 @@ async function createProperty({ body, user }) {
     category:    body.category    || 'family',
     division:    body.division,
     district:    body.district    || '',
+    thana:       body.thana       || '',
     area:        body.area        || '',
     location:    body.location    || '',
     gps:         gpsFromBody(body),
@@ -320,15 +322,16 @@ async function getSuggestions(q) {
   const filter = searchService.buildSearchFilter({ q });
   // We only want a few fields to build the autocomplete suggestions
   const properties = await Property.find(filter)
-    .select('title location area district division')
+    .select('title location area thana district division')
     .limit(20)
     .lean();
-    
+
   return properties.map(p => ({
     id: String(p._id),
     title: p.title || '',
     location: p.location || '',
     area: p.area || '',
+    thana: p.thana || '',
     district: p.district || '',
     division: p.division || ''
   }));
@@ -501,7 +504,7 @@ async function updateProperty({ idOrSlug, body, user }) {
   // pre('validate') hook on .save() rebuilds the slug-and-haystack pair.
   const scalarFields = [
     'title', 'description', 'intent', 'type', 'category',
-    'division', 'district', 'area', 'location',
+    'division', 'district', 'thana', 'area', 'location',
     'beds', 'baths', 'sqft', 'floor', 'floorNumber', 'furnishing',
     // videoId / videoUrl are deliberately NOT here — they are mirrors of
     // videos[0] now, written by the model hook. The videos block below owns

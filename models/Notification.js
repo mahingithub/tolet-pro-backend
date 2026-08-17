@@ -14,7 +14,14 @@
  *   - 'rent_receipt'     → tenant receives a new rent receipt
  *   - 'rent_invoice'     → tenant receives a new rent invoice
  *   - 'rent_overdue'     → tenant receives a notification about an overdue rent payment
+ *   - 'rent_updated'     → landlord changed the tenant's rent/lease terms
  *   - 'marketing'        → admin-composed promotional blast (Subscriptions console)
+ *
+ * IMPORTANT: `type` is a hard enum and notification.service.emit() swallows
+ * validation errors by design (a notification failure must never break the
+ * business action). The consequence is that emitting a type missing from this
+ * list fails SILENTLY — the row is never written and nothing is logged beyond a
+ * console warning. Add the value here in the same commit as the new emit call.
  *
  * `data` is a free-form payload that lets the frontend deep-link without a
  * second round-trip — e.g. inquiryId, conversationId, propertyTitle.
@@ -29,6 +36,7 @@ const NotificationSchema = new mongoose.Schema(
       type: String,
       enum: [
         'inquiry_new', 'inquiry_status', 'message_new', 'system', 'rent_receipt', 'rent_invoice', 'rent_overdue',
+        'rent_updated',
         'message', 'inquiry', 'booking', 'payment', 'receipt', 'property', 'review',
         'support_ticket', 'support_message', 'kyc_tenant', 'kyc_landlord',
         'marketing',

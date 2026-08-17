@@ -149,7 +149,7 @@ async function listAudience(q = {}) {
   const limit = Math.min(200, Math.max(1, Number(q.limit) || 50));
   const page = Math.max(1, Number(q.page) || 1);
 
-  const [users, total] = await Promise.all([
+  const [users, total, reachable] = await Promise.all([
     User.find(filter)
       .select('name phone email avatar roles createdAt lastLoginAt isBanned deviceTokens preferences')
       .sort({ createdAt: -1 })
@@ -157,6 +157,13 @@ async function listAudience(q = {}) {
       .limit(limit)
       .lean(),
     User.countDocuments(filter),
+    // sendOffer() drops banned accounts from the audience, so `total` is NOT
+    // the number that will be messaged. The console needs both: `total` labels
+    // the table (banned rows are shown, with a badge, because an admin
+    // reviewing an audience should see them), while `reachable` is the number
+    // to promise on the send button. Reporting `total` there meant "Send to
+    // 412" was routinely followed by "Dispatched to 397 user(s)".
+    User.countDocuments({ ...filter, isBanned: { $ne: true } }),
   ]);
 
   const rows = users.map((u) => {
@@ -207,6 +214,7 @@ async function listAudience(q = {}) {
   return {
     rows,
     total,
+    reachable,
     page,
     limit,
     counts: {
@@ -266,7 +274,7 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
       // push would deliver to users who opted out of marketing push.
       skipPush: true,
     });
-    result.channels.inapp = doc ? { ok: true } : { ok: false, error: 'emit_failed' };
+    result.channels.inapp = doc ? { ok: true } : { ok: false, reason: 'emit_failed' };
   }
 
   // ── Push: FCM device tokens + web-push subscriptions. ───────────────────
@@ -286,10 +294,69 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
         require('./firebaseAdmin').sendToUser(user._id, payload),
         pushSvc.sendPushNotification(user._id, payload),
       ]);
-      const ok = fcm.status === 'fulfilled' || web.status === 'fulfilled';
-      result.channels.push = ok
-        ? { ok: true }
-        : { ok: false, error: fcm.reason?.message || web.reason?.message || 'push_failed' };
+
+      // Both transports are non-throwing BY CONTRACT: they resolve with a
+      // result object and swallow their own errors. So settle *status* carries
+      // no delivery information — this check used to be
+      // `fcm.status === 'fulfilled' || web.status === 'fulfilled'`, which is
+      // unconditionally true and reported every recipient as delivered even
+      // with no Firebase credentials, no VAPID keys and zero devices. Inspect
+      // the resolved VALUES instead.
+      const fcmRes = fcm.status === 'fulfilled' ? (fcm.value || {}) : null;
+      const webRes = web.status === 'fulfilled' ? (web.value || {}) : null;
+
+      const delivered = (fcmRes?.sent || 0) + (webRes?.sent || 0);
+
+      // Both transports count a dead token in `failed` AND in `pruned` (they
+      // report the same send as failed, then clean the token up). An uninstall
+      // or cleared site data is routine churn, not a gateway rejecting our
+      // traffic — counting it as a failure would keep the console's red column
+      // permanently populated. Only the excess over what was pruned is real.
+      const rejected = Math.max(
+        0,
+        ((fcmRes?.failed || 0) - (fcmRes?.pruned || 0)) +
+          ((webRes?.failed || 0) - (webRes?.pruned || 0)),
+      );
+
+      const reasons = [fcmRes?.reason, webRes?.reason].filter(Boolean);
+      // Collected independently of which branch below wins. A partially
+      // configured environment (Firebase unset, VAPID set) is the normal case,
+      // so requiring both transports to agree on 'not_configured' — or checking
+      // it only after the failure branches — made the flag unreachable in
+      // exactly the situation it exists to report.
+      const configError = reasons.includes('not_configured');
+      // Both transports report a genuine internal fault as reason 'error' with
+      // no failure count, because at that point the count is unknown. It needs
+      // its own branch: falling through to the skipped bucket would present an
+      // outage as "expected, not an error".
+      const errored = reasons.includes('error');
+
+      if (delivered > 0) {
+        result.channels.push = { ok: true, devices: delivered };
+      } else {
+        // Nothing reached this user. Classify by what the admin can act on
+        // first: a broken transport outranks a rejection, which outranks
+        // missing credentials, which outranks "this user has no device".
+        const flag = configError ? { configError: true } : {};
+        if (fcm.status === 'rejected' || web.status === 'rejected') {
+          // Shouldn't happen given the non-throwing contracts, but a transport
+          // that starts throwing must surface as a failure, not a silent skip.
+          result.channels.push = {
+            ...flag,
+            ok: false,
+            reason: 'push_failed',
+            error: fcm.reason?.message || web.reason?.message || 'push_failed',
+          };
+        } else if (errored) {
+          result.channels.push = { ...flag, ok: false, reason: 'push_error', error: 'push_error' };
+        } else if (rejected > 0) {
+          result.channels.push = { ...flag, ok: false, reason: 'push_rejected', error: 'push_rejected' };
+        } else if (configError) {
+          result.channels.push = { ok: false, skipped: true, reason: 'not_configured', configError: true };
+        } else {
+          result.channels.push = { ok: false, skipped: true, reason: 'no_device' };
+        }
+      }
     }
   }
 
@@ -306,7 +373,23 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
         await smsSvc.sendSms(user.phone, renderTemplate(smsText || body, row));
         result.channels.sms = { ok: true };
       } catch (err) {
-        result.channels.sms = { ok: false, error: err.message };
+        // Both of sms.service's thrown codes are ACCOUNT-LEVEL faults that fail
+        // every recipient identically — a missing SMS_API_KEY, or the gateway
+        // rejecting the whole batch for insufficient balance / an unverified
+        // sender id. Reported per-user they read as "500 failed" and send the
+        // admin hunting a delivery problem that is really one setting.
+        //
+        // Note we key on err.code, never err.message: sms.service deliberately
+        // throws a sanitised end-user string (a Bengali OTP retry prompt) and
+        // logs the real gateway reason server-side. That message is meaningless
+        // in a marketing console, and it ends up in the audit log too.
+        if (err.code === 'sms_not_configured') {
+          result.channels.sms = { ok: false, skipped: true, reason: 'not_configured', configError: true };
+        } else if (err.code === 'sms_rejected') {
+          result.channels.sms = { ok: false, reason: 'sms_rejected', configError: true };
+        } else {
+          result.channels.sms = { ok: false, reason: err.code || 'sms_failed', detail: err.message };
+        }
       }
     }
   }
@@ -330,9 +413,19 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
         languageCode: whatsapp.languageCode || 'en',
         components: params.length ? [{ type: 'body', parameters: params }] : undefined,
       });
+      // whatsapp.service reports an unconfigured provider as skipped, which the
+      // console otherwise renders as "the user opted out" — so a WhatsApp
+      // integration that was never set up looks like healthy consent filtering.
+      // Keep it in the skipped bucket (nothing was charged, nothing failed) but
+      // mark it as a config problem.
       result.channels.whatsapp = res.success
         ? { ok: true, messageId: res.messageId || null }
-        : { ok: false, skipped: !!res.skipped, error: res.error || 'whatsapp_failed' };
+        : {
+            ok: false,
+            skipped: !!res.skipped,
+            reason: res.error || 'whatsapp_failed',
+            ...(res.error === 'not_configured' ? { configError: true } : {}),
+          };
     }
   }
 
@@ -399,15 +492,29 @@ async function sendOffer(opts = {}) {
 
   // Per-channel tallies so the admin sees "SMS: 40 sent, 12 skipped (opted
   // out), 3 failed" rather than a single opaque success count.
+  //
+  // `reasons` breaks the skipped/failed buckets down by cause, and
+  // `configError` flags a channel whose gateway is not set up in this
+  // environment. Both exist because the aggregate numbers alone were actively
+  // misleading: "0 sent, 500 skipped" reads as "everybody opted out" whether the
+  // cause is consent or a missing API key.
   const sent = {};
   for (const ch of channels) {
-    sent[ch] = { ok: 0, skipped: 0, failed: 0 };
+    sent[ch] = { ok: 0, skipped: 0, failed: 0, configError: false, reasons: {} };
     for (const r of results) {
       const c = r.channels?.[ch];
       if (!c) continue;
       if (c.ok) sent[ch].ok += 1;
       else if (c.skipped) sent[ch].skipped += 1;
       else sent[ch].failed += 1;
+
+      if (c.configError) sent[ch].configError = true;
+      // Keyed on `reason` ONLY — a stable, closed set of codes the console maps
+      // to copy. Never on a gateway's free-text message: those are unbounded,
+      // sometimes localised end-user prose, and this object is rendered in the
+      // UI and persisted to the audit log.
+      const why = c.ok ? null : c.reason;
+      if (why) sent[ch].reasons[why] = (sent[ch].reasons[why] || 0) + 1;
     }
   }
 

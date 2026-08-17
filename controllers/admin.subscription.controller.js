@@ -81,6 +81,13 @@ async function sendOffer(req, res, next) {
       );
     }
 
+    // Input guard only. These bounds match the Notification schema, but the copy
+    // still grows afterwards when marketing.service expands {{name}}/{{tier}}
+    // per recipient — so this slice canNOT be the thing that keeps the row
+    // valid. notification.service.emit() clamps to the schema limit AFTER
+    // personalisation; without that, a 600-char body containing {{name}}
+    // overflowed maxlength and the notification was silently dropped for every
+    // recipient whose name pushed it over.
     const out = await marketing.sendOffer({
       channels: selected,
       title: String(title).slice(0, 160),

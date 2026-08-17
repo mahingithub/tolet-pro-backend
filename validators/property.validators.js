@@ -107,6 +107,9 @@ module.exports = {
     category:    categorySchema.optional(),
     division:    divisionSchema,
     district:    z.string().trim().max(80).optional().default(''),
+    // Free text, not an enum: the picker offers all 613 thanas but hosts must
+    // still be able to submit one that isn't in our dataset.
+    thana:       z.string().trim().max(100).optional().default(''),
     area:        z.string().trim().max(120).optional().default(''),
     location:    z.string().trim().max(200).optional().default(''),
     gpsLat:      z.union([z.coerce.number(), z.null(), z.literal('')]).optional(),
@@ -145,6 +148,9 @@ module.exports = {
     category:    categorySchema.optional(),
     division:    divisionSchema.optional(),
     district:    z.string().trim().max(80).optional(),
+    // MUST be declared here as well — this schema is .strict(), so an edit that
+    // sends `thana` would be rejected outright rather than ignored.
+    thana:       z.string().trim().max(100).optional(),
     area:        z.string().trim().max(120).optional(),
     location:    z.string().trim().max(200).optional(),
     gpsLat:      z.union([z.coerce.number(), z.null(), z.literal('')]).optional(),
