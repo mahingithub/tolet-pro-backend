@@ -128,7 +128,13 @@ const MIRROR_TIMEOUT_MS = 22000;
 
 // All mirrors failed → try once more after this delay so a cold cell still
 // fills without needing another visitor to trigger it.
-const RETRY_DELAY_MS = 20000;
+//
+// Was 20 s, which made the failure path the slowest thing in the system: the
+// race first burns MIRROR_TIMEOUT_MS (22 s) waiting on mirrors that never
+// answer at all, so a retry 20 s later put real data 60 s+ past the user's
+// first request — long after any sane client had stopped asking. Overpass 429s
+// and 504s clear in seconds, so waiting 20 s bought nothing.
+const RETRY_DELAY_MS = 6000;
 
 const SOFT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30d → serve stale + refresh
 const LRU_MAX = 750;            // cells held in process memory
@@ -145,6 +151,18 @@ const LRU_MAX = 750;            // cells held in process memory
 // observed reliability. The two overpass-api.de hostnames share one backend and
 // therefore one rate limit — when they 429, they 429 together, which is why
 // having unrelated operators in this list matters.
+//
+// Measured directly against a 2-category probe of this exact query shape:
+//   maps.mail.ru            200 in  9.3 s   ← usually wins the race
+//   lz4.overpass-api.de     200 in 16.9 s
+//   overpass-api.de         504 in  8.3 s
+//   overpass.kumi.systems   no response, still hanging at 30 s
+//   overpass.private.coffee no response, still hanging at 30 s
+// The full 8-statement query is heavier again. Two permanently-hanging mirrors
+// are harmless while a sibling answers (Promise.any settles on the first
+// success) but they do set the cost of the all-failed path, because `any` can
+// only reject once every entry has — hence MIRROR_TIMEOUT_MS below being the
+// floor on how fast a total failure can be detected.
 const OVERPASS_ENDPOINTS = [
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://lz4.overpass-api.de/api/interpreter',
