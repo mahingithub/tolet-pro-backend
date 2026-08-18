@@ -39,13 +39,25 @@ function pickPublicUser(u) {
   const tp = j.tenantProfile || {};
   const lp = j.landlordProfile || {};
 
+  // ── Make the document URLs loadable for the reviewer ────────────────────
+  // Our verification uploads are deliberately MIXED: NID scans are Cloudinary
+  // `type: authenticated` (useless without a signature), while the profile
+  // photo is a public `upload` asset because it doubles as the user's avatar.
+  // The landlord's utility bill is public too.
+  //
+  // This used to call generateSignedViewUrl() on all four, which hardcoded
+  // type:'authenticated'. Signing a PUBLIC asset as authenticated yields a URL
+  // for an object that doesn't exist — Cloudinary returns 401/404 rather than
+  // falling back — so the NID tiles rendered while the Profile Photo and
+  // Utility Bill tiles came through broken. signedViewUrlFor() reads the real
+  // delivery type back out of the stored URL and signs only what needs it.
   const tv = tp.verification || {};
-  if (tv.nidFrontPublicId) tv.nidFrontUrl = cloud.generateSignedViewUrl(tv.nidFrontPublicId) || tv.nidFrontUrl;
-  if (tv.nidBackPublicId)  tv.nidBackUrl  = cloud.generateSignedViewUrl(tv.nidBackPublicId) || tv.nidBackUrl;
-  if (tv.photoPublicId)    tv.photoUrl    = cloud.generateSignedViewUrl(tv.photoPublicId) || tv.photoUrl;
+  if (tv.nidFrontPublicId) tv.nidFrontUrl = cloud.signedViewUrlFor({ publicId: tv.nidFrontPublicId, url: tv.nidFrontUrl });
+  if (tv.nidBackPublicId)  tv.nidBackUrl  = cloud.signedViewUrlFor({ publicId: tv.nidBackPublicId,  url: tv.nidBackUrl });
+  if (tv.photoPublicId)    tv.photoUrl    = cloud.signedViewUrlFor({ publicId: tv.photoPublicId,    url: tv.photoUrl });
 
   const lv = lp.verification || {};
-  if (lv.utilityBillPublicId) lv.utilityBillUrl = cloud.generateSignedViewUrl(lv.utilityBillPublicId) || lv.utilityBillUrl;
+  if (lv.utilityBillPublicId) lv.utilityBillUrl = cloud.signedViewUrlFor({ publicId: lv.utilityBillPublicId, url: lv.utilityBillUrl });
 
   return {
     // ── Identity ─────────────────────────────────────────────────────

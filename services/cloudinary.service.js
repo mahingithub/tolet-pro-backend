@@ -46,9 +46,15 @@ const isConfigured = configure();
  * @param {string} opts.folder        - Cloudinary folder, e.g. 'tolet-pro/verification/<userId>'
  * @param {string} [opts.publicId]    - deterministic public_id so re-uploads overwrite, e.g. 'nid_front'
  * @param {string} [opts.resourceType='image']
- * @returns {Promise<{secureUrl:string, publicId:string, bytes:number, format:string}>}
+ * @param {string} [opts.type]        - Cloudinary delivery type. Omit for a
+ *        normal public asset; pass 'authenticated' for identity documents that
+ *        must not be readable without a signature. This parameter used to be
+ *        accepted by callers but silently dropped here, which meant NID scans
+ *        uploaded through the multipart route were stored PUBLICLY despite the
+ *        call site asking for private.
+ * @returns {Promise<{secureUrl:string, publicId:string, bytes:number, format:string, type:string}>}
  */
-function uploadBuffer(buffer, { folder, publicId, resourceType = 'image', transformation } = {}) {
+function uploadBuffer(buffer, { folder, publicId, resourceType = 'image', transformation, type } = {}) {
   if (!isConfigured) {
     const err = new Error('Cloudinary is not configured on this server.');
     err.status = 503;
@@ -73,6 +79,9 @@ function uploadBuffer(buffer, { folder, publicId, resourceType = 'image', transf
     };
     // Only attach transformation when we actually have one (skip for chat).
     if (tx) uploadOpts.transformation = tx;
+    // Non-public delivery type, when the caller asked for one. Left undefined
+    // for everything else so ordinary uploads keep their public URLs.
+    if (type) uploadOpts.type = type;
 
     const stream = cloudinary.uploader.upload_stream(
       uploadOpts,
@@ -83,6 +92,9 @@ function uploadBuffer(buffer, { folder, publicId, resourceType = 'image', transf
           publicId:  result.public_id,
           bytes:     result.bytes,
           format:    result.format,
+          // Echo the delivery type back so callers can tell whether the URL
+          // they just received is publicly loadable or needs signing.
+          type:      result.type || 'upload',
         });
       },
     );
@@ -184,30 +196,93 @@ function generateAuthenticatedSignature({ folder, publicId } = {}) {
 }
 
 /**
- * Generate a time-limited signed URL for viewing an authenticated asset.
- * Used by the admin panel and the user's own profile to display NID images
- * that were uploaded as type:'authenticated'.
+ * Read the DELIVERY TYPE back out of a stored Cloudinary URL.
+ *
+ * Cloudinary URLs are shaped
+ *   https://res.cloudinary.com/<cloud>/<resource_type>/<type>/<version>/<public_id>
+ * e.g. /image/upload/…        → public asset, no signature needed
+ *      /image/authenticated/… → needs sign_url to view
+ *      /image/private/…       → original only via private_download_url
+ *
+ * We need this because our uploads are deliberately MIXED: NID scans go up as
+ * `authenticated`, while the profile photo is public (it doubles as the user's
+ * avatar). The stored secure_url is the only record of which is which, so it's
+ * the source of truth rather than an assumption.
+ *
+ * @param {string} url
+ * @returns {string} 'upload' | 'authenticated' | 'private' | 'fetch' | '' when unparseable
+ */
+function deliveryTypeFromUrl(url) {
+  const m = /\/(?:image|video|raw)\/([a-z_]+)\//i.exec(String(url || ''));
+  return m ? m[1].toLowerCase() : '';
+}
+
+/**
+ * Generate a signed URL for viewing a NON-PUBLIC asset.
  *
  * @param {string} publicId
  * @param {object} [opts]
  * @param {string} [opts.resourceType='image']
- * @param {number} [opts.expiresInSec=3600]  — URL validity (default 1 hour)
- * @returns {string} signed URL
+ * @param {string} [opts.type='authenticated'] — MUST match how the asset was
+ *        uploaded. Signing a public `upload` asset as `authenticated` produces
+ *        a URL for an object that doesn't exist, which Cloudinary answers with
+ *        401/404 — it does not silently fall back to the public copy.
+ * @returns {string} signed URL, or '' when Cloudinary isn't configured
  */
-function generateSignedViewUrl(publicId, { resourceType = 'image', expiresInSec = 3600 } = {}) {
+function generateSignedViewUrl(publicId, { resourceType = 'image', type = 'authenticated' } = {}) {
   if (!isConfigured || !publicId) return '';
   return cloudinary.url(publicId, {
     sign_url: true,
-    type: 'authenticated',
+    type,
     resource_type: resourceType,
     secure: true,
-    // Cloudinary Node SDK doesn't directly support expires_at on url();
-    // the sign_url option generates a signature that is permanently valid
-    // for that specific transformation+publicId combo. For time-limited
-    // access, use cloudinary.utils.private_download_url or serve through
-    // an API proxy. For now, the signed URL approach is sufficient because
-    // authenticated assets still require a valid signature to access.
+    // Note: sign_url produces a signature that is permanently valid for this
+    // exact publicId + transformation. For genuine expiry use
+    // cloudinary.utils.private_download_url and serve it through an endpoint.
   });
 }
 
-module.exports = { uploadBuffer, destroy, isConfigured, generateSignature, generateAuthenticatedSignature, generateSignedViewUrl };
+/**
+ * Resolve a stored document URL into something an <img> can actually load.
+ *
+ * This is the function callers should reach for. It signs only what needs
+ * signing and passes public assets straight through, which is the bug it was
+ * written to fix: the admin console used to sign EVERY verification document as
+ * `authenticated`, so the NID tiles worked (they really are authenticated) while
+ * the profile photo and the landlord's utility bill — both public `upload`
+ * assets — rendered as broken images.
+ *
+ * @param {object} args
+ * @param {string} [args.publicId] — Cloudinary public_id, if we recorded one
+ * @param {string} [args.url]      — the stored secure_url; carries the type
+ * @param {string} [args.resourceType='image']
+ * @returns {string} a loadable URL ('' when we have nothing at all)
+ */
+function signedViewUrlFor({ publicId, url, resourceType = 'image' } = {}) {
+  const stored = String(url || '');
+  if (!publicId) return stored;
+
+  const type = deliveryTypeFromUrl(stored);
+
+  // Public asset — the stored URL already works. Signing it would break it.
+  if (type === 'upload' || type === 'fetch') return stored;
+
+  // Non-public, or an unparseable/absent URL. Fall back to 'authenticated',
+  // which is what every private upload path in this codebase produces.
+  const signed = generateSignedViewUrl(publicId, {
+    resourceType,
+    type: type === 'private' ? 'private' : 'authenticated',
+  });
+  return signed || stored;
+}
+
+module.exports = {
+  uploadBuffer,
+  destroy,
+  isConfigured,
+  generateSignature,
+  generateAuthenticatedSignature,
+  generateSignedViewUrl,
+  signedViewUrlFor,
+  deliveryTypeFromUrl,
+};

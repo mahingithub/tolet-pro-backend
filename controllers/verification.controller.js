@@ -25,10 +25,18 @@ const ApiError = require('../utils/ApiError');
 // ─── Config ───────────────────────────────────────────────────────────────
 // Document slots a tenant can upload. The `field` is the key inside
 // `user.tenantProfile.verification` that holds the URL + public_id.
+// `type` is the Cloudinary DELIVERY TYPE and it differs per slot on purpose:
+//   • nidFront / nidBack → 'authenticated'. Identity documents must be useless
+//     without a signature, so a leaked URL discloses nothing. The admin console
+//     signs them on read (see cloud.signedViewUrlFor in admin.controller.js).
+//   • photo → public. It's mirrored into `user.avatar` further down and rendered
+//     in headers and public profiles, so it has to stay directly loadable.
+// This mirrors the split the frontend already makes in authService.js
+// (`isNid ? privateUpload : directUpload`); keep the two in step.
 const DOC_KINDS = {
   photo:           { field: 'photo',           publicId: 'profile_photo' },
-  nidFront:        { field: 'nidFront',        publicId: 'nid_front' },
-  nidBack:         { field: 'nidBack',         publicId: 'nid_back' },
+  nidFront:        { field: 'nidFront',        publicId: 'nid_front', type: 'authenticated' },
+  nidBack:         { field: 'nidBack',         publicId: 'nid_back',  type: 'authenticated' },
 };
 
 // Allowed mime types.
@@ -76,12 +84,15 @@ exports.uploadDoc = asyncH(async (req, res) => {
 
   // ─── Upload ───────────────────────────────────────────────────────────
   const folder = `tolet-pro/verification/${me._id}`;
+  // `access_mode` was never a valid upload_stream option and `type: 'private'`
+  // was wrong anyway — 'private' blocks signed image delivery entirely, while
+  // 'authenticated' is what supports it. Both were also being silently dropped
+  // by uploadBuffer, so every NID uploaded through this route landed public.
   const result = await cloud.uploadBuffer(req.file.buffer, {
     folder,
     publicId: slot.publicId,
     resourceType: 'image',
-    access_mode: 'authenticated',
-    type: 'private',
+    type: slot.type,   // undefined for `photo` → stays public
   });
 
   // ─── Persist on the user doc ──────────────────────────────────────────
@@ -106,7 +117,11 @@ exports.uploadDoc = asyncH(async (req, res) => {
   res.json({
     ok: true,
     kind,
-    url:      result.secureUrl,
+    // We PERSIST the raw secure_url (it encodes the delivery type, which
+    // signedViewUrlFor needs later) but RETURN a directly loadable one, so a
+    // caller that renders the response immediately isn't handed an unsigned
+    // authenticated URL that 401s.
+    url:      cloud.signedViewUrlFor({ publicId: result.publicId, url: result.secureUrl }),
     bytes:    result.bytes,
     format:   result.format,
     user:     me.toJSON(),
