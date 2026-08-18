@@ -101,6 +101,9 @@ const auditLogSchema = new mongoose.Schema(
         'ai.guide.delete',
         'support.ticket.resolve',
         'support.ticket.escalate',
+
+        // Marketing (Subscriptions console → Send Offer)
+        'marketing.send_offer',
       ],
       index: true,
     },

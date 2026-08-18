@@ -303,9 +303,36 @@ async function safeLog(logFn, ...args) {
   try {
     await logFn(...args);
   } catch (err) {
-    // Log the error but don't throw - audit logging failure shouldn't break the main operation
-    console.error('[AuditLog] Failed to write audit log:', err.message);
-    console.error('[AuditLog] Log data:', JSON.stringify(args, null, 2));
+    // This function's entire contract is "never throws" — callers await it in
+    // the middle of request handlers, so anything escaping here takes down an
+    // operation that has ALREADY happened.
+    //
+    // It used to do `JSON.stringify(args, null, 2)` here. args[0] is the Express
+    // `req`, which is circular (req.res.req), so that threw
+    // "Converting circular structure to JSON" from inside this catch block —
+    // where nothing catches it. A rejected audit write therefore became a 500
+    // for the caller. That is exactly how a successful admin offer blast (push
+    // already delivered to every device) still returned "সার্ভারে সমস্যা হয়েছে।"
+    //
+    // So: log only scalar fields we know are safe, and wrap even that.
+    try {
+      const data = args.length > 1 ? args[args.length - 1] : null;
+      console.error('[AuditLog] Failed to write audit log:', err?.message || err);
+      console.error(
+        '[AuditLog] action=%s targetType=%s targetId=%s',
+        data?.action ?? '(none)',
+        data?.targetType ?? '(none)',
+        data?.targetId ?? '(none)',
+      );
+      // A bad `action` is the most likely cause (the field is a hard enum in
+      // models/AuditLog.js), so name that explicitly rather than making the
+      // next person diff the enum by hand.
+      if (err?.name === 'ValidationError' && err.errors?.action) {
+        console.error('[AuditLog] → `action` is not in the AuditLog enum:', data?.action);
+      }
+    } catch {
+      // Deliberately empty: a failure to LOG a failure must never propagate.
+    }
   }
 }
 

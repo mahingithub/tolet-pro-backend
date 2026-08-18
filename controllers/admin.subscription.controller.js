@@ -101,17 +101,30 @@ async function sendOffer(req, res, next) {
 
     // Marketing blasts are irreversible and outward-facing, so they leave a
     // trail: who sent what, to how many people, on which channels.
-    await auditLog.safeLog(auditLog.logAdminAction, req, {
-      action: 'marketing.send_offer',
-      description: `Sent offer "${String(title).slice(0, 60)}" to ${out.attempted} user(s) via ${selected.join(', ')}`,
-      metadata: {
-        channels: selected,
-        attempted: out.attempted,
-        capped: out.capped,
-        sent: out.sent,
-        filters: Array.isArray(userIds) && userIds.length ? { explicitIds: userIds.length } : filters,
-      },
-    });
+    //
+    // Wrapped defensively even though safeLog is contractually non-throwing.
+    // Past this line the messages are ALREADY SENT — SMS is billed, push is on
+    // people's phones, none of it recallable. Reporting a failure to the admin
+    // at that point is worse than losing the audit row: they will reasonably
+    // assume nothing went out and send the whole campaign a second time. (This
+    // is not hypothetical: safeLog's own catch block used to throw on the
+    // circular Express `req`, so a rejected audit write returned a 500 for a
+    // blast that had fully succeeded.)
+    try {
+      await auditLog.safeLog(auditLog.logAdminAction, req, {
+        action: 'marketing.send_offer',
+        description: `Sent offer "${String(title).slice(0, 60)}" to ${out.attempted} user(s) via ${selected.join(', ')}`,
+        metadata: {
+          channels: selected,
+          attempted: out.attempted,
+          capped: out.capped,
+          sent: out.sent,
+          filters: Array.isArray(userIds) && userIds.length ? { explicitIds: userIds.length } : filters,
+        },
+      });
+    } catch (logErr) {
+      console.error('[admin.sendOffer] audit log failed after a successful send:', logErr?.message);
+    }
 
     // The per-user `results` array is intentionally omitted from the response:
     // it's one entry per recipient and can run to thousands of rows. The

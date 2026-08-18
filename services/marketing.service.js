@@ -255,11 +255,19 @@ function renderTemplate(text, row) {
  * Deliver one offer to one user across the requested channels.
  * Never throws — a per-user failure is recorded and the blast continues.
  */
-async function deliverToUser(user, { channels, title, body, smsText, whatsapp, data }) {
+// Where a tapped offer should land. An upgrade promo is only actionable on the
+// plan page, so that is the default; `opts.url` lets a future campaign override
+// it. Must be a route that actually exists in the frontend router — App.jsx has
+// a catch-all that silently redirects unknown paths to '/', which is
+// indistinguishable from a broken notification.
+const DEFAULT_OFFER_URL = '/subscription';
+
+async function deliverToUser(user, { channels, title, body, smsText, whatsapp, data, url }) {
   const uid = String(user._id);
   const consent = consentOf(user);
   const row = { name: user.name, tier: user.__tier || 'free' };
   const result = { userId: uid, name: user.name, phone: user.phone, channels: {} };
+  const deepLink = url || DEFAULT_OFFER_URL;
 
   // ── In-app: a Notification row + socket push. Always permitted. ──────────
   if (channels.includes('inapp')) {
@@ -268,7 +276,10 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
       type: 'marketing',
       title: renderTemplate(title, row),
       body: renderTemplate(body, row),
-      data: { ...data, kind: 'marketing' },
+      // `path` is the in-app deep-link convention NotificationPanel already
+      // reads; without it the panel's default sends the user to /notifications,
+      // which is not a registered route.
+      data: { ...data, kind: 'marketing', path: deepLink, url: deepLink },
       // emit()'s own FCM fan-out is suppressed here: 'push' is a separate
       // channel with its own consent gate, and letting the in-app write also
       // push would deliver to users who opted out of marketing push.
@@ -282,10 +293,24 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
     if (!consent.marketingPush) {
       result.channels.push = { ok: false, skipped: true, reason: 'opted_out' };
     } else {
+      // The deep link is deliberately duplicated across two nesting levels
+      // because the two transports read it from different places:
+      //
+      //   • web-push  — push.service JSON.stringifies this object as-is, and
+      //     service-worker.js assigns the WHOLE envelope to notification.data,
+      //     then reads `data.url` / `data.type` from its ROOT. A url nested
+      //     under `data` is invisible to it, so notificationclick fell back to
+      //     '/' and the tap did nothing.
+      //   • FCM       — firebaseAdmin.sendToUser forwards only the `data` dict,
+      //     so anything at the root is dropped.
+      //
+      // Sending both keeps one payload correct for both channels.
       const payload = {
         title: renderTemplate(title, row),
         body: renderTemplate(body, row),
-        data: { ...data, kind: 'marketing' },
+        url: deepLink,
+        type: 'marketing',
+        data: { ...data, kind: 'marketing', type: 'marketing', url: deepLink },
       };
       // Two independent transports are live in this app (FCM for the native
       // shell + web tokens, web-push/VAPID for browser subscriptions), so a
