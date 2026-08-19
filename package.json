@@ -4,6 +4,7 @@
   "description": "TO-LET PRO auth backend (Express + Mongoose + Firebase Admin)",
   "main": "server.js",
   "scripts": {
+    "postinstall": "npx puppeteer browsers install chrome",
     "start": "node server.js",
     "dev": "node --watch server.js",
     "smoke": "node scripts/smoke-auth.js",
