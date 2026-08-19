@@ -11,3 +11,19 @@ backup_*/
 *.bson.gz
 *.bson
 dump/
+
+# WhatsApp Web Session (Security Risk)
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Old and temp files
+*.old
+*.bak
+*.tmp
+
+# Log files
+*.log
+npm-debug.log*
+
+# Test coverage output
+coverage/
