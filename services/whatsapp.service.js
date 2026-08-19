@@ -216,12 +216,19 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
+const puppeteerConfig = {
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+};
+
+if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    puppeteerConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+} else if (process.platform === 'darwin') {
+    puppeteerConfig.executablePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+}
+
 const client = new Client({
     authStrategy: new LocalAuth(),
-    puppeteer: {
-        executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
+    puppeteer: puppeteerConfig
 });
 
 let isClientReady = false;
