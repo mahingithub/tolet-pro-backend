@@ -185,9 +185,8 @@ function reminderMessage({ milestone, tenantName, property, monthKey, amountDue,
 
   // 'lead' (advance reminder)
   const daysLeft = Math.max(0, Math.round((midnight(dueOn) - midnight(new Date())) / 86400000));
-  const title = `🔔 ভাড়ার রিমাইন্ড — ${property}`;
-  const timeInfo = daysLeft > 0 ? ` (${daysLeft} দিন পর)` : '';
-  const body = `${who}, ${label} এর ভাড়া ৳${amountDue} আগামী ${dueDayNum} তারিখে${timeInfo} পরিশোধের অনুরোধ রইলো। সময়মতো দিলে লেট ফি এড়ানো যাবে। ধন্যবাদ।`;
+  const title = `🔔 ভাড়ার রিমাইন্ডার — ${property}`;
+  const body = `${who}, ${label} এর ভাড়া ৳${amountDue} আগামী ${dueDayNum} তারিখে (${daysLeft} দিন পর) পরিশোধের অনুরোধ রইলো। সময়মতো দিলে লেট ফি এড়ানো যাবে। ধন্যবাদ।`;
   return { title, body };
 }
 

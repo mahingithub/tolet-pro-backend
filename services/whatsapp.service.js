@@ -206,16 +206,7 @@
 //   }
 // }
 // 
-// 
-/**
- * Send a roommate wallet update reminder
- */
-async function sendWalletReminder(phone, roommateName, amount, reason) {
-  const message = `💰 রুমমেট ওয়ালেট: "আপনার রুমমেট ${roommateName} ওয়ালেটে ৳${amount} (${reason}) যোগ করেছেন।"`;
-  return sendWhatsAppMessage(phone, { body: message });
-}
-
-module.exports = { sendWhatsAppMessage, isConfigured, normalizeMsisdn, sendWalletReminder };
+// module.exports = { sendWhatsAppMessage, isConfigured, normalizeMsisdn };
 // 
 // ========================================================================
 // [NEW UNOFFICIAL API CODE: whatsapp-web.js]
@@ -225,18 +216,12 @@ module.exports = { sendWhatsAppMessage, isConfigured, normalizeMsisdn, sendWalle
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
-const isMac = process.platform === 'darwin';
-
-const puppeteerOptions = {
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-};
-if (isMac) {
-    puppeteerOptions.executablePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-}
-
 const client = new Client({
     authStrategy: new LocalAuth(),
-    puppeteer: puppeteerOptions
+    puppeteer: {
+        executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
 });
 
 let isClientReady = false;
