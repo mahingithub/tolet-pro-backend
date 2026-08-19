@@ -165,32 +165,29 @@ function milestoneFor(due, today, leadDays, graceDays) {
 // all, in any milestone.
 function reminderMessage({ milestone, tenantName, property, monthKey, amountDue, lateFee, dueOn, graceDays }) {
   const label = monthLabel(monthKey);
-  const who   = tenantName ? `${tenantName}, ` : '';
+  const who = tenantName ? `প্রিয় ${tenantName}` : 'প্রিয় ভাড়াটিয়া';
   const dueDayNum = dueOn.getDate();
   const fee = Number(lateFee) || 0;
 
   if (milestone === 'overdue') {
-    const title = `⚠️ ভাড়া বকেয়া — ${property}`;
+    const title = `🔔 ভাড়া এখনো পরিশোধ হয়নি — ${property}`;
     const body = fee > 0
-      ? `${who}${label} এর ভাড়া ৳${amountDue} এখনো বাকি। লেট ফি ৳${fee} যোগ হয়েছে — মোট ৳${amountDue + fee} পরিশোধ করুন।`
-      : `${who}${label} এর ভাড়া ৳${amountDue} এখনো বাকি। দ্রুত পরিশোধ করুন।`;
+      ? `${who}, ${label} এর ভাড়া ৳${amountDue} এখনো পাওয়া যায়নি। লেট ফি ৳${fee} যুক্ত হওয়ায় মোট পাওনা এখন ৳${amountDue + fee}। দ্রুত পরিশোধ করে দিলে ভালো হয়। কোনো সমস্যা থাকলে জানাবেন।`
+      : `${who}, ${label} এর ভাড়া ৳${amountDue} এখনো পাওয়া যায়নি। দ্রুত পরিশোধ করে দিলে ভালো হয়। কোনো সমস্যা থাকলে জানাবেন।`;
     return { title, body };
   }
 
   if (milestone === 'due') {
-    const title = `⏰ আজ ভাড়ার শেষ তারিখ — ${property}`;
-    const body = fee > 0
-      ? `${who}${label} এর ভাড়া ৳${amountDue} আজ (${dueDayNum} তারিখ) দেওয়ার শেষ দিন। ${graceDays > 0 ? `${graceDays} দিনের মধ্যে না দিলে ` : 'দেরি হলে '}৳${fee} লেট ফি যোগ হবে।`
-      : `${who}${label} এর ভাড়া ৳${amountDue} আজ (${dueDayNum} তারিখ) দেওয়ার শেষ দিন।`;
+    const title = `📌 আজ ভাড়া পরিশোধের দিন — ${property}`;
+    const body = `${who}, ${label} এর ভাড়া ৳${amountDue} আজ (${dueDayNum} তারিখ) পরিশোধের শেষ দিন। সুবিধামতো পরিশোধ করে দিলে খুশি হবো। ধন্যবাদ।`;
     return { title, body };
   }
 
-  // 'lead'
+  // 'lead' (advance reminder)
   const daysLeft = Math.max(0, Math.round((midnight(dueOn) - midnight(new Date())) / 86400000));
-  const title = `⏰ ভাড়ার রিমাইন্ডার — ${property}`;
-  const body = fee > 0
-    ? `${who}${label} এর ভাড়া ৳${amountDue} ${dueDayNum} তারিখে${daysLeft > 0 ? ` (${daysLeft} দিন পর)` : ''} দিতে হবে। দেরি হলে ৳${fee} লেট ফি যোগ হবে।`
-    : `${who}${label} এর ভাড়া ৳${amountDue} ${dueDayNum} তারিখে${daysLeft > 0 ? ` (${daysLeft} দিন পর)` : ''} দিতে হবে।`;
+  const title = `🔔 ভাড়ার রিমাইন্ড — ${property}`;
+  const timeInfo = daysLeft > 0 ? ` (${daysLeft} দিন পর)` : '';
+  const body = `${who}, ${label} এর ভাড়া ৳${amountDue} আগামী ${dueDayNum} তারিখে${timeInfo} পরিশোধের অনুরোধ রইলো। সময়মতো দিলে লেট ফি এড়ানো যাবে। ধন্যবাদ।`;
   return { title, body };
 }
 

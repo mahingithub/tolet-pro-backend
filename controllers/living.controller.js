@@ -695,6 +695,31 @@ async function addDeposit(req, res, next) {
     });
     const m = hh.members.id(roommateId);
     pushActivity(hh, 'meal', 'Deposit added', `${m?.name || 'Someone'} deposited ${taka(req.body.amount)}`);
+    
+    // --- WhatsApp Notification for Deposit ---
+    const whatsapp = require('../services/whatsapp.service');
+    const u = req.user;
+    const amount = clampNum(req.body.amount);
+    const note = req.body.note ? ` (${req.body.note})` : '';
+    
+    // Find who made the action and who the deposit is for
+    const depositorName = m?.name || 'একজন রুমমেট';
+    const msg = `💰 রুমমেট ওয়ালেট: আপনার রুমমেট ${depositorName} ওয়ালেটে ৳${amount}${note} যোগ করেছেন।`;
+
+    // Send to all other real members in the household
+    for (const mem of hh.members) {
+      if (mem.userId && String(mem.userId) !== String(u._id)) {
+        // Find their phone number from the DB (requires a quick lookup since Household only stores userId)
+        const User = require('../models/User');
+        User.findById(mem.userId).select('phone').then(user => {
+          if (user && user.phone) {
+            whatsapp.sendWhatsAppMessage(user.phone, { body: msg }).catch(() => {});
+          }
+        }).catch(() => {});
+      }
+    }
+    // -----------------------------------------
+
     return commit(hh, req, res, 201);
   } catch (err) {
     return next(err);

@@ -106,8 +106,8 @@ async function runLeaseExpiryReminders(today = new Date()) {
     };
 
     // ── Tenant — never gated ───────────────────────────────────────────────
-    const tenantTitle = '📄 লিজ শেষ হতে চলেছে';
-    const tenantBody  = `${prop} — আপনার লিজ ${when} (${dateKey(booking.leaseEnd)}) শেষ হচ্ছে। নবায়ন করতে বাড়িওয়ালার সাথে যোগাযোগ করুন।`;
+    const tenantTitle = `📄 লিজ নবায়নের সময় হয়েছে — ${prop}`;
+    const tenantBody  = `প্রিয় ভাড়াটিয়া, আপনার লিজের মেয়াদ ${when} (${dateKey(booking.leaseEnd)}) শেষ হতে চলেছে। থাকার ইচ্ছা থাকলে নবায়নের জন্য বাড়িওয়ালার সাথে যোগাযোগ করুন। ধন্যবাদ।`;
 
     if (booking.tenantId) {
       notifications.emit({

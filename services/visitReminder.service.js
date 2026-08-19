@@ -133,12 +133,12 @@ async function runVisitReminders() {
       : '';
     if (tenantPhone) {
       whatsapp.sendWhatsAppMessage(tenantPhone, {
-        body: `🗓️ ${prop} — ${label} এ আপনার ভিজিট ২ ঘণ্টার মধ্যে। সময়মতো পৌঁছানোর চেষ্টা করুন।`,
+        body: `🗓️ ভিজিট রিমাইন্ডার — ${prop}\n📍 ${inq.propertyId?.address || 'লোকেশন লিংক'}\n${label}-এ আপনার নির্ধারিত ভিজিট আর ২ ঘণ্টা পরে। সময়মতো পৌঁছালে সুবিধা হবে। কোনো কারণে আসতে না পারলে অনুগ্রহ করে জানাবেন।`,
       });
     }
     if (landlordPhone) {
       whatsapp.sendWhatsAppMessage(landlordPhone, {
-        body: `🗓️ ${prop} — ${label} এ ভাড়াটিয়া ২ ঘণ্টার মধ্যে ভিজিটে আসবেন।`,
+        body: `🗓️ ভিজিট রিমাইন্ডার — ${prop}\n📍 ${inq.propertyId?.address || 'লোকেশন লিংক'}\n${label}-এ একজন সম্ভাব্য ভাড়াটিয়া আপনার প্রপার্টি দেখতে আসবেন, আর ২ ঘণ্টা বাকি আছে।`,
       });
     }
     sent++;
