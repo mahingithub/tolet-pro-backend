@@ -11,7 +11,7 @@ services:
     plan: free
     region: singapore          # closest Render region to Bangladesh
     branch: main
-    buildCommand: npm install
+    buildCommand: npm install && npx puppeteer browsers install chrome
     startCommand: npm start
     healthCheckPath: /healthz   # server.js already exposes this endpoint
     autoDeploy: true            # redeploy on every push to `branch`
