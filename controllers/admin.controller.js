@@ -213,6 +213,10 @@ async function buildOverviewStats() {
       sellInterestTotal,
       sellInterestRegistered,
       sellInterestGuests: sellInterestTotal - sellInterestRegistered,
+      
+      // "Interested in services" tracking
+      serviceInterestTotal: await SellInterest.countDocuments({ kind: 'service' }),
+
       // Revenue is wired up once the subscription / billing pipeline
       // exists. Until then we return 0 honestly rather than fake a number.
       monthlyRevenueFormatted: '৳ 0',

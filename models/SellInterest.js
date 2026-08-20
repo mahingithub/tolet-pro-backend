@@ -31,7 +31,7 @@ const SellInterestSchema = new mongoose.Schema(
     // Which side of the transaction the person is interested in. Only 'sell' is
     // wired to a button today; 'buy' is reserved so the same collection can gauge
     // buyer demand later without a migration.
-    kind: { type: String, enum: ['sell', 'buy'], default: 'sell', index: true },
+    kind: { type: String, enum: ['sell', 'buy', 'service'], default: 'sell', index: true },
 
     // Where the click came from (e.g. 'add_property'), for future breakdowns.
     source: { type: String, trim: true, default: 'add_property', maxlength: 60 },

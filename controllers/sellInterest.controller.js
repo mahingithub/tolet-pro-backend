@@ -14,7 +14,10 @@ const SellInterest = require('../models/SellInterest');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
-const normaliseKind = (v) => (String(v || '').toLowerCase() === 'buy' ? 'buy' : 'sell');
+const normaliseKind = (v) => {
+  const s = String(v || '').toLowerCase();
+  return (s === 'buy' || s === 'service') ? s : 'sell';
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/sell-interest — record one interest click.
