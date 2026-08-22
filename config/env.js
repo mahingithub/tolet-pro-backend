@@ -109,6 +109,7 @@ const env = {
 
   // sms.net.bd SMS gateway — used to deliver signup + password-reset OTPs.
   smsApiKey: process.env.SMS_API_KEY || '',
+  smsSenderId: process.env.SMS_SENDER_ID || '',
 
   // ─── WhatsApp reminders ──────────────────────────────────────────────────
   // Used by services/whatsapp.service.js to deliver rent + visit reminders

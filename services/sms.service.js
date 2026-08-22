@@ -40,11 +40,17 @@ async function sendSms(to, msg) {
     });
   }
 
-  const body = new URLSearchParams({
+  const payload = {
     api_key: env.smsApiKey,
     msg,
     to: normalizeMsisdn(to),
-  });
+  };
+
+  if (env.smsSenderId) {
+    payload.sender_id = env.smsSenderId;
+  }
+
+  const body = new URLSearchParams(payload);
 
   let data;
   try {
