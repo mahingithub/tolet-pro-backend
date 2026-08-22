@@ -86,7 +86,7 @@ async function sendSms(to, msg) {
  * @param {string} otp 6-digit code
  */
 async function sendOtp(to, otp) {
-  const msg = `Your Tolet Pro OTP Code is ${otp}`;
+  const msg = `Your To-Let Pro OTP Code is ${otp}`;
   return sendSms(to, msg);
 }
 
