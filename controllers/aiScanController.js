@@ -122,7 +122,7 @@ async function scanLedger(req, res, next) {
       throw ApiError.badRequest('Image too large. Please use an image under 8 MB.');
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-3.1-pro-preview' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
 
     const result = await model.generateContent([
       SCAN_PROMPT,
