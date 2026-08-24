@@ -8,6 +8,8 @@ const router = express.Router();
 
 // All routes require authentication.
 router.post('/',                          requireAuth, ctrl.createBooking);
+// Batch create — AI Ledger Scanner sends all reviewed tenants in one request.
+router.post('/batch',                     requireAuth, require('../controllers/aiScanController').batchCreateBookings);
 router.get('/host',                       requireAuth, ctrl.listHostBookings);
 router.get('/tenant',                     requireAuth, ctrl.listTenantBookings);
 

@@ -304,6 +304,9 @@ app.use('/api/calls',          require('./routes/calls.routes')); // Phase 8
 app.use('/api/admin/helpdesk', require('./routes/admin.support.routes'));
 app.use('/api/ai-guides',     require('./routes/aiGuideRoutes'));
 app.use('/api/ai-chat',       rateLimiters.ai, require('./routes/aiChatRoutes'));
+// AI Ledger Scanner — Gemini Vision reads a photo of a rent khata (খাতা) and
+// returns structured tenant data for the host to review before batch-saving.
+app.use('/api/ai',            rateLimiters.ai, require('./routes/aiScan.routes'));
 app.use('/api/push',          require('./routes/push.routes'));
 // UPLOAD limiter — new. This route mints signed Cloudinary credentials, so an
 // unthrottled caller could burn storage/bandwidth quota; it previously relied
