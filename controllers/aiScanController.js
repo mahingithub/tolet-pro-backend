@@ -179,6 +179,11 @@ async function scanLedger(req, res, next) {
       rawText,
     });
   } catch (err) {
+    // If it's a Gemini API error, it won't be an instance of ApiError, 
+    // so it normally falls through to a generic 500. Let's expose it for debugging.
+    if (err.message && err.message.includes('GoogleGenerativeAI')) {
+      return next(ApiError.badRequest(`Gemini Error: ${err.message}`));
+    }
     return next(err);
   }
 }
