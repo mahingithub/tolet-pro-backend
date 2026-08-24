@@ -179,10 +179,9 @@ async function scanLedger(req, res, next) {
       rawText,
     });
   } catch (err) {
-    // If it's a Gemini API error, it won't be an instance of ApiError, 
-    // so it normally falls through to a generic 500. Let's expose it for debugging.
     if (err.message && err.message.includes('GoogleGenerativeAI')) {
-      return next(ApiError.badRequest(`Gemini Error: ${err.message}`));
+      // Send a user-friendly message instead of the raw technical error
+      return next(ApiError.internal('AI স্ক্যানিং সার্ভিসটি এই মুহূর্তে ব্যস্ত আছে, একটু পর আবার চেষ্টা করুন।'));
     }
     return next(err);
   }
