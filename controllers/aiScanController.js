@@ -284,7 +284,7 @@ async function batchCreateBookings(req, res, next) {
           notes:            String(t.notes || '').trim().substring(0, 500),
           dealType:         t.dealType === 'commercial' ? 'commercial' : 'residential',
           lateFeeAmount:    Math.max(0, Math.min(100000, Number(t.lateFeeAmount) || 0)),
-          gracePeriodDays:  Math.max(0, Math.min(28, Number(t.gracePeriodDays) ?? 5)),
+          gracePeriodDays:  Math.max(0, Math.min(28, Number(t.gracePeriodDays) || 5)),
           members:          [],
           inviteCode,
         });
