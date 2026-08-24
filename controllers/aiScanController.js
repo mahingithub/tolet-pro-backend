@@ -180,8 +180,8 @@ async function scanLedger(req, res, next) {
     });
   } catch (err) {
     if (err.message && err.message.includes('GoogleGenerativeAI')) {
-      // Send a user-friendly message instead of the raw technical error
-      return next(ApiError.internal('AI স্ক্যানিং সার্ভিসটি এই মুহূর্তে ব্যস্ত আছে, একটু পর আবার চেষ্টা করুন।'));
+      // Send a user-friendly message but append the real error for debugging
+      return next(ApiError.internal(`AI স্ক্যানিং ব্যর্থ: ${err.message}`));
     }
     return next(err);
   }
