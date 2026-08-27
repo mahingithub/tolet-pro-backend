@@ -37,3 +37,7 @@ coverage/
 *.p12
 *.p8
 *.pem
+test_*.js
+test_*.cjs
+test_*.mjs
+capacitor.config.*
