@@ -38,6 +38,63 @@ const LedgerEntrySchema = new mongoose.Schema(
   { _id: false },
 );
 
+// ─── Tenant profile sub-schema — who the person is ──────────────────────────
+// Everything about an occupant EXCEPT their name, phone and move-in date (those
+// live on the booking / member itself, because the rest of the app reads them).
+//
+// EVERY FIELD HERE IS OPTIONAL, AND THAT IS THE POINT. A tenant may have no
+// NID, no student ID, no trade licence — plenty of people in this market don't,
+// and a landlord who cannot record them without one goes back to the paper
+// খাতা. The `*Status` fields hold the আছে / নেই answer; a number is only ever
+// expected when the answer was 'has', and that check is enforced at the form,
+// not by making the column required here.
+const TenantProfileSchema = new mongoose.Schema(
+  {
+    fatherName:       { type: String, trim: true, default: '', maxlength: 100 },
+    // Stored as the 'YYYY-MM-DD' the form produced. Deliberately NOT a Date:
+    // a birth date has no time and no timezone, and converting it to one only
+    // ever shifted it a day backwards for tenants east of UTC.
+    dob:              { type: String, trim: true, default: '', maxlength: 10 },
+    maritalStatus:    { type: String, enum: ['', 'single', 'married', 'divorced', 'widowed'], default: '' },
+    permanentAddress: { type: String, trim: true, default: '', maxlength: 300 },
+
+    // Profession. NOT a student flag — a flat or a hostel can hold a student, an
+    // employee, a shopkeeper or a freelancer, so the tenant's own answer decides
+    // which professional fields apply, never the property category.
+    tenantType:       { type: String, enum: ['', 'student', 'employee', 'business', 'freelancer', 'other'], default: '' },
+    tenantTypeOther:  { type: String, trim: true, default: '', maxlength: 80 },
+    organization:     { type: String, trim: true, default: '', maxlength: 160 },
+    department:       { type: String, trim: true, default: '', maxlength: 100 },
+    // Student ID / employee ID / trade licence — whichever the profession implies.
+    professionalIdStatus: { type: String, enum: ['', 'has', 'none'], default: '' },
+    professionalIdNumber: { type: String, trim: true, default: '', maxlength: 60 },
+
+    // NID / passport. Never globally required; gated entirely on the answer.
+    govtIdStatus:     { type: String, enum: ['', 'has', 'none'], default: '' },
+    govtIdType:       { type: String, enum: ['', 'nid', 'passport'], default: '' },
+    govtIdNumber:     { type: String, trim: true, default: '', maxlength: 60 },
+
+    emergencyName:     { type: String, trim: true, default: '', maxlength: 100 },
+    emergencyRelation: { type: String, trim: true, default: '', maxlength: 60 },
+    emergencyAddress:  { type: String, trim: true, default: '', maxlength: 300 },
+    emergencyPhone:    { type: String, trim: true, default: '', maxlength: 20 },
+
+    // The landlord's own snapshot of the tenant, taken at intake. TEMPORARY BY
+    // DESIGN: the moment this person joins with the booking's invite code, their
+    // real account exists, so joinByInvite clears this and their own profile
+    // picture is shown instead. The landlord never keeps a private copy of a
+    // photo of someone who is now on the platform themselves.
+    //
+    // Uploaded as Cloudinary type:'authenticated', like NID scans — the stored
+    // URL is NOT loadable on its own. Reads go through cloud.signedViewUrlFor()
+    // so only the landlord who owns this booking gets a working link, and
+    // `photoPublicId` is what makes that signature possible.
+    photoUrl:         { type: String, default: '', maxlength: 512 },
+    photoPublicId:    { type: String, default: '', maxlength: 256 },
+  },
+  { _id: false },
+);
+
 // ─── Member sub-schema — one occupant of the property ────────────────────────
 // A booking can hold MANY members (a hostel / mess / room-share). Each member
 // carries their OWN monthly rent ledger, so "who paid which month" is tracked
@@ -76,6 +133,10 @@ const MemberSchema = new mongoose.Schema(
     // daily cron never double-sends for the same due month.
     lastReminderKey: { type: String, default: '' },
     lastReminderAt:  { type: Date, default: null },
+
+    // Who this seat's occupant is, beyond a name and a number. Per-member so a
+    // hostel room holds four different people with four different profiles.
+    tenantProfile: { type: TenantProfileSchema, default: () => ({}) },
   },
   { _id: true },
 );
@@ -107,6 +168,18 @@ const BookingSchema = new mongoose.Schema(
     propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', default: null, index: true },
     inquiryId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Inquiry', default: null },
 
+    // ── Building → Unit → (seat) ────────────────────────────────────────────
+    // THE fix for the vanishing-lease bug. A booking used to be tied to its
+    // building by the `property` NAME string, compared with `===`, so a lease
+    // saved under a name that didn't match a building exactly was filtered out
+    // of every host screen — a real, persisted row that looked like a failed
+    // save. These ids are the relationship now; `property` below is a display
+    // label and a fallback for legacy rows only.
+    //
+    // Null on pre-restructure bookings until the migration backfills them.
+    buildingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Building', default: null, index: true },
+    unitId:     { type: mongoose.Schema.Types.ObjectId, ref: 'Unit',     default: null, index: true },
+
     // Denormalized display fields so dashboards don't need JOINs every render.
     property:    { type: String, trim: true, default: '', maxlength: 200 },
     // Property location, denormalized from the Property record at create time
@@ -135,6 +208,9 @@ const BookingSchema = new mongoose.Schema(
     // How many people will live in the unit (prefilled from the tenant's
     // family-members count when the profile is linked).
     tenantsCount: { type: Number, default: 1, min: 1, max: 50 },
+    // The primary tenant's details. For a hostel room the per-seat copies on
+    // members[] are what matter; this is the single-tenant (flat / room) home.
+    tenantProfile: { type: TenantProfileSchema, default: () => ({}) },
 
     // Lease terms
     leaseStart:       { type: Date, required: true },

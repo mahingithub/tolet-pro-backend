@@ -106,11 +106,17 @@ function uploadBuffer(buffer, { folder, publicId, resourceType = 'image', transf
  * Delete a single asset by its public_id. Used when a user replaces an
  * existing verification doc — we don't want stale NID scans to keep
  * eating into our 25 GB Cloudinary quota.
+ *
+ * `type` MUST match how the asset was uploaded. Cloudinary scopes public_ids by
+ * delivery type, so destroying an 'authenticated' asset with the default
+ * 'upload' type reports "not found" and quietly leaves the file in place — the
+ * failure mode that matters here, because a retired tenant photo has to
+ * actually be gone, not just unreferenced.
  */
-async function destroy(publicId, { resourceType = 'image' } = {}) {
+async function destroy(publicId, { resourceType = 'image', type = 'upload' } = {}) {
   if (!isConfigured || !publicId) return { result: 'skipped' };
   try {
-    return await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+    return await cloudinary.uploader.destroy(publicId, { resource_type: resourceType, type });
   } catch (err) {
     // Non-fatal — a stale asset is a quota leak, not a user-facing bug.
     console.warn('[cloudinary] destroy failed for', publicId, err.message);

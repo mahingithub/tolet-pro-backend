@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * AI Ledger Scanner Controller
+ * AI Scan Controller — খাতা (rent ledger) and ভর্তি ফরম (admission form)
  * ─────────────────────────────────────────────────────────────────────────────
  * POST /api/ai/scan-ledger
  *
@@ -68,7 +68,7 @@ function isValidBDPhone(p) {
 
 // Sanitise a single parsed tenant, applying the landlord's default settings
 // and flagging fields whose AI confidence is below the threshold (< 0.65).
-function sanitiseTenant(raw = {}, defaults = {}) {
+function sanitiseTenant(raw = {}, defaults = {}, isFormMode = false) {
   const confidence = (raw.confidence && typeof raw.confidence === 'object')
     ? raw.confidence
     : { name: 0, phone: 0, monthlyRent: 0 };
@@ -94,6 +94,12 @@ function sanitiseTenant(raw = {}, defaults = {}) {
     location:        defaults.location        || '',
     leaseStart:      defaults.leaseStart      || new Date().toISOString().split('T')[0],
 
+    // The person, in the SAME shape the manual form writes — so a scanned
+    // tenant and a hand-typed one are the same record, validated by the same
+    // rules. Empty in খাতা mode: a ledger page has none of this on it.
+    moveInDate: String(raw.moveInDate || '').trim(),
+    tenantProfile: isFormMode ? profileFromForm(raw) : {},
+
     // ── UI helpers: flag uncertain fields for the landlord to review ──────
     _flags: {
       nameLow:         confidence.name         < 0.65,
@@ -104,11 +110,93 @@ function sanitiseTenant(raw = {}, defaults = {}) {
   };
 }
 
+// ── Admission-form mode ───────────────────────────────────────────────────────
+// A খাতা page physically contains names, rooms and amounts — never a father's
+// name or an NID. Those live on the ভর্তি ফরম the landlord already collects, one
+// page per tenant, so reading THAT is where the real time saving is.
+//
+// The fields below are exactly the 11 the landlord marked, and nothing else.
+// Every one is optional: a form with half the boxes blank produces a tenant
+// with half the fields blank, which is a valid record.
+const FORM_PROMPT = `You are reading a Bangladeshi tenant / hostel admission form (ভর্তি ফরম).
+The image contains ONE tenant's filled-in details, handwritten or printed, in Bengali or English.
+
+Return ONLY a valid JSON array containing exactly ONE object. No markdown, no explanation.
+
+{
+  "name": "string — tenant's full name (ভাড়াটিয়ার নাম), empty string if unreadable",
+  "phone": "string — 11-digit BD mobile (01xxxxxxxxx), empty string if not found",
+  "roomNumber": "string — room/flat number (রুম/ফ্ল্যাট নম্বর), empty if absent",
+  "floorNumber": "string — floor if visible, empty otherwise",
+  "moveInDate": "string — move-in date as YYYY-MM-DD, empty if absent or unclear",
+  "fatherName": "string — father's name (পিতার নাম), empty if absent",
+  "dob": "string — date of birth as YYYY-MM-DD, empty if absent",
+  "maritalStatus": "one of: single, married, divorced, widowed, or empty string",
+  "permanentAddress": "string — permanent address (স্থায়ী ঠিকানা), empty if absent",
+  "tenantType": "one of: student, employee, business, freelancer, other, or empty string",
+  "organization": "string — university, company or business name, empty if absent",
+  "department": "string — department (students only), empty if absent",
+  "professionalIdNumber": "string — student ID / employee ID / trade licence number, empty if absent",
+  "govtIdType": "one of: nid, passport, or empty string",
+  "govtIdNumber": "string — NID or passport number, empty if absent",
+  "emergencyName": "string — emergency contact name, empty if absent",
+  "emergencyRelation": "string — relation e.g. Father, Mother, empty if absent",
+  "emergencyPhone": "string — emergency contact mobile, empty if absent",
+  "emergencyAddress": "string — emergency contact address, empty if absent",
+  "confidence": { "name": 0..1, "phone": 0..1, "govtIdNumber": 0..1 }
+}
+
+Rules:
+- Leave a field as an empty string when it is blank, illegible or absent. NEVER guess.
+- Occupation words map to tenantType: ছাত্র/শিক্ষার্থী/student → "student";
+  চাকরি/চাকরিজীবী/service/job → "employee"; ব্যবসা/ব্যবসায়ী/business → "business";
+  ফ্রিল্যান্সার/freelance → "freelancer"; anything else readable → "other".
+- Phone: only if it looks like a valid BD mobile.
+- Dates: convert any format you see to YYYY-MM-DD.
+- Return [] if this is not a tenant form.
+
+Return ONLY the JSON array.`;
+
+// The 11 marked fields, as they are stored on a tenant profile. Read off a
+// form; blank whenever the form was blank.
+const PROFILE_KEYS = [
+  'fatherName', 'dob', 'maritalStatus', 'permanentAddress',
+  'tenantType', 'organization', 'department', 'professionalIdNumber',
+  'govtIdType', 'govtIdNumber',
+  'emergencyName', 'emergencyRelation', 'emergencyPhone', 'emergencyAddress',
+];
+
+// Turn a scanned form into the SAME tenantProfile shape the manual form writes.
+//
+// The আছে/নেই gates matter here: an ID number is only ever required because the
+// tenant said they have one, so reading a number off a form has to ALSO answer
+// the question — otherwise the number is stored while the form still shows
+// "নেই" and hides the field it belongs to.
+function profileFromForm(raw = {}) {
+  const p = {};
+  PROFILE_KEYS.forEach((k) => { p[k] = String(raw[k] || '').trim(); });
+
+  if (!['single', 'married', 'divorced', 'widowed'].includes(p.maritalStatus)) p.maritalStatus = '';
+  if (!['student', 'employee', 'business', 'freelancer', 'other'].includes(p.tenantType)) p.tenantType = '';
+  if (!['nid', 'passport'].includes(p.govtIdType)) p.govtIdType = '';
+
+  // A number on the page IS the "আছে" answer. No number ⇒ unanswered (''), NOT
+  // "নেই" — the scanner cannot tell "has none" from "wasn't filled in", and
+  // asserting the stronger claim on the tenant's behalf would be wrong.
+  p.govtIdStatus = p.govtIdNumber ? 'has' : '';
+  if (!p.govtIdStatus) { p.govtIdType = ''; p.govtIdNumber = ''; }
+  p.professionalIdStatus = p.professionalIdNumber ? 'has' : '';
+
+  // Department only means anything for a student, per the marked form.
+  if (p.tenantType !== 'student') p.department = '';
+  return p;
+}
+
 // ── Controller ────────────────────────────────────────────────────────────────
 
 async function scanLedger(req, res, next) {
   try {
-    const { imageBase64, mimeType = 'image/jpeg', defaultSettings = {} } = req.body;
+    const { imageBase64, mimeType = 'image/jpeg', defaultSettings = {}, mode = 'khata' } = req.body;
 
     if (!imageBase64) {
       throw ApiError.badRequest('imageBase64 is required.');
@@ -124,8 +212,10 @@ async function scanLedger(req, res, next) {
 
     const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
 
+    // খাতা = many tenants, few fields. ভর্তি ফরম = one tenant, nearly all of them.
+    const isFormMode = mode === 'form';
     const result = await model.generateContent([
-      SCAN_PROMPT,
+      isFormMode ? FORM_PROMPT : SCAN_PROMPT,
       {
         inlineData: {
           mimeType: mimeType,
@@ -169,7 +259,7 @@ async function scanLedger(req, res, next) {
     // Sanitise every entry and apply landlord defaults
     const tenants = parsed
       .filter(t => t && typeof t === 'object')
-      .map(t => sanitiseTenant(t, defaultSettings))
+      .map(t => sanitiseTenant(t, defaultSettings, isFormMode))
       // Drop completely empty rows (no name AND no rent)
       .filter(t => t.name || t.monthlyRent > 0);
 
@@ -192,9 +282,22 @@ async function scanLedger(req, res, next) {
 // The frontend calls this after the landlord reviews the scanned data and
 // clicks "Save All". We reuse the same validation/defaults as createBooking.
 
+// ── Batch save ────────────────────────────────────────────────────────────────
+// POST /api/bookings/batch   body: { buildingId, tenants: [...] }
+//
+// Scanned tenants are placed through EXACTLY the same code as hand-typed ones:
+// each is put INTO a unit via placeTenantInUnit(). That matters for two
+// reasons. It used to be a separate Booking.create() that set no buildingId and
+// no unitId, so every scanned lease landed unlinked to any building — the same
+// orphaning bug we removed from every other screen, surviving in the one path
+// nobody looked at. And a khata page listing four names in room 301 now
+// produces ONE room with four seats, not four unrelated bookings.
+//
+// Rooms named on the page but not yet created are created here, because that is
+// what the landlord means by scanning a ledger: the book IS the building.
 async function batchCreateBookings(req, res, next) {
   try {
-    const { tenants } = req.body;
+    const { tenants, buildingId } = req.body;
 
     if (!Array.isArray(tenants) || tenants.length === 0) {
       throw ApiError.badRequest('tenants array is required and must not be empty.');
@@ -203,99 +306,100 @@ async function batchCreateBookings(req, res, next) {
       throw ApiError.badRequest('Maximum 50 tenants per batch.');
     }
 
-    const Booking = require('../models/Booking');
-    const User    = require('../models/User');
+    const mongoose = require('mongoose');
+    const Building = require('../models/Building');
+    const Unit     = require('../models/Unit');
+    const buildingCtrl = require('./building.controller');
 
-    // Helper to resolve a user by phone (reuse from createBooking scope)
-    async function resolveUserIdByPhone(phone) {
-      const d = String(phone || '').replace(/\D/g, '');
-      const core = d.length >= 10 ? d.slice(-10) : '';
-      if (!core) return null;
-      try {
-        const user = await User.findOne({ phone: new RegExp(`${core}$`) }).select('_id').lean();
-        return user?._id || null;
-      } catch {
-        return null;
-      }
+    if (!mongoose.Types.ObjectId.isValid(String(buildingId || ''))) {
+      throw ApiError.badRequest('বিল্ডিং বাছুন — কোন বিল্ডিংয়ে যোগ হবে তা জানা দরকার।');
     }
+    const building = await Building.findOne({ _id: buildingId, landlordId: req.user._id });
+    if (!building) throw ApiError.notFound('বিল্ডিং পাওয়া যায়নি।');
 
-    // Generate a short unique invite code
-    function genCode() {
-      const alpha = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-      let s = '';
-      for (let i = 0; i < 6; i++) s += alpha[Math.floor(Math.random() * alpha.length)];
-      return s;
-    }
-    async function uniqueCode() {
-      for (let i = 0; i < 6; i++) {
-        const c = genCode();
-        // eslint-disable-next-line no-await-in-loop
-        if (!(await Booking.exists({ inviteCode: c }))) return c;
-      }
-      return genCode() + genCode().slice(0, 3); // longer fallback
-    }
+    // Floor arrives as free text off a page: "3rd", "৩য়", "3", "". Pull a
+    // number out so the room can be ordered; unparseable means ground floor.
+    const BN = { '০': '0', '১': '1', '২': '2', '৩': '3', '৪': '4', '৫': '5', '৬': '6', '৭': '7', '৮': '8', '৯': '9' };
+    const parseFloor = (raw) => {
+      const s = String(raw ?? '').replace(/[০-৯]/g, (d) => BN[d] || d);
+      const m = /-?\d+/.exec(s);
+      const n = m ? parseInt(m[0], 10) : 0;
+      return Number.isFinite(n) ? Math.max(-5, Math.min(200, n)) : 0;
+    };
 
     const created = [];
     const errors  = [];
+    // Two names in room 301 must resolve to the SAME room, so cache per batch.
+    const unitCache = new Map();
 
     for (const [idx, t] of tenants.entries()) {
       try {
-        const rent = Number(t.monthlyRent);
-        if (!rent || rent <= 0) {
-          errors.push({ idx, name: t.name, reason: 'monthlyRent must be > 0' });
-          continue;
-        }
-        if (!t.name || !String(t.name).trim()) {
-          errors.push({ idx, name: t.name, reason: 'name is required' });
-          continue;
-        }
+        const name = String(t.name || '').trim();
+        if (!name) throw new Error('নাম নেই');
+        const phone = String(t.phone || '').trim();
+        if (!phone) throw new Error('মোবাইল নম্বর নেই');
 
-        // eslint-disable-next-line no-await-in-loop
-        const linkedTenantId = t.tenantPhone
+        const floor = parseFloor(t.floorNumber);
+        const roomNumber = String(t.roomNumber || '').trim();
+        if (!roomNumber) throw new Error('রুম/ফ্ল্যাট নম্বর নেই');
+
+        const key = `${floor}|${roomNumber.toLowerCase()}`;
+        let unit = unitCache.get(key);
+        if (!unit) {
           // eslint-disable-next-line no-await-in-loop
-          ? await resolveUserIdByPhone(t.tenantPhone || t.phone)
-          : null;
+          unit = await Unit.findOne({ buildingId: building._id, roomNumber, floor, status: 'active' });
+          if (!unit) {
+            // eslint-disable-next-line no-await-in-loop
+            unit = await Unit.create({
+              buildingId: building._id,
+              landlordId: req.user._id,
+              floor,
+              roomNumber,
+              // A seat building's room gets room for the people the page shows;
+              // grown below as more names in the same room turn up.
+              seatCapacity: building.rentedAs === 'seat' ? 1 : 1,
+              monthlyRent:   Number(t.monthlyRent) > 0 ? Number(t.monthlyRent) : building.defaultMonthlyRent,
+              serviceCharge: building.defaultServiceCharge,
+              rentDueDay:    Number(t.rentDueDay) || building.defaultRentDueDay,
+            });
+          }
+          unitCache.set(key, unit);
+        }
 
-        const leaseStart = t.leaseStart ? new Date(t.leaseStart) : new Date();
-        if (Number.isNaN(leaseStart.getTime())) leaseStart.setTime(Date.now());
+        // Another name in a room we already filled ⇒ the room holds more seats
+        // than we knew. Grow it rather than rejecting the tenant: the page is
+        // the evidence of how many people actually live there.
+        if (building.rentedAs === 'seat') {
+          // eslint-disable-next-line no-await-in-loop
+          const live = await buildingCtrl.liveBookingForUnit(unit._id);
+          const taken = live && Array.isArray(live.members)
+            ? live.members.filter((m) => m && m.status !== 'moved-out').length : 0;
+          if (taken >= (Number(unit.seatCapacity) || 1)) {
+            unit.seatCapacity = Math.min(60, taken + 1);
+            // eslint-disable-next-line no-await-in-loop
+            await unit.save();
+          }
+        }
 
         // eslint-disable-next-line no-await-in-loop
-        const inviteCode = await uniqueCode();
-
-        // eslint-disable-next-line no-await-in-loop
-        const booking = await Booking.create({
-          landlordId:       req.user._id,
-          tenantId:         linkedTenantId,
-          property:         String(t.property || '').trim().substring(0, 200),
-          location:         String(t.location || '').trim().substring(0, 200),
-          tenant:           String(t.name || '').trim().substring(0, 100),
-          tenantPhone:      String(t.phone || '').trim().substring(0, 20) || null,
-          monthlyRent:      rent,
-          advancePayment:   Math.max(0, Number(t.advancePayment) || 0),
-          paymentMethod:    String(t.paymentMethod || '').trim(),
-          serviceCharge:    Math.max(0, Number(t.serviceCharge) || 0),
-          rentDueDay:       Number(t.rentDueDay) || 5,
-          reminderLeadDays: Number(t.reminderLeadDays) || 3,
-          autoReminder:     t.autoReminder !== false,
-          leaseStart,
-          leaseEnd:         t.leaseEnd ? new Date(t.leaseEnd) : null,
-          floorNumber:      String(t.floorNumber || '').trim().substring(0, 40),
-          roomNumber:       String(t.roomNumber || '').trim().substring(0, 40),
-          notes:            String(t.notes || '').trim().substring(0, 500),
-          dealType:         t.dealType === 'commercial' ? 'commercial' : 'residential',
-          lateFeeAmount:    Math.max(0, Math.min(100000, Number(t.lateFeeAmount) || 0)),
-          gracePeriodDays:  Math.max(0, Math.min(28, Number(t.gracePeriodDays) || 5)),
-          members:          [],
-          inviteCode,
+        const out = await buildingCtrl.placeTenantInUnit({
+          landlordId: req.user._id,
+          unit,
+          building,
+          input: buildingCtrl.tenantInputFrom({
+            name,
+            phone,
+            moveInDate: t.moveInDate || t.leaseStart,
+            tenantProfile: t.tenantProfile || {},
+          }),
         });
-
-        created.push(booking);
+        created.push({ bookingId: String(out.booking._id), memberId: out.memberId, name, roomNumber });
       } catch (err) {
-        errors.push({ idx, name: t.name, reason: err.message });
+        errors.push({ index: idx, name: t.name || '(no name)', reason: err.message });
       }
     }
 
-    return res.status(201).json({
+    return res.status(created.length ? 201 : 400).json({
       created: created.length,
       errors:  errors.length,
       bookings: created,

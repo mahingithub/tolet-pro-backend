@@ -284,6 +284,11 @@ app.use('/api/conversations',  rateLimiters.messages, require('./routes/chat.rou
 app.use('/api/notifications',  require('./routes/notification.routes'));
 // MEDIUM limiter on bookings (spam-prone).
 app.use('/api/bookings',       rateLimiters.write, require('./routes/booking.routes'));
+// Building → Unit (room) structure. Rooms are created once, independently of
+// any tenant, and bookings join to them by id — see models/Building.js for why
+// the old name-matching had to go.
+app.use('/api/buildings',      rateLimiters.write, require('./routes/building.routes'));
+app.use('/api/units',          rateLimiters.write, require('./routes/building.routes').unitRouter);
 // Demand gauge: "interested in selling" clicks while self-service selling is
 // Coming Soon. Public (guests count too) + spam-prone, so it sits behind the
 // writeLimiter like inquiries/bookings. Admin reads the totals under /api/admin.

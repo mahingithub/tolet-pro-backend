@@ -15,6 +15,7 @@ const User          = require('../models/User');
 const notifications = require('../services/notification.service');
 const { applyPayment } = require('../services/bookingPayment.service');
 const ApiError      = require('../utils/ApiError');
+const cloud         = require('../services/cloudinary.service');
 const { getIo, emitToUser } = require('../socket');
 const { invalidateInsightsCache } = require('../services/insights.service');
 
@@ -101,6 +102,75 @@ function findMember(booking, memberId) {
   try { return booking.members.id(memberId) || null; } catch { return null; }
 }
 
+// ── Tenant profile ──────────────────────────────────────────────────────────
+// Keys the client is allowed to set on a tenant profile. `name`, `phone` and
+// `moveInDate` are deliberately NOT here: they live on the booking / member, so
+// accepting them again would create a second copy of a tenant's name that can
+// silently disagree with the first.
+const TENANT_PROFILE_KEYS = [
+  'fatherName', 'dob', 'maritalStatus', 'permanentAddress',
+  'tenantType', 'tenantTypeOther', 'organization', 'department',
+  'professionalIdStatus', 'professionalIdNumber',
+  'govtIdStatus', 'govtIdType', 'govtIdNumber',
+  'emergencyName', 'emergencyRelation', 'emergencyAddress', 'emergencyPhone',
+  'photoUrl', 'photoPublicId',
+];
+
+// Turn a stored tenant photo into something the landlord's browser can load.
+// The asset is uploaded 'authenticated', so the raw URL 401s — it only works
+// once signed, and we sign it per response rather than storing a signed link.
+// Mutates in place because it runs over lean() rows on the way out.
+function signTenantPhoto(profile) {
+  if (!profile || !profile.photoPublicId) return profile;
+  try {
+    profile.photoUrl = cloud.signedViewUrlFor({
+      publicId: profile.photoPublicId,
+      url: profile.photoUrl,
+    });
+  } catch { /* leave the stored value; a broken photo must never fail the list */ }
+  return profile;
+}
+
+// The tenant now has their own account, so the landlord's intake photo is
+// retired: cleared from the record AND deleted from Cloudinary. "Removed" has
+// to mean the bytes are gone, not that we stopped rendering them.
+function destroyTenantPhoto(profile) {
+  if (!profile) return;
+  const publicId = profile.photoPublicId;
+  profile.photoUrl = '';
+  profile.photoPublicId = '';
+  if (!publicId) return;
+  Promise.resolve()
+    .then(() => cloud.destroy(publicId, { resourceType: 'image', type: 'authenticated' }))
+    .catch((err) => console.warn('[booking] tenant photo cleanup failed:', err.message || err));
+}
+
+// Sign every tenant photo hanging off a booking — the primary tenant's and each
+// seat's. Call on the way OUT of any landlord-facing read.
+function signBookingPhotos(b) {
+  if (!b) return b;
+  signTenantPhoto(b.tenantProfile);
+  if (Array.isArray(b.members)) b.members.forEach((m) => signTenantPhoto(m && m.tenantProfile));
+  return b;
+}
+
+// Nothing here is required — a tenant with no NID, no student ID and no
+// permanent address is a completely valid record. We only drop keys we don't
+// own and coerce to trimmed strings; the enums on the schema reject junk.
+function sanitiseTenantProfile(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const out = {};
+  TENANT_PROFILE_KEYS.forEach((k) => {
+    if (raw[k] === undefined || raw[k] === null) return;
+    out[k] = String(raw[k]).trim();
+  });
+  // "নেই" (or an unanswered question) can't leave a number behind — otherwise a
+  // corrected record would keep the ID the landlord just said didn't exist.
+  if (out.govtIdStatus !== 'has') { out.govtIdType = ''; out.govtIdNumber = ''; }
+  if (out.professionalIdStatus !== 'has') { out.professionalIdNumber = ''; }
+  return out;
+}
+
 // Build a validated member object from raw client input, applying booking /
 // property defaults (Requirement 1.4, 2.5). Resolves a real userId by phone so
 // Profile / Call / Message work for members who already have an account.
@@ -113,11 +183,15 @@ async function buildMemberFromInput(raw = {}, defaults = {}) {
     ? raw.rentType
     : (['flat', 'room', 'seat'].includes(defaults.rentType) ? defaults.rentType : 'flat');
   const reqRent = Number(raw.monthlyRent);
+  const profile = sanitiseTenantProfile(raw.tenantProfile);
   return {
     userId,
     name,
     phone,
-    avatar:    raw.avatar || '',
+    tenantProfile: profile,
+    // A landlord-supplied photo only stands in until the occupant joins with
+    // the invite code and brings their own profile picture.
+    avatar:    raw.avatar || profile.photoUrl || '',
     rentType,
     floor:     String(raw.floor || '').trim().slice(0, 40),
     roomLabel: String(raw.roomLabel || '').trim().slice(0, 40),
@@ -158,11 +232,30 @@ async function createBooking(req, res, next) {
       reminderLeadDays, autoReminder, serviceCharge,
       securityDeposit, advancePayment, paymentMethod, notes, chatId, tenantId,
       members, floorNumber, roomNumber, dealType, commercialTerms,
-      lateFeeAmount, gracePeriodDays,
+      lateFeeAmount, gracePeriodDays, tenantProfile, buildingId, unitId,
     } = req.body;
 
-    // Either a linked listing (propertyId) OR a manually typed property name.
-    if (!propertyId && !(property && String(property).trim())) {
+    // ── Where this lease sits ────────────────────────────────────────────
+    // A unit id is the real answer, and it carries its building with it. We
+    // re-read both from the database rather than trusting the client's pair,
+    // so a booking can never claim a room in someone else's building — and so
+    // the denormalised name/floor/room below always agree with the room record.
+    const Unit     = require('../models/Unit');
+    const Building = require('../models/Building');
+    let linkedUnit = null;
+    let linkedBuilding = null;
+    if (isObjectId(unitId)) {
+      linkedUnit = await Unit.findOne({ _id: unitId, landlordId: req.user._id }).lean();
+      if (!linkedUnit) throw ApiError.badRequest('রুমটি পাওয়া যায়নি।');
+      linkedBuilding = await Building.findOne({ _id: linkedUnit.buildingId, landlordId: req.user._id }).lean();
+    } else if (isObjectId(buildingId)) {
+      linkedBuilding = await Building.findOne({ _id: buildingId, landlordId: req.user._id }).lean();
+      if (!linkedBuilding) throw ApiError.badRequest('বিল্ডিংটি পাওয়া যায়নি।');
+    }
+
+    // Either a real unit/building, a linked listing, or a manually typed name.
+    // The last of these is the legacy path and stays supported for now.
+    if (!linkedBuilding && !propertyId && !(property && String(property).trim())) {
       throw ApiError.badRequest('প্রপার্টি আবশ্যক (লিস্টিং বাছুন অথবা নাম লিখুন)।');
     }
     // Lease dates are OPTIONAL, and an omitted end date means OPEN-ENDED — not
@@ -236,15 +329,23 @@ async function createBooking(req, res, next) {
       tenantId:         linkedTenantId,
       propertyId:       (propertyId && isObjectId(propertyId)) ? propertyId : null,
       inquiryId:        inquiryId && isObjectId(inquiryId) ? inquiryId : null,
-      property:         property || '',
-      location:         location || '',
+      // The relationship. `property` below is now a display label, kept in sync
+      // with the building's name but never used to find anything.
+      buildingId:       linkedBuilding ? linkedBuilding._id : null,
+      unitId:           linkedUnit ? linkedUnit._id : null,
+      property:         (linkedBuilding && linkedBuilding.name) || property || '',
+      location:         (linkedBuilding && linkedBuilding.address) || location || '',
       propertyType:     req.body.propertyType || propMeta.type || '',
       dealType:         resolvedDealType,
       ...(resolvedCommercialTerms ? { commercialTerms: resolvedCommercialTerms } : {}),
-      floorNumber:      floorNumber || '',
-      roomNumber:       roomNumber || '',
+      // Denormalised from the unit when there is one — the room record is the
+      // truth, and a booking that disagreed with it is how "room 301" ended up
+      // meaning two different rooms.
+      floorNumber:      linkedUnit ? String(linkedUnit.floor) : (floorNumber || ''),
+      roomNumber:       linkedUnit ? linkedUnit.roomNumber : (roomNumber || ''),
       tenant:           tenant || '',
       tenantPhone:      (tenantPhone && tenantPhone.trim().length >= 10) ? tenantPhone.trim() : null,
+      tenantProfile:    sanitiseTenantProfile(tenantProfile),
       tenantsCount:     Math.max(1, Number(tenantsCount) || 1),
       leaseStart:       effLeaseStart,
       leaseEnd:         effLeaseEnd,
@@ -311,7 +412,11 @@ async function createBooking(req, res, next) {
     // Invalidate insights cache so the host sees fresh analytics.
     invalidateInsightsCache(req.user._id);
 
-    return res.status(201).json({ booking });
+    // Hand back a signed photo link so the card the host just created can show
+    // the picture without waiting for a reload.
+    const out = booking.toJSON();
+    signBookingPhotos(out);
+    return res.status(201).json({ booking: out });
   } catch (err) {
     return next(err);
   }
@@ -343,6 +448,7 @@ async function listHostBookings(req, res, next) {
 
     bookings.forEach(b => {
       b.id = String(b._id);
+      // A linked account's own avatar always beats the landlord's intake photo.
       b.tenantAvatar = (b.tenantId && b.tenantId.avatar) || b.tenantAvatar || '';
       if (b.tenantId && b.tenantId._id) b.tenantId = b.tenantId._id;
       delete b._id;
@@ -350,6 +456,9 @@ async function listHostBookings(req, res, next) {
       if (Array.isArray(b.members)) {
         b.members.forEach((m) => { if (m && m._id) { m.id = String(m._id); delete m._id; } });
       }
+      // Intake photos are private assets — sign them for THIS landlord, who
+      // owns the booking. Nobody else ever receives a loadable link.
+      signBookingPhotos(b);
     });
     return res.json({ bookings });
   } catch (err) {
@@ -819,7 +928,16 @@ async function joinByInvite(req, res, next) {
       if (placeholder) {
         placeholder.userId = req.user._id;
         if (!placeholder.name && req.user.name) placeholder.name = req.user.name;
-        if (!placeholder.avatar && req.user.avatar) placeholder.avatar = req.user.avatar;
+        // THE PHOTO HAND-OVER. Until now this seat showed a picture the landlord
+        // took at intake. This person now has an account, so their own profile
+        // picture takes over and the landlord's copy is DELETED — not hidden.
+        // (This used to read `if (!placeholder.avatar)`, which did the opposite:
+        // the landlord's snapshot stuck permanently and the tenant's real
+        // profile picture was never shown.)
+        if (req.user.avatar) placeholder.avatar = req.user.avatar;
+        if (placeholder.tenantProfile) {
+          destroyTenantPhoto(placeholder.tenantProfile);
+        }
         member = placeholder;
       } else {
         booking.members.push({
@@ -833,6 +951,17 @@ async function joinByInvite(req, res, next) {
         });
         member = booking.members[booking.members.length - 1];
       }
+
+      // Same hand-over for a single-tenant lease (a flat or a room, which has
+      // no seats): if the person joining IS the primary tenant, the landlord's
+      // intake photo is deleted here too and their account takes over.
+      const isPrimaryTenant = (booking.tenantId && String(booking.tenantId) === String(req.user._id))
+        || (phoneCore(booking.tenantPhone) && phoneCore(booking.tenantPhone) === phoneCore(req.user.phone));
+      if (isPrimaryTenant) {
+        if (!booking.tenantId) booking.tenantId = req.user._id;
+        if (booking.tenantProfile) destroyTenantPhoto(booking.tenantProfile);
+      }
+
       await booking.save();
     }
 
@@ -859,4 +988,12 @@ module.exports = {
   updateMemberLedger,
   undoMemberLedger,
   joinByInvite,
+  // Shared with building.controller.js, which puts tenants INTO units. Exported
+  // rather than duplicated so there is one definition of what a member is and
+  // one sanitiser for a tenant profile — two copies would drift, and the
+  // "who counts as an occupant" rules are exactly where that hurts.
+  buildMemberFromInput,
+  sanitiseTenantProfile,
+  findMember,
+  uniqueInviteCode,
 };

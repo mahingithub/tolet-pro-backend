@@ -41,3 +41,12 @@ test_*.js
 test_*.cjs
 test_*.mjs
 capacitor.config.*
+
+tests/
+__tests__/
+*.test.js
+*.test.jsx
+*.spec.js
+*.spec.jsx
+*.test.ts
+*.spec.ts
