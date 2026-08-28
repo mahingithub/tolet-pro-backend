@@ -22,6 +22,9 @@ router.delete('/:id', requireAuth, ctrl.archiveBuilding);
 // Rooms live under their building.
 router.post('/:id/units', requireAuth, ctrl.createUnit);
 router.get('/:id/units',  requireAuth, ctrl.listUnits);
+// A whole floor in one go: "101 to 109". Existing rooms are skipped, not
+// treated as errors, so extending a range later just adds the new ones.
+router.post('/:id/units/bulk', requireAuth, ctrl.createUnitsBulk);
 
 module.exports = router;
 

@@ -36,24 +36,56 @@ async function applyPayment({ booking, member = null, monthKey, source = 'manual
   const status        = payment.status || 'full';
   const paymentSource = source === 'gateway' ? 'gateway' : 'manual';
 
+  // ── Payments ACCUMULATE within a month ────────────────────────────────────
+  // A month's entry holds the TOTAL received for that month. Rent ৳6,000 with
+  // ৳5,000 already banked, then ৳1,000 arrives: the entry must become ৳6,000
+  // settled, not ৳1,000 with ৳5,000 still owing. Writing the entry wholesale
+  // made every later payment erase the earlier one.
+  //
+  // `amountReceived` is what arrived THIS time. When it is absent the caller is
+  // an older client sending a finished total, and we store that as before.
+  const ledgerHolder = member || booking;
+  const existing = (ledgerHolder.ledger && ledgerHolder.ledger.get)
+    ? ledgerHolder.ledger.get(monthKey)
+    : null;
+  const bankedAlready = (existing && (existing.paid || existing.status === 'partial'))
+    ? Math.max(0, Number(existing.amount) || 0)
+    : 0;
+
+  const isPayment = PAID_STATUSES.includes(status);
+  const increment = Number(payment.amountReceived);
+  const totalDue  = Math.max(0, Number(payment.totalDue) || 0);
+
+  let resolvedAmount  = Number(payment.amount) || 0;
+  let resolvedBalance = Number(payment.balance) || 0;
+  let resolvedStatus  = status;
+
+  if (isPayment && Number.isFinite(increment)) {
+    resolvedAmount  = bankedAlready + Math.max(0, increment);
+    resolvedBalance = totalDue > 0 ? Math.max(0, totalDue - resolvedAmount) : 0;
+    // Derived from the money, not from which button the landlord pressed.
+    if (totalDue > 0) resolvedStatus = resolvedBalance <= 0 ? 'full' : 'partial';
+  }
+
   const entry = {
-    paid:          PAID_STATUSES.includes(status),
-    status,
+    paid:          PAID_STATUSES.includes(resolvedStatus),
+    status:        resolvedStatus,
     paidOn:        payment.paidOn || '',
     method:        payment.method || '',
     txnId:         payment.txnId || '',
-    amount:        Number(payment.amount) || 0,
-    balance:       Number(payment.balance) || 0,
+    amount:        resolvedAmount,
+    balance:       resolvedBalance,
     lateFee:       Number(payment.lateFee) || 0,
     dueNote:       payment.dueNote || '',
     expectedPayBy: payment.expectedPayBy || '',
     paymentSource,
   };
 
-  // Write to the member's ledger when a member is given, else the legacy
-  // booking-level ledger. The member is embedded in the booking, so saving the
-  // booking persists either path; markModified guards the nested-Map change.
-  const ledgerHolder = member || booking;
+  // Written to the member's ledger when a member is given, else the legacy
+  // booking-level ledger (`ledgerHolder` is resolved above, where the existing
+  // entry is read so this payment can be added to it). The member is embedded
+  // in the booking, so saving the booking persists either path; markModified
+  // guards the nested-Map change.
   ledgerHolder.ledger.set(monthKey, entry);
   if (member) booking.markModified('members');
   await booking.save();
@@ -100,12 +132,17 @@ async function applyPayment({ booking, member = null, monthKey, source = 'manual
           landlordName:  landlord?.name  || '',
           landlordPhone: landlord?.phone || '',
           monthLabel:    payment.monthLabel || monthKey,
-          status,
+          // Read off the entry that was actually stored, not off the request.
+          // The tenant's receipt and the landlord's ledger have to agree about
+          // how much of the month has been settled — quoting the request would
+          // hand the tenant a receipt for the last ৳1,000 while the ledger says
+          // ৳6,000 is paid.
+          status:        entry.status,
           monthlyRent:   rentAmount,
           serviceCharge: svcAmount,
           totalDue:      Number(payment.totalDue) || (rentAmount + svcAmount) || 0,
-          totalPaid:     Number(payment.amount) || 0,
-          balance:       Number(payment.balance) || 0,
+          totalPaid:     entry.amount,
+          balance:       entry.balance,
           method:        payment.method || '',
           txnId:         payment.txnId || '',
           paidOn:        payment.paidOn || '',

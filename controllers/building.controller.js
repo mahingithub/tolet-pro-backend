@@ -55,6 +55,48 @@ function sortUnits(units) {
   return units.sort((x, y) => (x.floor - y.floor) || compareRoomNumbers(x.roomNumber, y.roomNumber));
 }
 
+// ── Room ranges ─────────────────────────────────────────────────────────────
+// "101 to 109" is nine rooms. A floor is built in one go in the real world, so
+// creating it one room at a time is thirty forms for a thirty-room building.
+//
+// The rule is deliberately narrow so it can be mirrored exactly in the UI's
+// preview: the two ends must share the same non-digit prefix and suffix, and
+// only the number between them moves. Zero padding is preserved, because "007"
+// and "7" are different doors.
+//
+// Mirrored by expandRoomRange() in the frontend's UnitsManager. Keep in step.
+const ROOM_RANGE_MAX = 200;
+
+function expandRoomRange(from, to) {
+  const a = String(from || '').trim();
+  const b = String(to || '').trim();
+  if (!a || !b) throw ApiError.badRequest('রুম নম্বরের শুরু ও শেষ দুটোই দিন।');
+
+  const shape = /^(\D*)(\d+)(\D*)$/;
+  const ma = shape.exec(a);
+  const mb = shape.exec(b);
+  if (!ma || !mb) throw ApiError.badRequest('রুম নম্বরে অন্তত একটি সংখ্যা থাকতে হবে (যেমন ১০১ বা A1)।');
+  if (ma[1] !== mb[1] || ma[3] !== mb[3]) {
+    throw ApiError.badRequest('শুরু ও শেষের গঠন এক হতে হবে — যেমন A101 থেকে A109।');
+  }
+
+  const start = parseInt(ma[2], 10);
+  const end   = parseInt(mb[2], 10);
+  if (end < start) throw ApiError.badRequest('শেষ নম্বরটি শুরুর চেয়ে বড় হতে হবে।');
+  const count = end - start + 1;
+  if (count > ROOM_RANGE_MAX) {
+    throw ApiError.badRequest(`একবারে সর্বোচ্চ ${ROOM_RANGE_MAX}টি রুম — পরিসরটি ছোট করুন।`);
+  }
+
+  // "007" keeps its width; "7" does not gain one.
+  const width = ma[2].length;
+  const pad = (n) => (ma[2].startsWith('0') ? String(n).padStart(width, '0') : String(n));
+
+  const out = [];
+  for (let n = start; n <= end; n += 1) out.push(`${ma[1]}${pad(n)}${ma[3]}`);
+  return out;
+}
+
 // Load a building the caller actually owns. Everything else 404s rather than
 // 403s — a landlord has no business learning that someone else's id exists.
 async function ownedBuilding(req, id) {
@@ -241,6 +283,61 @@ async function createUnit(req, res, next) {
   } catch (err) {
     if (err && err.code === 11000) {
       return next(ApiError.badRequest('এই ফ্লোরে এই রুম নম্বরটি আগে থেকেই আছে।'));
+    }
+    return next(err);
+  }
+}
+
+// ── POST /api/buildings/:id/units/bulk ──────────────────────────────────────
+// A whole floor at once: "101 to 109" creates nine rooms sharing one set of
+// terms. Rooms that already exist are SKIPPED, not treated as failures — a
+// landlord extending 101–109 to 101–115 should get the six new ones without
+// having to work out which six those are.
+async function createUnitsBulk(req, res, next) {
+  try {
+    const building = await ownedBuilding(req, req.params.id);
+    const { from, to, floor, seatCapacity, monthlyRent, serviceCharge, rentDueDay, suitableFor, notes } = req.body || {};
+
+    const flr = Number(floor);
+    if (!Number.isFinite(flr)) throw ApiError.badRequest('ফ্লোর নম্বর আবশ্যক।');
+
+    const roomNumbers = expandRoomRange(from, to);
+
+    const seats = building.rentedAs === 'seat'
+      ? Math.min(60, Math.max(1, Number(seatCapacity) || 1))
+      : 1;
+    const shared = {
+      buildingId:  building._id,
+      landlordId:  req.user._id,
+      floor:       Math.round(flr),
+      seatCapacity: seats,
+      suitableFor: SUITABLE_FOR.includes(suitableFor) ? suitableFor : '',
+      monthlyRent:   monthlyRent   !== undefined && monthlyRent   !== '' ? Math.max(0, Number(monthlyRent))   : building.defaultMonthlyRent,
+      serviceCharge: serviceCharge !== undefined && serviceCharge !== '' ? Math.max(0, Number(serviceCharge)) : building.defaultServiceCharge,
+      rentDueDay:    Number(rentDueDay) ? Math.min(28, Math.max(1, Number(rentDueDay))) : building.defaultRentDueDay,
+      notes: String(notes || '').trim(),
+    };
+
+    // One query, not one per room.
+    const existing = await Unit.find({
+      buildingId: building._id, floor: shared.floor, roomNumber: { $in: roomNumbers }, status: 'active',
+    }).select('roomNumber').lean();
+    const taken = new Set(existing.map((u) => u.roomNumber));
+
+    const toCreate = roomNumbers.filter((n) => !taken.has(n));
+    const created = toCreate.length
+      ? await Unit.insertMany(toCreate.map((roomNumber) => ({ ...shared, roomNumber })), { ordered: false })
+      : [];
+
+    return res.status(201).json({
+      created: created.length,
+      skipped: roomNumbers.length - toCreate.length,
+      skippedRooms: roomNumbers.filter((n) => taken.has(n)),
+      units: sortUnits(created.map((u) => u.toJSON())),
+    });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return next(ApiError.badRequest('এই ফ্লোরে কিছু রুম নম্বর আগে থেকেই আছে।'));
     }
     return next(err);
   }
@@ -614,6 +711,8 @@ module.exports = {
   updateBuilding,
   archiveBuilding,
   createUnit,
+  createUnitsBulk,
+  expandRoomRange,
   listUnits,
   updateUnit,
   archiveUnit,
