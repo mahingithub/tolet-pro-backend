@@ -412,6 +412,10 @@ function tenantInputFrom(body = {}) {
     // A seat may carry its own rent; blank means it takes an equal share of the
     // room rent, which is resolved at display time, not stored.
     monthlyRent: Number(body.monthlyRent) > 0 ? Number(body.monthlyRent) : 0,
+    // Optional: the caller can name the seat (the replace flow reuses the
+    // outgoing occupant's). Left blank, placeTenantInUnit assigns the lowest
+    // free one.
+    seatLabel: String(body.seatLabel || '').trim().slice(0, 40),
   };
 }
 
@@ -436,9 +440,33 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
     // more useful than silently creating a parallel booking (which is exactly
     // what the old flow did).
     if (booking && activeMembers(booking).length >= capacity) {
-      throw ApiError.badRequest(isSeat
-        ? 'এই রুমের সব সিট পূর্ণ — কোনো সিটের ভাড়াটিয়া বদলান।'
-        : 'এই ইউনিটে ভাড়াটিয়া আছেন — পুরোনো ভাড়াটিয়া বদলান।');
+      if (isSeat) {
+        throw ApiError.badRequest(`এই রুমে ${capacity}টি সিটই পূর্ণ — সিট সংখ্যা বাড়ান, অথবা কোনো সিটের ভাড়াটিয়া বদলান।`);
+      }
+      // "Replace the old tenant" is the wrong instruction when a hostel ledger
+      // has been scanned into a flat building: the roommates are not
+      // replacements, the building was simply set up as whole-unit. Say which
+      // of the two it actually is.
+      throw ApiError.badRequest(
+        'এই ইউনিটে ইতিমধ্যে একজন ভাড়াটিয়া আছেন। একই ইউনিটে একাধিক জন রাখতে হলে বিল্ডিংটি "সিট হিসেবে" তৈরি করতে হবে; নয়তো পুরোনো ভাড়াটিয়া বদলান।',
+      );
+    }
+
+    // Which seat this person takes. Assigned HERE, centrally, so every writer
+    // gets one — the AI scanner was producing members with a blank seatLabel,
+    // and only the old lease form ever set one. The lowest free number within
+    // capacity is used, so a seat vacated by a move-out is filled again rather
+    // than the count simply climbing.
+    let seatLabel = String(input.seatLabel || '').trim();
+    if (isSeat && !seatLabel) {
+      const taken = new Set(activeMembers(booking).map((m) => String(m.seatLabel || '').trim()).filter(Boolean));
+      for (let n = 1; n <= capacity; n += 1) {
+        const candidate = `Seat ${n}`;
+        if (!taken.has(candidate)) { seatLabel = candidate; break; }
+      }
+      // Capacity is about to grow past its own labels (the scanner does this as
+      // more names in one room turn up); fall back to the next number up.
+      if (!seatLabel) seatLabel = `Seat ${activeMembers(booking).length + 1}`;
     }
 
     const member = await bookingCtrl().buildMemberFromInput(
@@ -450,6 +478,7 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
         rentType: isSeat ? 'seat' : (building.rentedAs === 'room' ? 'room' : 'flat'),
         floor: String(unit.floor),
         roomLabel: unit.roomNumber,
+        seatLabel,
         joinDate: input.moveInDate,
       },
       // A seat inherits nothing by default: leaving monthlyRent at 0 is what

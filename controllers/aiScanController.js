@@ -355,9 +355,11 @@ async function batchCreateBookings(req, res, next) {
               landlordId: req.user._id,
               floor,
               roomNumber,
-              // A seat building's room gets room for the people the page shows;
-              // grown below as more names in the same room turn up.
-              seatCapacity: building.rentedAs === 'seat' ? 1 : 1,
+              // Starts at one and grows below as more names in the same room
+              // turn up. Guessing higher would invent vacant seats that may not
+              // exist; the page is the only evidence of how many people are
+              // actually in the room.
+              seatCapacity: 1,
               monthlyRent:   Number(t.monthlyRent) > 0 ? Number(t.monthlyRent) : building.defaultMonthlyRent,
               serviceCharge: building.defaultServiceCharge,
               rentDueDay:    Number(t.rentDueDay) || building.defaultRentDueDay,

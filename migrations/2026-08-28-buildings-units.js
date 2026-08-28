@@ -131,6 +131,15 @@ async function migrateBuildings() {
   ]);
   log(`  ${groups.length} distinct building name(s) across all landlords`);
 
+  // Several spellings of one name ("Sky View Tower", "sky view tower ") collapse
+  // to a single building, and whichever row arrived first would otherwise
+  // supply its display name — so the landlord could end up with an all-lowercase
+  // building, or a different one on every run. $group returns no guaranteed
+  // order, so impose one: the most-used spelling wins, ties broken
+  // alphabetically. Deterministic, and it picks the spelling they wrote most.
+  groups.sort((a, b) => (b.count - a.count)
+    || String(a._id.name || '').localeCompare(String(b._id.name || '')));
+
   const index = new Map();
   let created = 0, reused = 0;
 
