@@ -243,6 +243,31 @@ function occupancyOf(unit, building, booking) {
   return { capacity, taken, free: Math.max(0, capacity - taken) };
 }
 
+// Every active room in a building with its vacancy, in the order a person
+// walking the stairs would meet them. Shared by the universal-link picker and
+// the room-shift picker so a room that looks free on one cannot look full on
+// the other.
+async function roomsForBuilding(building) {
+  const units = await Unit.find({ buildingId: building._id, status: 'active' }).lean();
+  const bookings = await Booking.find({
+    unitId: { $in: units.map((u) => u._id) },
+    status: { $nin: ['cancelled', 'completed'] },
+  }).select('unitId members').lean();
+
+  const byUnit = new Map(bookings.map((b) => [String(b.unitId), b]));
+  return units
+    .map((u) => ({
+      id: String(u._id),
+      floor: u.floor,
+      floorLabel: floorLabel(u.floor),
+      roomNumber: u.roomNumber,
+      monthlyRent: u.monthlyRent,
+      ...occupancyOf(u, building, byUnit.get(String(u._id))),
+    }))
+    .sort((a, b) => (a.floor - b.floor)
+      || buildingCtrl().compareRoomNumbers(a.roomNumber, b.roomNumber));
+}
+
 // ── GET /api/invite/resolve/:token ──────────────────────────────────────────
 // PUBLIC. What the tenant sees before they commit to anything: whose building
 // this is, and (for a universal link) which rooms they can pick from.
@@ -300,26 +325,7 @@ async function resolveInvite(req, res, next) {
     }
 
     // Universal link — every active room, with its vacancy, for the picker.
-    const units = await Unit.find({ buildingId: building._id, status: 'active' }).lean();
-    const bookings = await Booking.find({
-      unitId: { $in: units.map((u) => u._id) },
-      status: { $nin: ['cancelled', 'completed'] },
-    }).select('unitId members').lean();
-
-    const byUnit = new Map(bookings.map((b) => [String(b.unitId), b]));
-    const rooms = units
-      .map((u) => ({
-        id: String(u._id),
-        floor: u.floor,
-        floorLabel: floorLabel(u.floor),
-        roomNumber: u.roomNumber,
-        monthlyRent: u.monthlyRent,
-        ...occupancyOf(u, building, byUnit.get(String(u._id))),
-      }))
-      .sort((a, b) => (a.floor - b.floor)
-        || buildingCtrl().compareRoomNumbers(a.roomNumber, b.roomNumber));
-
-    return res.json({ invite: { ...base, rooms } });
+    return res.json({ invite: { ...base, rooms: await roomsForBuilding(building) } });
   } catch (err) {
     return next(err);
   }
@@ -421,6 +427,20 @@ async function submitOnboarding(req, res, next) {
       doc.bookingId = placed.booking._id;
       doc.memberId  = placed.memberId;
       doc.decidedAt = new Date();
+
+      // They are in. Everywhere they used to be is now somewhere they used to
+      // be — see closeOtherTenancies(). Only on the immediate path; a pending
+      // submission is a claim, not a move, and closing the old landlord's
+      // record on a claim the new landlord has not accepted yet would leave
+      // someone with no tenancy at all if it were declined.
+      await settleMoveOut({
+        tenantUserId:  req.user._id,
+        tenantPhone:   phone,
+        tenantName:    name,
+        keepBookingId: placed.booking._id,
+        when:          doc.moveInDate,
+        reason:        `${name} নতুন বাসায় উঠেছেন।`,
+      });
     }
 
     const onboarding = await TenantOnboarding.create(doc);
@@ -534,6 +554,152 @@ async function attachToUnit({
   return { booking: out.booking, memberId: out.memberId };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Leaving a room
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// NOTHING HERE DELETES ANYTHING. A tenancy ends by being stamped with a
+// move-out date, never by being removed, because the landlord's question six
+// months later is "who was in 301 last winter and until when" — and the rent
+// ledger, the receipts and the NID that answer it all hang off the member row.
+// `status: 'moved-out'` is what every live view already filters on
+// (building.controller, RentTab, MembersManager), so closing a row takes it out
+// of circulation everywhere at once while leaving the history intact.
+
+/**
+ * End one person's occupancy of one booking.
+ *
+ * Handles both shapes a tenancy comes in:
+ *   • members[] — the normal case. Their member row is closed; co-occupants of
+ *     a hostel room are untouched.
+ *   • a LEGACY single-tenant booking with an empty members[], matched by
+ *     tenantId / tenantPhone. There is no row to close, so the booking itself
+ *     is completed and leaseEnd stamped — which is what the Booking model
+ *     already documents as "the host handed the unit over".
+ *
+ * @returns {boolean} whether anything actually changed.
+ */
+function closeMembership(booking, tenantUserId, tenantPhone, when) {
+  const core = phoneCore(tenantPhone);
+  let touched = false;
+
+  (booking.members || []).forEach((m) => {
+    if (!m || m.status === 'moved-out') return;
+    const mine = (m.userId && String(m.userId) === String(tenantUserId))
+      || (core && phoneCore(m.phone) === core);
+    if (!mine) return;
+    m.status = 'moved-out';
+    m.moveOutDate = when;
+    touched = true;
+  });
+
+  if (touched) {
+    booking.markModified('members');
+    // The unit is empty now. A whole-unit let mirrors its occupant into the
+    // booking's own tenant fields, and listTenantBookings matches on those, so
+    // leaving them set would keep handing the ex-tenant a live card for a room
+    // they no longer live in.
+    if (activeMembers(booking).length === 0) {
+      booking.status  = 'completed';
+      booking.leaseEnd = booking.leaseEnd || when;
+    }
+    return true;
+  }
+
+  // Legacy row: no members[] at all, the tenant is the booking.
+  const isLegacyTenant = (booking.tenantId && String(booking.tenantId) === String(tenantUserId))
+    || (core && phoneCore(booking.tenantPhone) === core);
+  if (!booking.members?.length && isLegacyTenant && booking.status !== 'completed') {
+    booking.status   = 'completed';
+    booking.leaseEnd = booking.leaseEnd || when;
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * The tenant moved house. Close every OTHER tenancy they still hold.
+ *
+ * This is the "two cards" fix. Without it, joining a new landlord left the
+ * previous landlord's booking live on the tenant's dashboard forever — a second
+ * rent card, a second set of dues, for a room they had already left. Nobody was
+ * going to go back and tidy that up by hand: the old landlord has no reason to
+ * think about a tenant who has gone, and the tenant has no button.
+ *
+ * ASSUMPTION, MADE ON PURPOSE: a person lives in one place. Joining somewhere
+ * new is read as leaving everywhere else. That is right for the case this
+ * serves and wrong for the rare tenant who genuinely holds two lets at once
+ * (a shop and a home); they would have to be re-added by the landlord, which is
+ * a landlord-side action that still exists. The rent history survives either
+ * way, so the cost of being wrong is a re-add, not lost data.
+ *
+ * The landlord being left is TOLD. They are losing a tenant off their register
+ * without touching anything, and finding that out by noticing an empty row
+ * later is not acceptable.
+ */
+async function closeOtherTenancies({ tenantUserId, tenantPhone, keepBookingId, when }) {
+  const core = phoneCore(tenantPhone);
+  const match = [{ 'members.userId': tenantUserId }, { tenantId: tenantUserId }];
+  if (core) {
+    match.push({ 'members.phone': new RegExp(`${core}$`) });
+    match.push({ tenantPhone: new RegExp(`${core}$`) });
+  }
+
+  const others = await Booking.find({
+    _id: { $ne: keepBookingId },
+    status: { $nin: ['cancelled', 'completed'] },
+    deletedAt: null,
+    $or: match,
+  });
+
+  const closed = [];
+  for (const booking of others) {
+    if (!closeMembership(booking, tenantUserId, tenantPhone, when)) continue;
+    await booking.save();
+    closed.push(booking);
+  }
+  return closed;
+}
+
+/**
+ * Run after a tenant has been placed in a unit: close everything they left
+ * behind and tell the landlords who lost them. Best-effort by design — the
+ * placement itself has already committed, and a failure to tidy up the OLD
+ * tenancy must never surface as "joining failed" to someone who has joined.
+ */
+async function settleMoveOut({ tenantUserId, tenantPhone, tenantName, keepBookingId, when, reason }) {
+  try {
+    const closed = await closeOtherTenancies({
+      tenantUserId, tenantPhone, keepBookingId, when,
+    });
+    for (const booking of closed) {
+      await notifyLandlordOfMoveOut({ booking, tenantName, reason }).catch(() => {});
+    }
+    return closed;
+  } catch (err) {
+    console.warn('[invite] closing previous tenancies failed:', err.message);
+    return [];
+  }
+}
+
+async function notifyLandlordOfMoveOut({ booking, tenantName, reason }) {
+  const where = [booking.property, booking.roomNumber ? `রুম ${booking.roomNumber}` : '']
+    .filter(Boolean).join(' — ');
+  await notifications.emit({
+    userId: booking.landlordId,
+    type:   'tenant_onboarding',
+    title:  `${tenantName} বাসা ছেড়েছেন`,
+    body:   `${where} — ${reason} রেকর্ড ও ভাড়ার হিসাব মুছে যায়নি, আগের মতোই দেখতে পাবেন।`,
+    data: {
+      audience:  'landlord',
+      bookingId: String(booking._id),
+      kind:      'move_out',
+    },
+  });
+  notifySocket(booking.landlordId, 'rent:updated', { bookingId: String(booking._id) });
+}
+
 async function notifyLandlordOfSubmission({ onboarding, building, unit, tenantName }) {
   const where = `${building.name} — ${floorLabel(unit.floor)}, রুম ${unit.roomNumber}`;
   const pending = onboarding.status === 'pending';
@@ -580,6 +746,9 @@ async function listOnboardings(req, res, next) {
       .limit(100)
       .populate('unitId', 'floor roomNumber')
       .populate('buildingId', 'name')
+      // A shift row is answering a different question — "may they move from 301
+      // to 204" — and the landlord cannot answer it without being told 301.
+      .populate('fromUnitId', 'floor roomNumber')
       .lean();
 
     // An NID scan / intake photo is a private Cloudinary asset — the stored URL
@@ -605,6 +774,10 @@ async function listOnboardings(req, res, next) {
       out.unitId     = out.unit ? String(out.unit._id) : out.unitId;
       out.buildingId = out.building ? String(out.building._id) : out.buildingId;
       if (out.unit) out.unit.floorLabel = floorLabel(out.unit.floor);
+
+      out.fromUnit = out.fromUnitId && typeof out.fromUnitId === 'object' ? out.fromUnitId : null;
+      out.fromUnitId = out.fromUnit ? String(out.fromUnit._id) : out.fromUnitId;
+      if (out.fromUnit) out.fromUnit.floorLabel = floorLabel(out.fromUnit.floor);
       return out;
     });
 
@@ -653,6 +826,21 @@ async function approveOnboarding(req, res, next) {
     row.memberId  = placed.memberId;
     row.decidedAt = new Date();
     await row.save();
+
+    // The room they are leaving. A shift names it explicitly (fromBookingId);
+    // a plain join leaves behind whatever else they were still in. Either way
+    // this runs AFTER the save above, so a tenant is never momentarily in
+    // neither room.
+    await settleMoveOut({
+      tenantUserId:  row.tenantId,
+      tenantPhone:   row.phone,
+      tenantName:    row.name,
+      keepBookingId: placed.booking._id,
+      when:          row.moveInDate || new Date(),
+      reason: row.kind === 'shift'
+        ? `${row.name} একই বিল্ডিংয়ে অন্য রুমে গেছেন।`
+        : `${row.name} নতুন বাসায় উঠেছেন।`,
+    });
 
     await notifications.emit({
       userId: row.tenantId,
@@ -724,6 +912,204 @@ async function listMySubmissions(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Shifting room — 301 to 204, same building
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// WHY THIS IS NOT "JOIN AGAIN"
+// Before this, a tenant who moved down a floor had exactly one route: re-scan
+// the building QR and fill the eleven-field form a second time. That produced a
+// SECOND live tenancy for one person — two cards on their dashboard, two sets
+// of dues, two rows on the landlord's register — and nothing ever closed the
+// first one, because the old room's landlord is the same person who has just
+// been handed the new one and has no reason to go looking.
+//
+// A shift is one action instead: it carries the profile they already gave
+// across (nobody retypes their father's name to move down a floor), asks only
+// for what actually changed — which room, from when, at what rent — and closes
+// the old row on approval, in the same request that opens the new one.
+//
+// IT STILL NEEDS THE LANDLORD'S YES, for the same reason a building-link join
+// does: the tenant knows they have moved, but only the landlord knows whether
+// 204 was theirs to move into.
+
+/** The caller's own live member row in a booking, or null. */
+function myMemberIn(booking, userId, phone) {
+  const core = phoneCore(phone);
+  return activeMembers(booking).find((m) => (m.userId && String(m.userId) === String(userId))
+    || (core && phoneCore(m.phone) === core)) || null;
+}
+
+// ── GET /api/invite/shift/:bookingId/rooms ──────────────────────────────────
+// Where this tenant could move to. Their own building, their own tenancy —
+// the bookingId is checked against their membership, not taken on trust, so
+// this cannot be used to enumerate the rooms of a building they have nothing
+// to do with.
+async function shiftOptions(req, res, next) {
+  try {
+    const { bookingId } = req.params;
+    if (!isObjectId(bookingId)) throw ApiError.notFound('আপনার এই ভাড়ার হিসাব পাওয়া যায়নি।');
+
+    const booking = await Booking.findOne({
+      _id: bookingId,
+      status: { $nin: ['cancelled', 'completed'] },
+      deletedAt: null,
+    });
+    if (!booking) throw ApiError.notFound('আপনার এই ভাড়ার হিসাব পাওয়া যায়নি।');
+
+    const mine = myMemberIn(booking, req.user._id, req.user.phone);
+    const legacyMine = !booking.members?.length
+      && ((booking.tenantId && String(booking.tenantId) === String(req.user._id))
+        || (phoneCore(req.user.phone) && phoneCore(booking.tenantPhone) === phoneCore(req.user.phone)));
+    if (!mine && !legacyMine) throw ApiError.forbidden('এটি আপনার ভাড়ার হিসাব নয়।');
+
+    if (!booking.buildingId) {
+      throw ApiError.badRequest('এই ভাড়াটি কোনো বিল্ডিংয়ের সাথে যুক্ত নয় — বাড়িওয়ালাকে বলুন।');
+    }
+    const building = await Building.findById(booking.buildingId);
+    if (!building || building.status !== 'active') {
+      throw ApiError.badRequest('বিল্ডিংটি আর নেই।');
+    }
+
+    const rooms = await roomsForBuilding(building);
+    return res.json({
+      shift: {
+        buildingId:   String(building._id),
+        buildingName: building.name,
+        address:      building.address || '',
+        rentedAs:     building.rentedAs,
+        // The room they are in now, so the picker can grey it out and the
+        // confirmation can read "301 → 204" rather than just "204".
+        fromUnitId:   booking.unitId ? String(booking.unitId) : '',
+        fromLabel:    [floorLabel(booking.floorNumber), booking.roomNumber && `রুম ${booking.roomNumber}`]
+          .filter(Boolean).join(' · '),
+        rooms,
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ── POST /api/invite/shift ──────────────────────────────────────────────────
+// "I have moved to 204." Goes into the same queue a QR join does.
+async function requestShift(req, res, next) {
+  try {
+    const fromBookingId = String(req.body.bookingId || '');
+    const toUnitId      = String(req.body.toUnitId || '');
+    if (!isObjectId(fromBookingId)) throw ApiError.badRequest('আপনার বর্তমান ভাড়ার হিসাব পাওয়া যায়নি।');
+    if (!isObjectId(toUnitId))      throw ApiError.badRequest('আপনি কোন রুমে গেছেন সেটি বেছে নিন।');
+
+    const from = await Booking.findOne({
+      _id: fromBookingId,
+      status: { $nin: ['cancelled', 'completed'] },
+      deletedAt: null,
+    });
+    if (!from) throw ApiError.notFound('আপনার এই ভাড়ার হিসাব পাওয়া যায়নি।');
+
+    const mine = myMemberIn(from, req.user._id, req.user.phone);
+    const legacyMine = !from.members?.length
+      && ((from.tenantId && String(from.tenantId) === String(req.user._id))
+        || (phoneCore(req.user.phone) && phoneCore(from.tenantPhone) === phoneCore(req.user.phone)));
+    if (!mine && !legacyMine) throw ApiError.forbidden('এটি আপনার ভাড়ার হিসাব নয়।');
+
+    if (String(from.unitId || '') === toUnitId) {
+      throw ApiError.badRequest('আপনি তো এই রুমেই আছেন — অন্য একটি রুম বেছে নিন।');
+    }
+
+    // The destination must be a real, active room in the SAME building. A shift
+    // is a move within one landlord's building; going somewhere else is a join,
+    // and joins go through the QR / link with that building's own token.
+    const toUnit = await Unit.findOne({
+      _id: toUnitId, buildingId: from.buildingId, status: 'active',
+    });
+    if (!toUnit) throw ApiError.badRequest('এই বিল্ডিংয়ে এই রুমটি পাওয়া যায়নি।');
+
+    const building = await Building.findById(from.buildingId);
+    if (!building) throw ApiError.badRequest('বিল্ডিংটি আর নেই।');
+
+    const pendingAlready = await TenantOnboarding.findOne({
+      tenantId: req.user._id, buildingId: building._id, unitId: toUnit._id, status: 'pending',
+    });
+    if (pendingAlready) {
+      throw ApiError.badRequest('আপনার আবেদন ইতিমধ্যে জমা আছে — বাড়িওয়ালার অনুমোদনের অপেক্ষায়।');
+    }
+
+    // WHAT CARRIES OVER, AND WHY IT IS NOT RE-ASKED.
+    // Their name, number, NID, photo, profession and emergency contact are
+    // already on the row they are leaving — the landlord has had them for
+    // months. Asking again to move down a floor is exactly the paper-form
+    // busywork this whole feature exists to delete. Only the things that
+    // genuinely changed come off the request body.
+    const carried = mine
+      ? (mine.tenantProfile ? mine.tenantProfile.toObject() : {})
+      : (from.tenantProfile ? from.tenantProfile.toObject() : {});
+    // A tenant who wants to correct something while they are here may; blanks
+    // leave the carried value standing rather than wiping it.
+    const patch = bookingCtrl().sanitiseTenantProfile(req.body.tenantProfile);
+    const tenantProfile = { ...carried };
+    Object.keys(patch || {}).forEach((k) => {
+      if (patch[k] !== '' && patch[k] != null) tenantProfile[k] = patch[k];
+    });
+
+    const name  = String(req.body.name  || mine?.name  || from.tenant      || '').trim().slice(0, 100);
+    const phone = String(req.body.phone || mine?.phone || from.tenantPhone || '').trim().slice(0, 20);
+    if (!name) throw ApiError.badRequest('আপনার নাম লিখুন।');
+    if (phoneCore(phone).length < 10) throw ApiError.badRequest('সঠিক মোবাইল নম্বর লিখুন।');
+
+    const onboarding = await TenantOnboarding.create({
+      landlordId: building.landlordId,
+      tenantId:   req.user._id,
+      buildingId: building._id,
+      unitId:     toUnit._id,
+      // A shift is a claim about a room inside a building, which is exactly what
+      // a building-scoped submission is — so it waits, and it waits in the same
+      // queue rather than a second one the landlord has to remember to check.
+      scope:      'building',
+      kind:       'shift',
+      fromUnitId:    from.unitId || null,
+      fromBookingId: from._id,
+      fromMemberId:  mine ? mine._id : null,
+      name,
+      phone,
+      tenantProfile,
+      moveInDate: req.body.moveInDate ? new Date(req.body.moveInDate) : new Date(),
+      note:       String(req.body.note || '').trim().slice(0, 300),
+      status:     'pending',
+    });
+
+    await notifyLandlordOfShift({ onboarding, building, from, toUnit, tenantName: name });
+
+    return res.status(201).json({ onboarding });
+  } catch (err) {
+    if (err && err.code === 11000) {
+      return next(ApiError.badRequest('আপনার আবেদন ইতিমধ্যে জমা আছে — বাড়িওয়ালার অনুমোদনের অপেক্ষায়।'));
+    }
+    return next(err);
+  }
+}
+
+async function notifyLandlordOfShift({ onboarding, building, from, toUnit, tenantName }) {
+  const fromLabel = from.roomNumber ? `রুম ${from.roomNumber}` : 'আগের রুম';
+  const toLabel   = `${floorLabel(toUnit.floor)}, রুম ${toUnit.roomNumber}`;
+  await notifications.emit({
+    userId: building.landlordId,
+    type:   'tenant_onboarding',
+    title:  `${tenantName} রুম বদলেছেন — অনুমোদন দিন`,
+    body:   `${building.name} — ${fromLabel} থেকে ${toLabel}। অনুমোদন দিলে আগের রুমের হিসাব বন্ধ হয়ে নতুন রুমে চালু হবে।`,
+    data: {
+      audience:     'landlord',
+      kind:         'shift',
+      onboardingId: String(onboarding._id),
+      buildingId:   String(building._id),
+      unitId:       String(toUnit._id),
+      fromUnitId:   from.unitId ? String(from.unitId) : null,
+      status:       onboarding.status,
+    },
+  });
+  notifySocket(building.landlordId, 'rent:updated', { bookingId: String(from._id) });
+}
+
 module.exports = {
   getBuildingInvite,
   getUnitInvite,
@@ -736,7 +1122,10 @@ module.exports = {
   approveOnboarding,
   rejectOnboarding,
   listMySubmissions,
+  shiftOptions,
+  requestShift,
   // exported for tests
   attachToUnit,
   findByToken,
+  closeOtherTenancies,
 };

@@ -486,6 +486,31 @@ async function listTenantBookings(req, res, next) {
     bookings.forEach(b => {
       b.id = String(b._id);
       delete b._id;
+
+      // ── IS THIS STILL MY HOME? ──────────────────────────────────────────
+      // The query above matches every booking this person was EVER attached
+      // to, and it has to: their member row is not deleted when they move out,
+      // because the rent ledger and receipts hang off it and the landlord is
+      // entitled to "who was in 301 last winter".
+      //
+      // What was missing is any way for the dashboard to tell the two apart.
+      // It filtered on `b.status !== 'cancelled'` — the BOOKING's status, not
+      // the viewer's own — so a tenant who had moved out months ago still saw
+      // a live rent card for the old room, with its dues counted in their
+      // total. Move somewhere new and you had two. That is the duplicate-card
+      // bug, and it is answered here rather than in the UI so every consumer
+      // (overview, payments, alerts, dues) gets the same answer.
+      const mineRow = (b.members || []).find((m) => (m.userId && String(m.userId) === String(req.user._id))
+        || (myPhoneCore && phoneCore(m.phone) === myPhoneCore));
+      const closedBooking = b.status === 'completed' || b.status === 'cancelled';
+      b.myMembership = {
+        memberId:    mineRow ? String(mineRow._id || mineRow.id) : null,
+        // A legacy single-tenant booking has no member row; the booking's own
+        // status is the only thing that can have ended it.
+        status:      mineRow ? (mineRow.status || 'active') : (closedBooking ? 'moved-out' : 'active'),
+        moveOutDate: mineRow ? (mineRow.moveOutDate || null) : (closedBooking ? (b.leaseEnd || null) : null),
+      };
+      b.isPastTenancy = b.myMembership.status === 'moved-out' || closedBooking;
       // Viewer scoping (Requirement 7.3): a tenant only sees THEIR OWN member
       // ledger. Co-tenants stay visible for context (name/space) but their
       // financial ledger is stripped so one occupant can't read another's rent.

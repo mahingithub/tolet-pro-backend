@@ -34,11 +34,16 @@ const unitRouter = express.Router();
 unitRouter.patch('/:unitId',  requireAuth, ctrl.updateUnit);
 unitRouter.delete('/:unitId', requireAuth, ctrl.archiveUnit);
 
-// Tenants live INSIDE a unit. These two never create a room, and never create a
-// second booking for a room that already has one — a hostel room's occupants
-// are members of its ONE booking, each with their own rent ledger.
+// Tenants live INSIDE a unit. None of these ever creates a room, and none ever
+// creates a second booking for a room that already has one — a hostel room's
+// occupants are members of its ONE booking, each with their own rent ledger.
 unitRouter.post('/:unitId/tenants', requireAuth, ctrl.addTenantToUnit);
-// Same seat, new person: the unit, its rent and the seat are untouched.
+// Same seat, NEW person: the unit, its rent and the seat are untouched.
 unitRouter.post('/:unitId/tenants/:memberId/replace', requireAuth, ctrl.replaceTenantInUnit);
+// SAME person, new room: 203 moves to 206. The mirror image of replace — there
+// the room stays and the person changes; here the person stays and the room
+// changes. `:memberId` may be the literal 'primary' for a legacy whole-unit
+// tenancy that predates members[].
+unitRouter.post('/:unitId/tenants/:memberId/shift', requireAuth, ctrl.shiftTenantToUnit);
 
 module.exports.unitRouter = unitRouter;

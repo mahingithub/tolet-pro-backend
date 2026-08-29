@@ -38,6 +38,12 @@ router.post('/onboardings/:id/reject',        requireAuth, ctrl.rejectOnboarding
 
 // ── Tenant ──────────────────────────────────────────────────────────────────
 router.get('/my-submissions',                 requireAuth, ctrl.listMySubmissions);
+
+// Moving room inside a building they are already in. Literal paths, so
+// 'shift' is never read as a :token.
+router.get('/shift/:bookingId/rooms',         requireAuth, ctrl.shiftOptions);
+router.post('/shift',                         requireAuth, ctrl.requestShift);
+
 // PUBLIC — see the header. Guessing a token means guessing 128 bits, and the
 // global /api limiter is the backstop against trying.
 router.get('/resolve/:token',                 ctrl.resolveInvite);

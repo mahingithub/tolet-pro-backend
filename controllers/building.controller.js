@@ -489,6 +489,28 @@ const activeMembers = (booking) => (Array.isArray(booking?.members)
   ? booking.members.filter((m) => m && m.status !== 'moved-out')
   : []);
 
+// Floor label the tenant will recognise. 0 is নিচতলা, not "floor 0". Same
+// wording invite.controller uses, so a room reads the same on the landlord's
+// screen and in the tenant's notification about it.
+function floorLabel(n) {
+  const f = Number(n);
+  if (f === 0) return 'নিচতলা';
+  if (f < 0) return `বেসমেন্ট ${Math.abs(f)}`;
+  return `${f} তলা`;
+}
+
+// Best-effort realtime nudge. A dashboard that refreshes a beat late is a much
+// smaller problem than a room move that fails because the socket was down.
+function notifySocket(userId, event, payload) {
+  try {
+    const { getIo, emitToUser } = require('../socket');
+    const io = getIo();
+    if (io) emitToUser(io, String(userId), event, payload);
+  } catch (err) {
+    console.warn('[building] socket emit failed:', err.message);
+  }
+}
+
 // Load a unit the caller owns, plus its building (which decides seat vs whole).
 async function ownedUnit(req, unitId) {
   if (!isObjectId(unitId)) throw ApiError.notFound('রুম পাওয়া যায়নি।');
@@ -717,6 +739,150 @@ async function replaceTenantInUnit(req, res, next) {
   }
 }
 
+// ── POST /api/units/:unitId/tenants/:memberId/shift ─────────────────────────
+// The SAME person, a DIFFERENT room. 203 moves to 206.
+//
+// WHY THIS IS THE LANDLORD'S BUTTON AND NOT THE TENANT'S
+// The tenant may not have the app, may not have a smartphone, and does not need
+// to know this software exists. The landlord holds the register — they are the
+// one who knows the tenant knocked on the door and said "I'm taking 206 from
+// the first". So the move is one action on the row that is already in front of
+// them: pick the new room, tap Shift. Nothing is retyped and nothing is
+// approved, because the person doing it is the authority the approval would
+// have been asking.
+//
+// (Tenants who DO have the app can ask for the same move themselves — that
+// goes through invite.controller's shift flow and waits for this same landlord
+// to say yes. Two doors, one outcome.)
+//
+// WHAT MOVES AND WHAT STAYS
+// Everything about the person moves: their account link, their NID, their
+// photo, their emergency contact, their phone. Their RENT HISTORY does not —
+// it stays on the row they are leaving, stamped moved-out, because "who was in
+// 203 last winter and what did they pay" is a question about 203. The new room
+// starts a clean ledger at the new rent.
+//
+// ORDER MATTERS. The new room is filled BEFORE the old one is closed. If the
+// destination turns out to be full, placeTenantInUnit throws and nothing has
+// changed — the tenant is still in 203. Closing first and then failing would
+// leave a real person in no room at all.
+async function shiftTenantToUnit(req, res, next) {
+  try {
+    const { unit: fromUnit, building } = await ownedUnit(req, req.params.unitId);
+
+    const toUnitId = String(req.body.toUnitId || '');
+    if (!isObjectId(toUnitId)) throw ApiError.badRequest('কোন রুমে সরাবেন সেটি বেছে নিন।');
+    if (String(fromUnit._id) === toUnitId) {
+      throw ApiError.badRequest('ভাড়াটিয়া তো এই রুমেই আছেন — অন্য একটি রুম বেছে নিন।');
+    }
+    // Its own ownership check, and its own building: a landlord may move a
+    // tenant between two buildings they own, and the destination's `rentedAs`
+    // is what decides seat vs whole-unit on arrival.
+    const { unit: toUnit, building: toBuilding } = await ownedUnit(req, toUnitId);
+
+    const fromBooking = await liveBookingForUnit(fromUnit._id);
+    if (!fromBooking) throw ApiError.notFound('এই রুমে চলমান কোনো লিজ নেই।');
+
+    // 'primary' is the LEGACY whole-unit tenancy: a booking written before
+    // members[] existed, where the tenant IS the booking. There is no member
+    // row to carry across, so the booking's own tenant fields are the person.
+    const isLegacy = String(req.params.memberId) === 'primary';
+    const outgoing = isLegacy ? null : bookingCtrl().findMember(fromBooking, req.params.memberId);
+    if (!isLegacy && (!outgoing || outgoing.status === 'moved-out')) {
+      throw ApiError.notFound('এই সিটে কোনো ভাড়াটিয়া নেই।');
+    }
+    if (isLegacy && fromBooking.members?.length) {
+      throw ApiError.badRequest('এই রুমের ভাড়াটিয়া বেছে নিন।');
+    }
+
+    const moveInDate = req.body.moveInDate ? new Date(req.body.moveInDate) : new Date();
+    const person = outgoing || {
+      name: fromBooking.tenant, phone: fromBooking.tenantPhone,
+      userId: fromBooking.tenantId, avatar: '',
+      tenantProfile: fromBooking.tenantProfile,
+    };
+
+    const name  = String(person.name  || '').trim();
+    const phone = String(person.phone || '').trim();
+    if (!name)  throw ApiError.badRequest('ভাড়াটিয়ার নাম পাওয়া যায়নি।');
+    if (!phone) throw ApiError.badRequest('ভাড়াটিয়ার মোবাইল নম্বর পাওয়া যায়নি।');
+
+    // NOTHING IS RETYPED. Every field below came off the row being left. The
+    // landlord collected it once, months ago; asking for it again to move
+    // someone down a floor is the paper-form busywork this replaces.
+    const out = await placeTenantInUnit({
+      landlordId: req.user._id,
+      unit: toUnit,
+      building: toBuilding,
+      input: {
+        name,
+        phone,
+        userId: person.userId || null,
+        tenantProfile: person.tenantProfile
+          ? (typeof person.tenantProfile.toObject === 'function'
+              ? person.tenantProfile.toObject()
+              : person.tenantProfile)
+          : {},
+        moveInDate,
+        // A blank rent lets the destination room's own terms apply — which is
+        // usually what a move means. The landlord may override.
+        monthlyRent: Number(req.body.monthlyRent) > 0 ? Number(req.body.monthlyRent) : 0,
+        seatLabel: String(req.body.seatLabel || '').trim().slice(0, 40),
+      },
+    });
+
+    // They are in 206. Now close 203 — kept, not deleted, so its ledger and
+    // receipts stay answerable.
+    if (outgoing) {
+      outgoing.status = 'moved-out';
+      outgoing.moveOutDate = moveInDate;
+      fromBooking.markModified('members');
+    }
+    const stillOccupied = (fromBooking.members || []).some((m) => m && m.status !== 'moved-out');
+    if (!stillOccupied) {
+      // The room is empty. A whole-unit let mirrors its occupant into the
+      // booking's own tenant fields, and the tenant dashboard matches on those
+      // — leaving them set would keep handing the tenant a live card for 203.
+      fromBooking.status   = 'completed';
+      fromBooking.leaseEnd = fromBooking.leaseEnd || moveInDate;
+    }
+    await fromBooking.save();
+
+    // Tell them, if they are on the platform. Their rent card is about to point
+    // at a different room, and finding that out by noticing is not good enough.
+    const movedUserId = person.userId;
+    if (movedUserId) {
+      try {
+        await require('../services/notification.service').emit({
+          userId: movedUserId,
+          type:   'tenant_onboarding',
+          title:  'আপনার রুম বদলানো হয়েছে',
+          body:   `${toBuilding.name} — ${floorLabel(toUnit.floor)}, রুম ${toUnit.roomNumber}. আপনার নতুন ভাড়ার হিসাব এখানেই দেখবেন। আগের রুমের রেকর্ড ও রিসিট মুছে যায়নি।`,
+          data: {
+            audience:  'tenant',
+            kind:      'shift',
+            bookingId: String(out.booking._id),
+            unitId:    String(toUnit._id),
+            fromUnitId: String(fromUnit._id),
+          },
+        });
+      } catch (err) {
+        console.warn('[building] shift notification failed:', err.message);
+      }
+      notifySocket(movedUserId, 'rent:updated', { bookingId: String(out.booking._id) });
+    }
+    notifySocket(req.user._id, 'rent:updated', { bookingId: String(out.booking._id) });
+
+    return res.json({
+      booking: out.booking,
+      memberId: out.memberId,
+      fromBookingId: String(fromBooking._id),
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   createBuilding,
   listBuildings,
@@ -733,6 +899,7 @@ module.exports = {
   tenantInputFrom,
   liveBookingForUnit,
   replaceTenantInUnit,
+  shiftTenantToUnit,
   // exported for the migration + tests
   compareRoomNumbers,
   sortUnits,

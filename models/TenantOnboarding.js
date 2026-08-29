@@ -57,6 +57,28 @@ const TenantOnboardingSchema = new mongoose.Schema(
     // The token as used, so a revoked token's submissions stay traceable.
     tokenUsed: { type: String, trim: true, default: '', maxlength: 64 },
 
+    // ── 'join' vs 'shift' ────────────────────────────────────────────────────
+    // A SHIFT is the same person moving from one room to another in a building
+    // they are already in — 301 to 204 — and it is a different question from a
+    // join even though it produces the same kind of member row.
+    //
+    // It rides this model rather than getting its own because the landlord's
+    // decision is identical in shape ("does this person belong in that room?"),
+    // and because the alternative — the tenant re-scanning the building QR and
+    // filling the whole form again — creates a SECOND live tenancy for one
+    // human, which is exactly the duplicate-card problem this is meant to end.
+    //
+    // The difference is what approval does: a shift also closes the row they
+    // are leaving, in the same save. See approveOnboarding().
+    kind: { type: String, enum: ['join', 'shift'], default: 'join', index: true },
+
+    // Where a shift is coming FROM. Null on a plain join. Kept after the move
+    // so "they were in 301 until March" is answerable from this row alone,
+    // without walking two bookings' member arrays.
+    fromUnitId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Unit',    default: null },
+    fromBookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', default: null },
+    fromMemberId:  { type: mongoose.Schema.Types.ObjectId, default: null },
+
     status: {
       type: String,
       enum: ['pending', 'approved', 'rejected'],
