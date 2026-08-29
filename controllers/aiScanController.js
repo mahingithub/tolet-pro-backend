@@ -372,7 +372,7 @@ async function scanLedger(req, res, next) {
 // what the landlord means by scanning a ledger: the book IS the building.
 async function batchCreateBookings(req, res, next) {
   try {
-    const { tenants, buildingId } = req.body;
+    const { tenants, buildingId, unitId } = req.body;
 
     if (!Array.isArray(tenants) || tenants.length === 0) {
       throw ApiError.badRequest('tenants array is required and must not be empty.');
@@ -392,20 +392,119 @@ async function batchCreateBookings(req, res, next) {
     const building = await Building.findOne({ _id: buildingId, landlordId: req.user._id });
     if (!building) throw ApiError.notFound('বিল্ডিং পাওয়া যায়নি।');
 
-    // Floor arrives as free text off a page: "3rd", "৩য়", "3", "". Pull a
-    // number out so the room can be ordered; unparseable means ground floor.
-    const BN = { '০': '0', '১': '1', '২': '2', '৩': '3', '৪': '4', '৫': '5', '৬': '6', '৭': '7', '৮': '8', '৯': '9' };
-    const parseFloor = (raw) => {
-      const s = String(raw ?? '').replace(/[০-৯]/g, (d) => BN[d] || d);
-      const m = /-?\d+/.exec(s);
-      const n = m ? parseInt(m[0], 10) : 0;
-      return Number.isFinite(n) ? Math.max(-5, Math.min(200, n)) : 0;
-    };
+    const { normaliseRoomNumber, cleanRoomLabel, parseFloorLabel } = require('../utils/roomKey');
+
+    // ── THE ROOM THE LANDLORD ALREADY PICKED ────────────────────────────────
+    // When the scanner is opened from a specific room ("this form is for 203"),
+    // that room is the answer and nothing on the page can override it. No unit
+    // is looked up, matched or created — which makes a duplicate impossible by
+    // construction rather than by heuristic.
+    //
+    // This is the path to prefer whenever the landlord knows the room, because
+    // OCR on a handwritten room number is the least reliable field on the page
+    // and the one with the worst failure mode.
+    let pinnedUnit = null;
+    if (unitId) {
+      if (!mongoose.Types.ObjectId.isValid(String(unitId))) {
+        throw ApiError.badRequest('রুম পাওয়া যায়নি।');
+      }
+      pinnedUnit = await Unit.findOne({
+        _id: unitId, buildingId: building._id, landlordId: req.user._id, status: 'active',
+      });
+      if (!pinnedUnit) throw ApiError.badRequest('এই বিল্ডিংয়ে এই রুমটি পাওয়া যায়নি।');
+    }
+
+    // ── EVERY ROOM THIS BUILDING ALREADY HAS ────────────────────────────────
+    // Loaded once, up front, and indexed by MEANING rather than by exact
+    // spelling. The old code did an exact-match findOne per row, so a room
+    // written "Room 101" on the page never found the "101" that already
+    // existed, and a second room was created next to it.
+    // NOT .lean() and NOT field-selected, on purpose: these documents are handed
+    // to placeTenantInUnit (which reads monthlyRent / serviceCharge / rentDueDay
+    // off the unit) and to the seat-capacity growth below (which calls .save()).
+    // A lean or partially-selected unit would create bookings with an undefined
+    // rent and blow up on save — both silently, one row at a time.
+    const existing = await Unit.find({ buildingId: building._id, status: 'active' });
+
+    // `${floor}|${key}` → unit, for when the page tells us the floor.
+    const byFloorAndRoom = new Map();
+    // key → [units], for when it does not. A room number that is unique across
+    // the whole building can be resolved without a floor at all.
+    const byRoom = new Map();
+    for (const u of existing) {
+      const key = normaliseRoomNumber(u.roomNumber);
+      if (!key) continue;
+      byFloorAndRoom.set(`${u.floor}|${key}`, u);
+      if (!byRoom.has(key)) byRoom.set(key, []);
+      byRoom.get(key).push(u);
+    }
 
     const created = [];
     const errors  = [];
     // Two names in room 301 must resolve to the SAME room, so cache per batch.
     const unitCache = new Map();
+
+    // Resolve one row to a real Unit, creating one only when the room genuinely
+    // is new. Throws a message the landlord can act on rather than guessing.
+    async function resolveUnit(t) {
+      const rawRoom = String(t.roomNumber || '').trim();
+      const key = normaliseRoomNumber(rawRoom);
+      if (!key) throw new Error('রুম/ফ্ল্যাট নম্বর নেই');
+
+      const floor = parseFloorLabel(t.floorNumber);
+
+      const cacheKey = `${floor === null ? '?' : floor}|${key}`;
+      if (unitCache.has(cacheKey)) return unitCache.get(cacheKey);
+
+      let unit = null;
+
+      if (floor !== null) {
+        unit = byFloorAndRoom.get(`${floor}|${key}`) || null;
+      } else {
+        // No floor on the page. If exactly ONE room in the building carries
+        // this number, it is unambiguously that room — this is the case the
+        // old code got wrong by defaulting the floor to 0 and creating a twin.
+        const candidates = byRoom.get(key) || [];
+        if (candidates.length === 1) {
+          [unit] = candidates;
+        } else if (candidates.length > 1) {
+          const floors = candidates.map((c) => c.floor).join(', ');
+          throw new Error(`এই রুম নম্বর একাধিক তলায় আছে (তলা ${floors}) — কোন তলা তা লিখুন`);
+        } else if (existing.length > 0) {
+          // The building has rooms, just none matching. Creating one on a
+          // guessed ground floor is exactly how the duplicate used to appear.
+          throw new Error('তলা নম্বর লিখুন — নয়তো একই রুম দুইবার তৈরি হতে পারে');
+        }
+      }
+
+      if (!unit) {
+        // Genuinely new. Stored under its cleaned label ("Room 101" → "101") so
+        // that the database's own unique index on
+        // { buildingId, floor, roomNumber } can catch a future duplicate too.
+        unit = await Unit.create({
+          buildingId: building._id,
+          landlordId: req.user._id,
+          floor: floor === null ? 0 : floor,
+          roomNumber: cleanRoomLabel(rawRoom) || rawRoom,
+          // Starts at one and grows below as more names in the same room turn
+          // up. Guessing higher would invent vacant seats that may not exist;
+          // the page is the only evidence of how many people are in the room.
+          seatCapacity: 1,
+          monthlyRent:   Number(t.monthlyRent) > 0 ? Number(t.monthlyRent) : building.defaultMonthlyRent,
+          serviceCharge: building.defaultServiceCharge,
+          rentDueDay:    Number(t.rentDueDay) || building.defaultRentDueDay,
+        });
+        // A room created mid-batch must be findable by the rows after it, by
+        // both lookup paths — otherwise two names in one new room make two rooms.
+        byFloorAndRoom.set(`${unit.floor}|${key}`, unit);
+        if (!byRoom.has(key)) byRoom.set(key, []);
+        byRoom.get(key).push(unit);
+        existing.push(unit);
+      }
+
+      unitCache.set(cacheKey, unit);
+      return unit;
+    }
 
     for (const [idx, t] of tenants.entries()) {
       try {
@@ -414,34 +513,11 @@ async function batchCreateBookings(req, res, next) {
         const phone = String(t.phone || '').trim();
         if (!phone) throw new Error('মোবাইল নম্বর নেই');
 
-        const floor = parseFloor(t.floorNumber);
-        const roomNumber = String(t.roomNumber || '').trim();
-        if (!roomNumber) throw new Error('রুম/ফ্ল্যাট নম্বর নেই');
-
-        const key = `${floor}|${roomNumber.toLowerCase()}`;
-        let unit = unitCache.get(key);
-        if (!unit) {
-          // eslint-disable-next-line no-await-in-loop
-          unit = await Unit.findOne({ buildingId: building._id, roomNumber, floor, status: 'active' });
-          if (!unit) {
-            // eslint-disable-next-line no-await-in-loop
-            unit = await Unit.create({
-              buildingId: building._id,
-              landlordId: req.user._id,
-              floor,
-              roomNumber,
-              // Starts at one and grows below as more names in the same room
-              // turn up. Guessing higher would invent vacant seats that may not
-              // exist; the page is the only evidence of how many people are
-              // actually in the room.
-              seatCapacity: 1,
-              monthlyRent:   Number(t.monthlyRent) > 0 ? Number(t.monthlyRent) : building.defaultMonthlyRent,
-              serviceCharge: building.defaultServiceCharge,
-              rentDueDay:    Number(t.rentDueDay) || building.defaultRentDueDay,
-            });
-          }
-          unitCache.set(key, unit);
-        }
+        // Pinned room wins outright; otherwise match by meaning, and create
+        // only when the room is genuinely new.
+        // eslint-disable-next-line no-await-in-loop
+        const unit = pinnedUnit || await resolveUnit(t);
+        const roomNumber = unit.roomNumber;
 
         // Another name in a room we already filled ⇒ the room holds more seats
         // than we knew. Grow it rather than rejecting the tenant: the page is
