@@ -269,6 +269,13 @@ async function resolveInvite(req, res, next) {
       rentedAs:     building.rentedAs,
       hostName:     host?.name || '',
       hostAvatar:   host?.avatar || '',
+      // The landlord's own id. submitOnboarding refuses a landlord joining
+      // their own building, and without this the page can only find that out
+      // by letting them fill in the whole form and rejecting it at the end —
+      // which is exactly what a landlord scanning their own QR to test it
+      // would hit. No new exposure: landlord ids are already public in
+      // /landlord/:id profile URLs, and this endpoint already names the host.
+      hostId:       String(building.landlordId),
       // Whether what they submit will be live immediately or wait for a yes.
       // Shown on the form, so nobody is surprised by a pending state.
       needsApproval: scope === 'building',
@@ -540,6 +547,14 @@ async function notifyLandlordOfSubmission({ onboarding, building, unit, tenantNa
       ? `${where} — তথ্য জমা হয়েছে, আপনার অনুমোদনের অপেক্ষায়।`
       : `${where} — তথ্য যুক্ত হয়ে গেছে।`,
     data: {
+      // WHICH SIDE THIS IS FOR. 'tenant_onboarding' is the only type that
+      // travels in both directions — this one to the landlord, the approve /
+      // reject pair back to the tenant — and the two belong on opposite
+      // dashboards. The client cannot infer it from the recipient's roles: a
+      // landlord who joined someone ELSE's building as a tenant holds both,
+      // and guessing from role ownership sent them to the wrong dashboard.
+      // See NotificationPanel.jsx's 'tenant_onboarding' case.
+      audience:     'landlord',
       onboardingId: String(onboarding._id),
       buildingId:   String(building._id),
       unitId:       String(unit._id),
@@ -644,7 +659,11 @@ async function approveOnboarding(req, res, next) {
       type:   'tenant_onboarding',
       title:  'আপনার আবেদন অনুমোদিত হয়েছে',
       body:   `${building.name} — ${floorLabel(unit.floor)}, রুম ${unit.roomNumber} এ আপনি যুক্ত হয়েছেন।`,
-      data:   { bookingId: String(placed.booking._id), onboardingId: String(row._id) },
+      data:   {
+        audience: 'tenant',
+        bookingId: String(placed.booking._id),
+        onboardingId: String(row._id),
+      },
     });
     notifySocket(row.tenantId, 'rent:updated', { bookingId: String(placed.booking._id) });
     notifySocket(row.landlordId, 'rent:updated', { bookingId: String(placed.booking._id) });
@@ -673,7 +692,7 @@ async function rejectOnboarding(req, res, next) {
       type:   'tenant_onboarding',
       title:  'আপনার আবেদন গ্রহণ করা হয়নি',
       body:   row.rejectReason || 'বাড়িওয়ালা আবেদনটি গ্রহণ করেননি। সঠিক রুম নির্বাচন করেছেন কিনা দেখে নিন।',
-      data:   { onboardingId: String(row._id) },
+      data:   { audience: 'tenant', onboardingId: String(row._id), status: 'rejected' },
     });
 
     return res.json({ onboarding: row });
