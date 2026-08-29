@@ -47,11 +47,80 @@ function notifySocket(userId, event, payload) {
   }
 }
 
-// Is `user` the tenant on `booking` (by linked id, or by matching phone)?
+// Is `user` the booking's single (whole-unit) tenant?
 function isBookingTenant(booking, user) {
   if (booking.tenantId && String(booking.tenantId) === String(user._id)) return true;
   const core = phoneCore(booking.tenantPhone);
   return !!core && core === phoneCore(user.phone);
+}
+
+// The user's own members[] row on a shared unit, or null.
+function findBookingMember(booking, user) {
+  const core = phoneCore(user.phone);
+  return (booking.members || []).find((m) => m
+    && ((m.userId && String(m.userId) === String(user._id))
+      || (core && phoneCore(m.phone) === core))) || null;
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  WHO IS PAYING, AND FOR WHAT                                             ║
+// ║                                                                          ║
+// ║  A booking is either one tenancy (a flat, one tenant, one ledger) or a   ║
+// ║  shared unit whose occupants each carry their OWN rent, service charge   ║
+// ║  and ledger on members[]. Everything money-shaped in this controller     ║
+// ║  used to assume the first case:                                          ║
+// ║                                                                          ║
+// ║    • a member who joined by invite code got 403 on submit — they are     ║
+// ║      not booking.tenantId, so the app told them the lease wasn't theirs; ║
+// ║    • when a submission was approved, the month's obligation was read     ║
+// ║      off booking.monthlyRent. A ৳6,000 seat in a ৳45,000 flat produced   ║
+// ║      a ৳45,600 receipt, and the tenant's own dashboard (which reads      ║
+// ║      their member row) kept saying ৳6,000. That is the mismatch between  ║
+// ║      the payments page and the overview.                                 ║
+// ║                                                                          ║
+// ║  This resolver answers both questions once: may this user pay on this    ║
+// ║  booking, and WHICH ledger + rent are theirs. Every handler below uses   ║
+// ║  it, so the submit, the approve and the roll-back can't pick different   ║
+// ║  answers.                                                                ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+function resolvePayer(booking, user) {
+  const member = findBookingMember(booking, user);
+  if (member) {
+    return {
+      member,
+      ledger: member.ledger,
+      // A member row may leave money terms blank, meaning "same as the unit".
+      monthlyRent:   Number(member.monthlyRent)   || Number(booking.monthlyRent)   || 0,
+      serviceCharge: member.serviceCharge != null && member.serviceCharge !== 0
+        ? Number(member.serviceCharge) || 0
+        : Number(booking.serviceCharge) || 0,
+      name:  member.name  || user.name || booking.tenant || '',
+      phone: member.phone || user.phone || '',
+      floorNumber: String(member.floor     || booking.floorNumber || '').trim(),
+      roomNumber:  String(member.roomLabel || booking.roomNumber  || '').trim(),
+      seatLabel:   String(member.seatLabel || '').trim(),
+    };
+  }
+  if (!isBookingTenant(booking, user)) return null;
+  return {
+    member: null,
+    ledger: booking.ledger,
+    monthlyRent:   Number(booking.monthlyRent)   || 0,
+    serviceCharge: Number(booking.serviceCharge) || 0,
+    name:  booking.tenant      || user.name  || '',
+    phone: booking.tenantPhone || user.phone || '',
+    floorNumber: String(booking.floorNumber || '').trim(),
+    roomNumber:  String(booking.roomNumber  || '').trim(),
+    seatLabel:   '',
+  };
+}
+
+// The member subdoc a submission was filed against, re-read at review time.
+function memberForSubmission(booking, submission) {
+  if (!submission.memberId) return null;
+  return (booking.members || []).id
+    ? booking.members.id(submission.memberId)
+    : (booking.members || []).find((m) => String(m._id) === String(submission.memberId)) || null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,20 +142,27 @@ async function submitPayment(req, res, next) {
 
     const booking = await Booking.findById(bookingId);
     if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
-    if (!isBookingTenant(booking, req.user)) {
-      throw ApiError.forbidden('এই বুকিং আপনার নয়।');
-    }
 
-    // Already fully paid this month? Nothing to submit.
-    const existing = booking.ledger.get(monthKey);
+    // Who is paying, and against which ledger. Members are first-class here —
+    // see resolvePayer for why they used to be turned away at this line.
+    const payer = resolvePayer(booking, req.user);
+    if (!payer) throw ApiError.forbidden('এই বুকিং আপনার নয়।');
+
+    // Already fully paid this month? Nothing to submit. Read from the PAYER's
+    // ledger — a flatmate settling their share does not settle yours.
+    const existing = payer.ledger.get(monthKey);
     if (existing && (existing.paid === true || existing.status === 'full')) {
       throw ApiError.badRequest('এই মাসের ভাড়া ইতিমধ্যে পরিশোধিত।');
     }
 
     // Block duplicate pending claims for the same month (keeps the landlord's
     // verification list clean; tenant can re-submit only after a rejection).
+    // Scoped to the occupant, so four seats filing for August are four claims.
     const dupe = await RentPaymentSubmission.findOne({
-      bookingId: booking._id, monthKey, status: 'pending',
+      bookingId: booking._id,
+      memberId:  payer.member ? payer.member._id : null,
+      monthKey,
+      status: 'pending',
     }).lean();
     if (dupe) {
       throw ApiError.conflict('এই মাসের পেমেন্ট ইতিমধ্যে যাচাইয়ের অপেক্ষায় আছে।');
@@ -99,11 +175,16 @@ async function submitPayment(req, res, next) {
       landlordId:         booking.landlordId,
       tenantId:           req.user._id,
       propertyId:         booking.propertyId,
+      memberId:           payer.member ? payer.member._id : null,
+      memberName:         payer.member ? (payer.name || '').slice(0, 120) : '',
       monthKey,
       monthLabel:         monthLabel || monthKey,
-      tenantName:         (req.user.name || booking.tenant || '').slice(0, 120),
-      tenantPhone:        (booking.tenantPhone || req.user.phone || '').slice(0, 20),
+      tenantName:         (req.user.name || payer.name || '').slice(0, 120),
+      tenantPhone:        (payer.phone || req.user.phone || '').slice(0, 20),
       propertyTitle:      booking.property || '',
+      floorNumber:        payer.floorNumber,
+      roomNumber:         payer.roomNumber,
+      seatLabel:          payer.seatLabel,
       amount:             amt,
       txnId:              String(txnId || '').trim().slice(0, 80),
       paymentDate:        String(paymentDate || '').trim(),
@@ -116,7 +197,7 @@ async function submitPayment(req, res, next) {
     // Smart-Alert reminders recognise the state (paid stays false — it is NOT
     // a payment yet). Skip if the month already carries a real paid entry.
     if (!existing || !['full', 'partial'].includes(existing.status)) {
-      booking.ledger.set(monthKey, {
+      payer.ledger.set(monthKey, {
         paid:          false,
         status:        'submitted',
         paidOn:        String(paymentDate || '').trim(),
@@ -129,16 +210,22 @@ async function submitPayment(req, res, next) {
         expectedPayBy: existing?.expectedPayBy || '',
         paymentSource: 'manual',
       });
+      // Members are embedded, so saving the booking persists either ledger —
+      // but a nested Map change needs the explicit markModified.
+      if (payer.member) booking.markModified('members');
       await booking.save();
     }
 
-    // Notify the landlord (in-app + push + realtime).
+    // Notify the landlord (in-app + push + realtime). Name the unit: a
+    // building name alone doesn't tell them which room just paid.
+    const whereLabel = [booking.property, payer.floorNumber && `${payer.floorNumber} তলা`, payer.roomNumber && `রুম ${payer.roomNumber}`, payer.seatLabel && `সিট ${payer.seatLabel}`]
+      .filter(Boolean).join(' · ');
     notifications.emit({
       userId: booking.landlordId,
       type:   'payment',
       title:  '💳 নতুন ভাড়া পেমেন্ট — যাচাই করুন',
-      body:   `${submission.tenantName || 'ভাড়াটিয়া'} ${submission.monthLabel} এর ৳${amt.toLocaleString('en-IN')} পেমেন্ট সাবমিট করেছেন।`,
-      data:   { submissionId: String(submission._id), bookingId: String(booking._id), monthKey },
+      body:   `${submission.tenantName || 'ভাড়াটিয়া'}${whereLabel ? ` (${whereLabel})` : ''} ${submission.monthLabel} এর ৳${amt.toLocaleString('en-IN')} পেমেন্ট সাবমিট করেছেন।`,
+      data:   { submissionId: String(submission._id), bookingId: String(booking._id), memberId: payer.member ? String(payer.member._id) : null, monthKey },
     });
     notifySocket(booking.landlordId, 'rent:payment_submitted', {
       submissionId: String(submission._id), bookingId: String(booking._id), monthKey,
@@ -275,7 +362,17 @@ async function approveSubmission(req, res, next) {
     const booking = await Booking.findById(submission.bookingId);
     if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
 
-    const totalDue = (Number(booking.monthlyRent) || 0) + (Number(booking.serviceCharge) || 0);
+    // THE MONTH'S OBLIGATION IS THE PAYER'S, NOT THE UNIT'S.
+    // This read `booking.monthlyRent + booking.serviceCharge` unconditionally,
+    // so approving a ৳6,000 seat in a ৳45,000 flat wrote a ৳45,600 receipt and
+    // marked the month 'partial' with ৳39,600 still owing — money the occupant
+    // never agreed to. The member the claim was filed against decides.
+    const member   = memberForSubmission(booking, submission);
+    const rent     = member ? (Number(member.monthlyRent) || Number(booking.monthlyRent) || 0) : (Number(booking.monthlyRent) || 0);
+    const service  = member
+      ? (member.serviceCharge != null && member.serviceCharge !== 0 ? Number(member.serviceCharge) || 0 : Number(booking.serviceCharge) || 0)
+      : (Number(booking.serviceCharge) || 0);
+    const totalDue = rent + service;
     const paid     = Number(submission.amount) || 0;
     // Full when it clears the month's dues; otherwise a partial payment.
     const status   = (totalDue > 0 && paid < totalDue) ? 'partial' : 'full';
@@ -284,8 +381,12 @@ async function approveSubmission(req, res, next) {
 
     // Route through the shared money-write chokepoint → writes ledger entry,
     // upserts the Receipt, and fires the tenant "receipt" notification.
+    // Passing `member` is what puts the entry on the occupant's own ledger and
+    // stamps the receipt with their memberId (applyPayment has always
+    // supported this; the manual-rent path simply never used it).
     const updatedBooking = await applyPayment({
       booking,
+      member,
       monthKey: submission.monthKey,
       source:   'manual',
       payment: {
@@ -347,11 +448,18 @@ async function rejectSubmission(req, res, next) {
 
     // Roll back the "submitted" ledger marker so the month returns to its
     // normal due/overdue state (a rejected claim was never a payment).
+    // Roll back the SAME ledger the submission wrote to. Rejecting a member's
+    // claim used to clear the booking-level month instead — leaving the
+    // occupant's own month stuck on "awaiting verification" forever while
+    // wiping a whole-unit entry that had nothing to do with the claim.
     const booking = await Booking.findById(submission.bookingId);
     if (booking) {
-      const entry = booking.ledger.get(submission.monthKey);
+      const member = memberForSubmission(booking, submission);
+      const holder = member || booking;
+      const entry = holder.ledger.get(submission.monthKey);
       if (entry && entry.status === 'submitted') {
-        booking.ledger.delete(submission.monthKey);
+        holder.ledger.delete(submission.monthKey);
+        if (member) booking.markModified('members');
         await booking.save();
       }
     }

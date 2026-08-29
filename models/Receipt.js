@@ -40,6 +40,14 @@ const ReceiptSchema = new mongoose.Schema(
     propertyImage: { type: String, trim: true, default: '' },
     tenantPhone:   { type: String, trim: true, default: '' },
 
+    // WHICH UNIT this receipt is for, snapshotted at issue time. A receipt is
+    // a document the tenant keeps and may show to somebody later, and
+    // "White-house" alone does not identify what was rented when the building
+    // holds twenty rooms. Member labels (seat/room) win over the booking's.
+    floorNumber: { type: String, trim: true, default: '', maxlength: 40 },
+    roomNumber:  { type: String, trim: true, default: '', maxlength: 40 },
+    seatLabel:   { type: String, trim: true, default: '', maxlength: 40 },
+
     // Landlord profile snapshot (so the receipt is self-contained).
     landlordName:  { type: String, trim: true, default: '' },
     landlordPhone: { type: String, trim: true, default: '' },

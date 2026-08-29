@@ -102,6 +102,12 @@ async function applyPayment({ booking, member = null, monthKey, source = 'manual
   const svcAmount    = member
     ? (Number(member.serviceCharge) || Number(booking.serviceCharge) || 0)
     : (Number(booking.serviceCharge) || 0);
+  // Where the payer lives. A member's own labels describe the seat they pay
+  // for; the booking's describe the whole unit, and are the right answer only
+  // on a single-tenant lease (or when the member row left them blank).
+  const floorNumber = String((member && member.floor)     || booking.floorNumber || '').trim();
+  const roomNumber  = String((member && member.roomLabel) || booking.roomNumber  || '').trim();
+  const seatLabel   = String((member && member.seatLabel) || '').trim();
   const receiptFilter = { bookingId: booking._id, memberId, monthKey };
 
   if (PAID_STATUSES.includes(status)) {
@@ -128,6 +134,9 @@ async function applyPayment({ booking, member = null, monthKey, source = 'manual
           propertyId:    booking.propertyId,
           propertyTitle: booking.property || property?.title || '',
           propertyImage: property?.coverPhoto || '',
+          floorNumber,
+          roomNumber,
+          seatLabel,
           tenantPhone:   payerPhone,
           landlordName:  landlord?.name  || '',
           landlordPhone: landlord?.phone || '',
@@ -158,10 +167,14 @@ async function applyPayment({ booking, member = null, monthKey, source = 'manual
     // members (no userId) get no in-app notification; the landlord shares the
     // PDF / SMS instead.
     if (notifyUserId) {
+      // Name the unit, not just the building — four seats in one room all get
+      // "ভাড়া রিসিট — White-house" otherwise.
+      const unitLabel = [booking.property || 'Property', floorNumber && `${floorNumber} তলা`, roomNumber && `রুম ${roomNumber}`, seatLabel && `সিট ${seatLabel}`]
+        .filter(Boolean).join(' · ');
       notifications.emit({
         userId: notifyUserId,
         type:   'receipt',
-        title:  `ভাড়া রিসিট — ${booking.property || 'Property'}`,
+        title:  `ভাড়া রিসিট — ${unitLabel}`,
         body:   `${payment.monthLabel || monthKey} এর ${status === 'full' ? 'সম্পূর্ণ' : 'আংশিক'} ভাড়া রিসিট পাওয়া গেছে।`,
         data:   { targetId: String(receiptDoc._id), bookingId: String(booking._id), memberId: memberId ? String(memberId) : null, monthKey },
       });

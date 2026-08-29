@@ -25,6 +25,14 @@ const RentPaymentSubmissionSchema = new mongoose.Schema(
     tenantId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User',     default: null,  index: true },
     propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', default: null },
 
+    // WHICH OCCUPANT PAID. null = a classic single-tenant lease (the whole
+    // unit). On a shared unit this is the members[] row, and it is what makes
+    // the approval write to the right ledger and quote the right amount.
+    // Without it a hostel seat's ৳6,000 was approved against the flat's
+    // ৳45,600 obligation — the tenant got a receipt for the whole building.
+    memberId:   { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+    memberName: { type: String, trim: true, default: '', maxlength: 120 },
+
     // Which month this payment settles — 'YYYY-MM' (matches the ledger key).
     monthKey:   { type: String, required: true, trim: true },
     monthLabel: { type: String, trim: true, default: '' },
@@ -33,6 +41,11 @@ const RentPaymentSubmissionSchema = new mongoose.Schema(
     tenantName:    { type: String, trim: true, default: '', maxlength: 120 },
     tenantPhone:   { type: String, trim: true, default: '', maxlength: 20 },
     propertyTitle: { type: String, trim: true, default: '', maxlength: 200 },
+    // WHERE the payer lives — a building name is not an address when the
+    // landlord is looking at twelve claims from twelve rooms of it.
+    floorNumber:   { type: String, trim: true, default: '', maxlength: 40 },
+    roomNumber:    { type: String, trim: true, default: '', maxlength: 40 },
+    seatLabel:     { type: String, trim: true, default: '', maxlength: 40 },
 
     // What the tenant claims they paid.
     amount:      { type: Number, required: true, min: 0 },
@@ -78,5 +91,8 @@ RentPaymentSubmissionSchema.index({ landlordId: 1, status: 1, createdAt: -1 });
 // Tenant view + per-month lookups.
 RentPaymentSubmissionSchema.index({ tenantId: 1, createdAt: -1 });
 RentPaymentSubmissionSchema.index({ bookingId: 1, monthKey: 1 });
+// The duplicate-pending guard is PER OCCUPANT: four hostel seats filing for
+// the same month are four claims, not one tenant submitting four times.
+RentPaymentSubmissionSchema.index({ bookingId: 1, memberId: 1, monthKey: 1, status: 1 });
 
 module.exports = mongoose.model('RentPaymentSubmission', RentPaymentSubmissionSchema);

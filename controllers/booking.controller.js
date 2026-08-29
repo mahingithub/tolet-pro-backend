@@ -509,6 +509,18 @@ async function listTenantBookings(req, res, next) {
         // status is the only thing that can have ended it.
         status:      mineRow ? (mineRow.status || 'active') : (closedBooking ? 'moved-out' : 'active'),
         moveOutDate: mineRow ? (mineRow.moveOutDate || null) : (closedBooking ? (b.leaseEnd || null) : null),
+        // WHERE + WHAT THIS PERSON RENTS. Resolved once, here, so every tenant
+        // surface names the same unit and quotes the same rent. A member's own
+        // labels describe the seat they pay for; the booking's describe the
+        // whole flat, and are only the right answer on a single-tenant lease.
+        rentType:      mineRow ? (mineRow.rentType || 'flat') : (b.roomNumber ? 'room' : 'flat'),
+        floor:         String((mineRow && mineRow.floor)     || b.floorNumber || '').trim(),
+        roomLabel:     String((mineRow && mineRow.roomLabel) || b.roomNumber  || '').trim(),
+        seatLabel:     String((mineRow && mineRow.seatLabel) || '').trim(),
+        monthlyRent:   mineRow ? (Number(mineRow.monthlyRent) || Number(b.monthlyRent) || 0) : (Number(b.monthlyRent) || 0),
+        serviceCharge: mineRow
+          ? (mineRow.serviceCharge != null && mineRow.serviceCharge !== 0 ? Number(mineRow.serviceCharge) || 0 : Number(b.serviceCharge) || 0)
+          : (Number(b.serviceCharge) || 0),
       };
       b.isPastTenancy = b.myMembership.status === 'moved-out' || closedBooking;
       // Viewer scoping (Requirement 7.3): a tenant only sees THEIR OWN member

@@ -276,13 +276,26 @@ async function listForBooking(req, res, next) {
     const booking = await Booking.findById(bookingId).lean();
     if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
 
-    // Authorise: the requester must be the tenant (id or phone) or the landlord.
+    // Authorise: the requester must be the landlord, the booking's single
+    // tenant (id or phone), OR one of its members.
+    //
+    // MEMBERS WERE MISSING HERE. Anyone who joined with an invite code lives on
+    // members[], not on booking.tenantId — so this endpoint 403'd them, the
+    // tenant's rent page swallowed the error, and they were shown a rent card
+    // with NO bKash/Nagad/Rocket account on it at all. It read as "my landlord
+    // hasn't set up payments", when in fact the accounts existed and the tenant
+    // simply wasn't allowed to see them. Same membership test the tenant
+    // booking list uses, so the two can't disagree about who lives here.
+    const myPhoneCore = phoneCore(req.user.phone);
     const isLandlord = String(booking.landlordId) === String(req.user._id);
     const isTenantById = booking.tenantId && String(booking.tenantId) === String(req.user._id);
     const isTenantByPhone = booking.tenantPhone &&
       phoneCore(booking.tenantPhone) &&
       phoneCore(booking.tenantPhone) === phoneCore(req.user.phone);
-    if (!isLandlord && !isTenantById && !isTenantByPhone) {
+    const isMember = (booking.members || []).some((m) => m
+      && ((m.userId && String(m.userId) === String(req.user._id))
+        || (myPhoneCore && phoneCore(m.phone) === myPhoneCore)));
+    if (!isLandlord && !isTenantById && !isTenantByPhone && !isMember) {
       throw ApiError.forbidden('এই বুকিং আপনার নয়।');
     }
 
