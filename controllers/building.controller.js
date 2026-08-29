@@ -500,6 +500,11 @@ async function ownedUnit(req, unitId) {
 }
 
 // Shared shape for a person arriving in a unit.
+//
+// Deliberately does NOT read `userId` from the body, even though
+// placeTenantInUnit accepts one: that would let a landlord bind any account id
+// they liked to a seat in their building. The only caller allowed to set it is
+// the invite controller, which takes it from the tenant's OWN session.
 function tenantInputFrom(body = {}) {
   return {
     name:  String(body.name || '').trim().slice(0, 100),
@@ -570,6 +575,13 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
       {
         name: input.name,
         phone: input.phone,
+        // Normally absent: the landlord types a name and a number, and
+        // buildMemberFromInput resolves an account from the phone if one exists.
+        // Self-onboarding is the one case where we already know exactly who this
+        // is — they were logged in when they filled the form — so the account is
+        // linked from their session rather than inferred from a number they may
+        // have typed differently from the one they registered with.
+        userId: input.userId || null,
         tenantProfile: input.tenantProfile,
         monthlyRent: input.monthlyRent,
         rentType: isSeat ? 'seat' : (building.rentedAs === 'room' ? 'room' : 'flat'),

@@ -36,6 +36,22 @@ services:
         sync: false
       - key: FIREBASE_SERVICE_ACCOUNT_BASE64
         sync: false
+
+      # ── AI ledger/form scanner (controllers/aiScanController.js) ────────────
+      # Currently on Vertex AI so the scans bill against the Google Cloud $300
+      # credit instead of a metered AI Studio key. Paste the base64 of the
+      # service-account JSON — `base64 -i your-key.json` — NEVER the file
+      # itself; there is no key file in this repo by design.
+      - key: VERTEX_SERVICE_ACCOUNT_BASE64
+        sync: false
+      # Optional overrides; controller defaults are to-let-pro-14e09 /
+      # us-central1 / gemini-2.5-flash.
+      #   VERTEX_PROJECT_ID   VERTEX_LOCATION   VERTEX_MODEL
+      #
+      # Keep GEMINI_API_KEY set too: it is the fallback the moment the credit
+      # runs out and the toggle at the top of aiScanController.js flips back.
+      - key: GEMINI_API_KEY
+        sync: false
       - key: CLOUDINARY_CLOUD_NAME
         sync: false
       - key: CLOUDINARY_API_KEY

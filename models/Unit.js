@@ -64,6 +64,20 @@ const UnitSchema = new mongoose.Schema(
     rentDueDay:    { type: Number, default: 5, min: 1, max: 28 },
 
     notes:  { type: String, trim: true, default: '', maxlength: 300 },
+
+    // ── Tenant self-onboarding ───────────────────────────────────────────────
+    // This room's OWN invite token — "you are moving into 203, here is your
+    // link". The room is already decided, so the tenant never picks one, and a
+    // submission through it attaches to the room directly.
+    //
+    // It lives on the Unit rather than on the Booking on purpose: a VACANT room
+    // has no booking, and the vacant room is precisely the one a landlord wants
+    // to send a link for. Booking.inviteCode still covers "you already live
+    // here, connect your account" — this covers "you are about to".
+    //
+    // Lazily generated on first share, like the building's.
+    inviteToken: { type: String, trim: true, index: true, unique: true, sparse: true, maxlength: 64 },
+
     status: { type: String, enum: ['active', 'archived'], default: 'active', index: true },
   },
   { timestamps: true },

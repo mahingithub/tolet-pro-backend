@@ -16,6 +16,18 @@ dump/
 .wwebjs_auth/
 .wwebjs_cache/
 
+# Google Cloud / Firebase service-account keys. A downloaded key JSON contains
+# a private key that grants Vertex AI and Firebase access to the whole project;
+# this repo deploys to Render straight from git, so one of these committed is a
+# published credential. Credentials belong in env vars
+# (FIREBASE_SERVICE_ACCOUNT_BASE64, VERTEX_SERVICE_ACCOUNT_BASE64), never in a file here.
+*service-account*.json
+*serviceaccount*.json
+serviceAccountKey*.json
+gcp-*.json
+*-firebase-adminsdk-*.json
+to-let-pro-*.json
+
 # Old and temp files
 *.old
 *.bak

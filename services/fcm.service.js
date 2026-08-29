@@ -32,12 +32,15 @@ function publicApiBaseUrl() {
   ).replace(/\/$/, '');
 }
 
+// Same env chain (and same www-not-apex reasoning) as utils/inviteToken.js.
+// The old fallback here was tolet-pro.vercel.app, which now 404s — every push
+// notification that fell back to it deep-linked users to a dead page.
 function publicAppBaseUrl() {
   return (
     process.env.PUBLIC_APP_URL ||
     process.env.APP_URL ||
     process.env.FRONTEND_URL ||
-    'https://tolet-pro.vercel.app'
+    'https://www.toletpro.rent'
   ).replace(/\/$/, '');
 }
 

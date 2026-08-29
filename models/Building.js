@@ -77,6 +77,24 @@ const BuildingSchema = new mongoose.Schema(
     defaultServiceCharge: { type: Number, default: 0, min: 0 },
     defaultRentDueDay:   { type: Number, default: 5, min: 1, max: 28 },
 
+    // ── Tenant self-onboarding ───────────────────────────────────────────────
+    // The building's UNIVERSAL invite token — the one a landlord drops into the
+    // house WhatsApp group, or prints and tapes by the gate. Whoever opens it
+    // picks their own room from a list and fills in their own details.
+    //
+    // Generated LAZILY, on first share, not at building creation: a landlord
+    // who never uses this feature never gets a token, and a token that exists
+    // is a token someone deliberately handed out.
+    //
+    // Because this link is forwardable by design, what arrives through it is a
+    // CLAIM, not a fact — a building-scoped submission always waits for the
+    // landlord's approval (see TenantOnboarding). The unit-scoped token, which
+    // the landlord sends to one named person, is the one that auto-attaches.
+    inviteToken:   { type: String, trim: true, index: true, unique: true, sparse: true, maxlength: 64 },
+    // The off switch. Revoking issues a NEW token (so old QR prints die) — this
+    // flag is for "stop accepting anyone at all", e.g. a full building.
+    inviteEnabled: { type: Boolean, default: true },
+
     // Archived buildings stay joinable so historic leases still resolve a name.
     status: { type: String, enum: ['active', 'archived'], default: 'active', index: true },
   },

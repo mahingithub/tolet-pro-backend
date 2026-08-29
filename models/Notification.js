@@ -16,6 +16,7 @@
  *   - 'rent_overdue'     → tenant receives a notification about an overdue rent payment
  *   - 'rent_updated'     → landlord changed the tenant's rent/lease terms
  *   - 'marketing'        → admin-composed promotional blast (Subscriptions console)
+ *   - 'tenant_onboarding'→ a tenant self-onboarded through an invite QR / link
  *
  * IMPORTANT: `type` is a hard enum and notification.service.emit() swallows
  * validation errors by design (a notification failure must never break the
@@ -40,6 +41,10 @@ const NotificationSchema = new mongoose.Schema(
         'message', 'inquiry', 'booking', 'payment', 'receipt', 'property', 'review',
         'support_ticket', 'support_message', 'kyc_tenant', 'kyc_landlord',
         'marketing',
+        // A tenant filled in their own details through an invite QR / link.
+        // Sent to the LANDLORD ('… has completed onboarding for room 203'), and
+        // back to the TENANT when the landlord approves or declines the claim.
+        'tenant_onboarding',
       ],
       required: true,
     },

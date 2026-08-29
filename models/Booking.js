@@ -327,3 +327,11 @@ BookingSchema.index({ propertyId: 1, status: 1 });
 BookingSchema.index({ 'members.userId': 1 });
 
 module.exports = mongoose.model('Booking', BookingSchema);
+
+// Shared with TenantOnboarding, which stages a tenant's self-submitted details
+// until the landlord approves them and they become a member here. Exported
+// rather than copied for the same reason buildMemberFromInput is: a second
+// definition of "what we know about an occupant" would drift from this one, and
+// the fields where that hurts most are the ID and photo fields that decide what
+// a landlord is allowed to see.
+module.exports.TenantProfileSchema = TenantProfileSchema;

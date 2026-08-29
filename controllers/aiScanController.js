@@ -19,10 +19,59 @@
  *   4. Return { tenants: [...], rawText } to the client
  */
 
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const ApiError = require('../utils/ApiError');
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// ── AI backend toggle ─────────────────────────────────────────────────────────
+// The scanner runs on ONE of two Google backends. Exactly one of the blocks
+// below is live at a time, and switching is a matter of moving the `//` — here
+// and at the matching `const model = ...` toggle inside scanLedger(). Both
+// places must agree; nothing else in this file cares which one is running.
+//
+// === [PAUSED] Google AI Studio — GEMINI_API_KEY ===
+// Bring this back when the Cloud credit runs out: uncomment the two lines
+// below, comment out the Vertex block, and do the same at the model line in
+// scanLedger(). GEMINI_API_KEY is still in .env, so nothing else changes.
+// const { GoogleGenerativeAI } = require('@google/generative-ai');
+// const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// === [ACTIVE] Vertex AI — bills against the Google Cloud $300 credit ===
+const { VertexAI } = require('@google-cloud/vertexai');
+
+const VERTEX_PROJECT  = process.env.VERTEX_PROJECT_ID || 'to-let-pro-14e09';
+const VERTEX_LOCATION = process.env.VERTEX_LOCATION   || 'us-central1';
+const VERTEX_MODEL    = process.env.VERTEX_MODEL      || 'gemini-2.5-flash';
+
+// Service-account credentials — deliberately NOT a JSON key file sitting next
+// to package.json. This backend deploys to Render straight from git (see
+// render.yaml), so a key file in the tree is a private key pushed to the
+// remote; .gitignore now catches the usual key filenames, but a filename it
+// doesn't recognise would still go through. The project already carries Google
+// credentials the safe way — FIREBASE_SERVICE_ACCOUNT_BASE64, entered in the
+// Render dashboard, never in the repo — so Vertex uses the same shape:
+//
+//     VERTEX_SERVICE_ACCOUNT_BASE64=$(base64 -i your-key.json)
+//
+// Unset, google-auth-library falls back on its own: GOOGLE_APPLICATION_CREDENTIALS
+// (a path on disk, convenient for local dev), then Application Default
+// Credentials from `gcloud auth application-default login`. A missing or
+// malformed credential surfaces as a failed scan, never a boot crash — the
+// rest of the API must keep serving even when the AI backend is misconfigured.
+function vertexAuthOptions() {
+  const b64 = process.env.VERTEX_SERVICE_ACCOUNT_BASE64 || '';
+  if (!b64) return undefined;
+  try {
+    return { credentials: JSON.parse(Buffer.from(b64, 'base64').toString('utf8')) };
+  } catch (err) {
+    console.error('[vertex-ai] VERTEX_SERVICE_ACCOUNT_BASE64 is not valid base64-JSON:', err.message);
+    return undefined;
+  }
+}
+
+const vertexAI = new VertexAI({
+  project: VERTEX_PROJECT,
+  location: VERTEX_LOCATION,
+  googleAuthOptions: vertexAuthOptions(),
+});
 
 // ── Gemini prompt ─────────────────────────────────────────────────────────────
 // Written in plain English so the model doesn't get confused by Bangla
@@ -64,6 +113,18 @@ Return ONLY the JSON array, nothing else.`;
 function isValidBDPhone(p) {
   const d = String(p || '').replace(/\D/g, '');
   return /^01[3-9]\d{8}$/.test(d);
+}
+
+// The two SDKs hand back the SAME text in different shapes: AI Studio wraps it
+// in a response.text() helper, Vertex AI returns the raw candidate parts and has
+// no such method — calling .text() on a Vertex response is a TypeError, not a
+// wrong answer. Reading both keeps the backend toggle at the top of this file
+// the only thing that has to change when the credit runs out.
+function responseText(result) {
+  const resp = result?.response ?? result;
+  if (typeof resp?.text === 'function') return String(resp.text() || '');
+  const parts = resp?.candidates?.[0]?.content?.parts || [];
+  return parts.map((p) => (p && p.text) || '').join('');
 }
 
 // Sanitise a single parsed tenant, applying the landlord's default settings
@@ -210,21 +271,29 @@ async function scanLedger(req, res, next) {
       throw ApiError.badRequest('Image too large. Please use an image under 8 MB.');
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+    // === [PAUSED] AI Studio model — pairs with the paused require at the top ===
+    // const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+
+    // === [ACTIVE] Vertex AI model ===
+    const model = vertexAI.getGenerativeModel({ model: VERTEX_MODEL });
 
     // খাতা = many tenants, few fields. ভর্তি ফরম = one tenant, nearly all of them.
     const isFormMode = mode === 'form';
-    const result = await model.generateContent([
-      isFormMode ? FORM_PROMPT : SCAN_PROMPT,
-      {
-        inlineData: {
-          mimeType: mimeType,
-          data: base64Clean,
-        },
-      },
-    ]);
+    // Sent as a full request object rather than the bare [prompt, image] array
+    // the AI Studio SDK allows: Vertex's generateContent takes only a string or
+    // a request, so an array arrives as a malformed call. Both SDKs accept THIS
+    // shape, so the request survives the toggle untouched.
+    const result = await model.generateContent({
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: isFormMode ? FORM_PROMPT : SCAN_PROMPT },
+          { inlineData: { mimeType: mimeType, data: base64Clean } },
+        ],
+      }],
+    });
 
-    const rawText = result.response.text().trim();
+    const rawText = responseText(result).trim();
 
     // Strip potential markdown code fences (```json ... ```) that Gemini
     // sometimes adds despite the instruction.
@@ -269,9 +338,15 @@ async function scanLedger(req, res, next) {
       rawText,
     });
   } catch (err) {
-    if (err.message && err.message.includes('GoogleGenerativeAI')) {
+    // Anything thrown by the AI backend gets the Bangla wrapper. The old check
+    // matched only the string 'GoogleGenerativeAI', which no Vertex error
+    // carries — under Vertex a quota or auth failure would have fallen through
+    // as a bare 500 with no hint of what went wrong.
+    const msg = err.message || '';
+    const fromAiBackend = /GoogleGenerativeAI|VertexAI|Vertex|aiplatform|GoogleAuth|Could not (load|refresh) the default credentials/i.test(msg);
+    if (fromAiBackend) {
       // Send a user-friendly message but append the real error for debugging
-      return next(ApiError.internal(`AI স্ক্যানিং ব্যর্থ: ${err.message}`));
+      return next(ApiError.internal(`AI স্ক্যানিং ব্যর্থ: ${msg}`));
     }
     return next(err);
   }

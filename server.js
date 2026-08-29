@@ -289,6 +289,11 @@ app.use('/api/bookings',       rateLimiters.write, require('./routes/booking.rou
 // the old name-matching had to go.
 app.use('/api/buildings',      rateLimiters.write, require('./routes/building.routes'));
 app.use('/api/units',          rateLimiters.write, require('./routes/building.routes').unitRouter);
+// Tenant self-onboarding by QR / link: the landlord shares a token, the tenant
+// fills in their own NID, photo and emergency contact, the landlord approves.
+// Carries ONE public route (/resolve/:token) so a shared link previews before
+// signup — see routes/invite.routes.js.
+app.use('/api/invite',         rateLimiters.write, require('./routes/invite.routes'));
 // Demand gauge: "interested in selling" clicks while self-service selling is
 // Coming Soon. Public (guests count too) + spam-prone, so it sits behind the
 // writeLimiter like inquiries/bookings. Admin reads the totals under /api/admin.
