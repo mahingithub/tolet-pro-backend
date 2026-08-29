@@ -85,11 +85,20 @@ Do NOT include any explanation, markdown code blocks, or extra text — ONLY the
 Each tenant object in the array must have EXACTLY these fields:
 {
   "name": "string — tenant full name (Bengali or English), empty string if unreadable",
-  "phone": "string — 11-digit BD mobile number, empty string if not found",
+  "phone": "string — BD mobile number starting with 01, any format (hyphens/spaces are fine), empty string if not found",
   "monthlyRent": number — monthly rent amount in BDT (integer), 0 if not found,
   "advancePayment": number — security deposit or advance amount in BDT, 0 if not found,
   "roomNumber": "string — room/flat number if visible, empty string otherwise",
   "floorNumber": "string — floor number if visible, empty string otherwise",
+  "moveInDate": "string — move-in date as YYYY-MM-DD if visible in the ledger, empty string otherwise",
+  "fatherName": "string — father's name (পিতার নাম) if the ledger has that column, empty string otherwise",
+  "permanentAddress": "string — permanent address if the ledger has that column, empty string otherwise",
+  "govtIdNumber": "string — NID or passport number if the ledger has that column, empty string otherwise",
+  "govtIdType": "one of: nid, passport, or empty string",
+  "tenantType": "one of: student, employee, business, freelancer, other, or empty string",
+  "organization": "string — university or company name if present, empty string otherwise",
+  "emergencyName": "string — emergency contact name if present, empty string otherwise",
+  "emergencyPhone": "string — emergency contact mobile if present, empty string otherwise",
   "notes": "string — any extra notes visible for this tenant",
   "confidence": {
     "name": number between 0 and 1,
@@ -100,18 +109,28 @@ Each tenant object in the array must have EXACTLY these fields:
 
 Rules:
 - If a field is illegible or absent, use the default value shown above.
-- For phone numbers: extract only if you are confident it is a valid BD number (01xxxxxxxxx format).
-- For amounts: extract only the numeric value (no ৳ or commas).
+- IMPORTANT: Phone numbers may be written with Bengali digits (০-৯) or with hyphens (e.g. 01712-111111 or ০১৭১২-১১১১১১). Extract them and CONVERT Bengali digits to English digits in your output (০→0, ১→1, ২→2, ৩→3, ৪→4, ৫→5, ৬→6, ৭→7, ৮→8, ৯→9).
+- For amounts: convert Bengali digits to English digits. Remove ৳ signs and commas.
 - confidence scores: 1.0 = certain, 0.5 = guessed, 0.0 = not found.
+- Set confidence.phone to 0.9 if you can clearly read a number starting with 01 (or ০১), even if it has hyphens or Bengali digits.
+- The extra fields (fatherName, govtIdNumber, etc.) are optional — only fill them if the ledger actually has that column or data. Most ledgers will leave them empty, and that is fine.
 - If you see no tenant data at all, return an empty array: []
 
 Return ONLY the JSON array, nothing else.`;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// Validate a BD mobile number: must be 11 digits starting with 01[3-9]
+// Convert Bengali/Eastern-Arabic digits (০-৯) to ASCII digits so that phone
+// validation and numeric parsing work regardless of which script the AI (or the
+// original document) used.
+function normalizeBDDigits(str) {
+  return String(str || '').replace(/[০-৯]/g, (ch) => ch.charCodeAt(0) - 0x09E6);
+}
+
+// Validate a BD mobile number: must be 11 digits starting with 01[3-9].
+// Accepts Bengali digits, hyphens and spaces — all are stripped before check.
 function isValidBDPhone(p) {
-  const d = String(p || '').replace(/\D/g, '');
+  const d = normalizeBDDigits(p).replace(/\D/g, '');
   return /^01[3-9]\d{8}$/.test(d);
 }
 
@@ -134,14 +153,21 @@ function sanitiseTenant(raw = {}, defaults = {}, isFormMode = false) {
     ? raw.confidence
     : { name: 0, phone: 0, monthlyRent: 0 };
 
-  const phone = isValidBDPhone(raw.phone) ? String(raw.phone).replace(/\D/g, '') : '';
+  // Normalise Bengali digits before validation so numbers like ০১৭১২-১১১১১১
+  // are correctly accepted rather than silently dropped.
+  const phone = isValidBDPhone(raw.phone)
+    ? normalizeBDDigits(raw.phone).replace(/\D/g, '')
+    : '';
+
+  // Amounts may also be in Bengali digits on the original page.
+  const toNum = (v) => Math.max(0, Number(normalizeBDDigits(String(v || '')).replace(/[^\d.]/g, '')) || 0);
 
   return {
     // ── AI-extracted fields ──────────────────────────────────
     name:           String(raw.name || '').trim().slice(0, 100),
     phone,
-    monthlyRent:    Math.max(0, Number(raw.monthlyRent) || 0),
-    advancePayment: Math.max(0, Number(raw.advancePayment) || 0),
+    monthlyRent:    toNum(raw.monthlyRent),
+    advancePayment: toNum(raw.advancePayment),
     roomNumber:     String(raw.roomNumber || '').trim().slice(0, 20),
     floorNumber:    String(raw.floorNumber || '').trim().slice(0, 20),
     notes:          String(raw.notes || '').trim().slice(0, 300),
@@ -155,11 +181,13 @@ function sanitiseTenant(raw = {}, defaults = {}, isFormMode = false) {
     location:        defaults.location        || '',
     leaseStart:      defaults.leaseStart      || new Date().toISOString().split('T')[0],
 
-    // The person, in the SAME shape the manual form writes — so a scanned
-    // tenant and a hand-typed one are the same record, validated by the same
-    // rules. Empty in খাতা mode: a ledger page has none of this on it.
+    // Move-in date if the ledger or form had it.
     moveInDate: String(raw.moveInDate || '').trim(),
-    tenantProfile: isFormMode ? profileFromForm(raw) : {},
+
+    // In form mode: full admission-form profile. In khata mode: whatever
+    // optional columns the ledger happened to include (NID, father name, etc.)
+    // so nothing is lost when the landlord's khata is richer than the minimum.
+    tenantProfile: profileFromRaw(raw, isFormMode),
 
     // ── UI helpers: flag uncertain fields for the landlord to review ──────
     _flags: {
@@ -170,6 +198,7 @@ function sanitiseTenant(raw = {}, defaults = {}, isFormMode = false) {
     _confidence: confidence,
   };
 }
+
 
 // ── Admission-form mode ───────────────────────────────────────────────────────
 // A খাতা page physically contains names, rooms and amounts — never a father's
@@ -186,7 +215,7 @@ Return ONLY a valid JSON array containing exactly ONE object. No markdown, no ex
 
 {
   "name": "string — tenant's full name (ভাড়াটিয়ার নাম), empty string if unreadable",
-  "phone": "string — 11-digit BD mobile (01xxxxxxxxx), empty string if not found",
+  "phone": "string — BD mobile starting with 01 (hyphens/Bengali digits OK), empty string if not found",
   "roomNumber": "string — room/flat number (রুম/ফ্ল্যাট নম্বর), empty if absent",
   "floorNumber": "string — floor if visible, empty otherwise",
   "moveInDate": "string — move-in date as YYYY-MM-DD, empty if absent or unclear",
@@ -212,14 +241,14 @@ Rules:
 - Occupation words map to tenantType: ছাত্র/শিক্ষার্থী/student → "student";
   চাকরি/চাকরিজীবী/service/job → "employee"; ব্যবসা/ব্যবসায়ী/business → "business";
   ফ্রিল্যান্সার/freelance → "freelancer"; anything else readable → "other".
-- Phone: only if it looks like a valid BD mobile.
+- Phone: convert Bengali digits (০-৯) to English digits (0-9) in your output. Hyphens are fine.
 - Dates: convert any format you see to YYYY-MM-DD.
 - Return [] if this is not a tenant form.
 
 Return ONLY the JSON array.`;
 
-// The 11 marked fields, as they are stored on a tenant profile. Read off a
-// form; blank whenever the form was blank.
+// The profile fields stored on a tenant record. Read off a form or off the
+// optional extra columns a khata page may contain.
 const PROFILE_KEYS = [
   'fatherName', 'dob', 'maritalStatus', 'permanentAddress',
   'tenantType', 'organization', 'department', 'professionalIdNumber',
@@ -227,13 +256,16 @@ const PROFILE_KEYS = [
   'emergencyName', 'emergencyRelation', 'emergencyPhone', 'emergencyAddress',
 ];
 
-// Turn a scanned form into the SAME tenantProfile shape the manual form writes.
+// Build a tenantProfile from a raw AI response.
 //
-// The আছে/নেই gates matter here: an ID number is only ever required because the
-// tenant said they have one, so reading a number off a form has to ALSO answer
-// the question — otherwise the number is stored while the form still shows
-// "নেই" and hides the field it belongs to.
-function profileFromForm(raw = {}) {
+// In form mode every field is expected (the ভর্তি ফরম has all of them).
+// In khata mode only the fields that were actually present in the ledger will
+// be non-empty — so this function is safe to call in both modes.
+//
+// The আছে/নেই gates matter: an ID number on the page IS the "আছে" answer. No
+// number ⇒ unanswered (''), not "নেই" — the scanner cannot tell "has none"
+// from "wasn't filled in", and asserting the stronger claim would be wrong.
+function profileFromRaw(raw = {}, isFormMode = false) {
   const p = {};
   PROFILE_KEYS.forEach((k) => { p[k] = String(raw[k] || '').trim(); });
 
@@ -241,17 +273,27 @@ function profileFromForm(raw = {}) {
   if (!['student', 'employee', 'business', 'freelancer', 'other'].includes(p.tenantType)) p.tenantType = '';
   if (!['nid', 'passport'].includes(p.govtIdType)) p.govtIdType = '';
 
-  // A number on the page IS the "আছে" answer. No number ⇒ unanswered (''), NOT
-  // "নেই" — the scanner cannot tell "has none" from "wasn't filled in", and
-  // asserting the stronger claim on the tenant's behalf would be wrong.
   p.govtIdStatus = p.govtIdNumber ? 'has' : '';
   if (!p.govtIdStatus) { p.govtIdType = ''; p.govtIdNumber = ''; }
   p.professionalIdStatus = p.professionalIdNumber ? 'has' : '';
 
   // Department only means anything for a student, per the marked form.
   if (p.tenantType !== 'student') p.department = '';
+
+  // In khata mode, skip fields that are entirely empty so the frontend can
+  // check hasKhataExtras (any non-empty profile field) before rendering the
+  // optional section.
+  if (!isFormMode) {
+    const hasAny = PROFILE_KEYS.some((k) => p[k]);
+    if (!hasAny) return {};
+  }
+
   return p;
 }
+
+// Keep the old name as an alias so any future caller still works.
+const profileFromForm = (raw) => profileFromRaw(raw, true);
+
 
 // ── Controller ────────────────────────────────────────────────────────────────
 
