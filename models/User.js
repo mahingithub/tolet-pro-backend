@@ -156,6 +156,26 @@ const LandlordProfileSchema = new mongoose.Schema(
 
     // Landlord-only KYC. See LandlordVerificationSchema above.
     verification: { type: LandlordVerificationSchema, default: () => ({}) },
+
+    // ─── Document letterhead ─────────────────────────────────────────────
+    // A hostel operator hands generated agreements and receipts to real
+    // people, so the page has to carry THEIR business name, number and logo —
+    // not only the name of the software that printed it.
+    //
+    // Only the hosted logo URL is stored. The image itself lives in Cloudinary
+    // like avatars and vault documents do; a base64 logo here would be carried
+    // in every profile read and write.
+    brand: {
+      type: new mongoose.Schema(
+        {
+          orgName: { type: String, default: '', trim: true, maxlength: 80 },
+          logoUrl: { type: String, default: '', maxlength: 512 },
+          phone:   { type: String, default: '', trim: true, maxlength: 40 },
+        },
+        { _id: false },
+      ),
+      default: () => ({}),
+    },
   },
   { _id: false },
 );

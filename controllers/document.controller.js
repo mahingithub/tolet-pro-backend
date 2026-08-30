@@ -70,8 +70,16 @@ async function uploadDocument(req, res, next) {
 // ── POST /api/documents/direct ────────────────────────────────────────────────
 async function saveDirectDocument(req, res, next) {
   try {
-    const { secureUrl, publicId, fileName, folder, format, bytes } = req.body || {};
-    
+    const {
+      secureUrl, publicId, fileName, folder, format, bytes,
+      // WHO THIS FILE IS ABOUT. Accepted here because this is the path the app
+      // actually uploads through — the multipart route below has always stored
+      // these, but nothing calls it. Without them every document was saved with
+      // bookingId: null, so the landlord could pick a tenant on the upload form
+      // and the link was thrown away between the browser and the database.
+      tenantId, bookingId, tenantName, tenantPhone,
+    } = req.body || {};
+
     if (!secureUrl || !publicId) {
       throw ApiError.badRequest('secureUrl and publicId are required.');
     }
@@ -94,6 +102,13 @@ async function saveDirectDocument(req, res, next) {
       fileSize: bytes || 0,
       fileUrl: secureUrl,
       publicId: publicId,
+      // Same validation the multipart route uses: ids only when they really are
+      // ids, and the name/phone kept as a snapshot so the file still says whose
+      // it was after the booking is gone.
+      tenantId:    isObjectId(tenantId)  ? tenantId  : null,
+      bookingId:   isObjectId(bookingId) ? bookingId : null,
+      tenantName:  (tenantName  || '').trim().slice(0, 100),
+      tenantPhone: (tenantPhone || '').trim().slice(0, 20),
     });
 
     res.status(201).json({

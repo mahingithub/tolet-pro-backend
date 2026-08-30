@@ -47,6 +47,10 @@ const PATCH_ME_LANDLORD_FIELDS = [
   'preferredTenants',
   'communication',
   'houseRules',
+  // Document letterhead (business name / logo URL / phone). Without it here
+  // the client's save is accepted and then silently dropped by the strict
+  // schema, so the landlord's logo would survive only in that one browser.
+  'brand',
 ];
 
 // emergencyContact sub-fields — handled separately (whole-object payload)

@@ -713,6 +713,16 @@ async function updateBooking(req, res, next) {
       'advancePayment', 'paymentMethod', 'location',
       'floorNumber', 'roomNumber', 'propertyType',
       'leaseStart', 'leaseEnd',
+      // The landlord can now CORRECT a saved lease, not only re-let it, so the
+      // rest of what the lease form owns has to be writable too. Without these
+      // an edit was accepted by the client and quietly dropped here — the name
+      // changed on screen and reverted on the next reload.
+      //
+      // tenantProfile matters most: NID, profession, address and emergency
+      // contact are exactly the fields a landlord fills in a hurry and needs to
+      // put right later. It is a real subdocument, so assigning the object
+      // replaces it wholesale — the client always sends the complete profile.
+      'property', 'commercialTerms', 'tenantProfile',
       // Late-fee terms stay editable — a landlord can add one later, or drop it
       // back to 0 to stop charging it.
       'lateFeeAmount', 'gracePeriodDays',
@@ -732,6 +742,18 @@ async function updateBooking(req, res, next) {
         const d = new Date(req.body[key]);
         if (Number.isNaN(d.getTime())) throw ApiError.badRequest('লিজের তারিখ সঠিক নয়।');
         booking[key] = d;
+        continue;
+      }
+      // commercialTerms is a NESTED OBJECT, not a subdocument, so Mongoose does
+      // not reliably notice a whole-object assignment. Merge onto what is there
+      // (a patch that omits licenceNumber must not erase it) and say so
+      // explicitly, or the save is a no-op that reports success.
+      if (key === 'commercialTerms') {
+        const incoming = req.body[key] || {};
+        if (typeof incoming !== 'object') continue;
+        const current = booking.commercialTerms?.toObject?.() || booking.commercialTerms || {};
+        booking.commercialTerms = { ...current, ...incoming };
+        booking.markModified('commercialTerms');
         continue;
       }
       booking[key] = req.body[key];
