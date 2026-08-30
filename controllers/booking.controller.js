@@ -14,6 +14,10 @@ const Receipt       = require('../models/Receipt');
 const User          = require('../models/User');
 const notifications = require('../services/notification.service');
 const { applyPayment } = require('../services/bookingPayment.service');
+// "One person lives in one place." Shared with invite.controller's QR paths —
+// it lives in a service because invite.controller already requires this file,
+// so requiring it back would be circular. See tenancy.service.js.
+const { settleMoveOut, sortByRecency } = require('../services/tenancy.service');
 const ApiError      = require('../utils/ApiError');
 const cloud         = require('../services/cloudinary.service');
 const { getIo, emitToUser } = require('../socket');
@@ -154,9 +158,24 @@ function signBookingPhotos(b) {
   return b;
 }
 
+// The schema's own enums, mirrored so junk can be DROPPED here rather than
+// reaching mongoose. "The enums on the schema reject junk" was true and was the
+// problem: a free-text box that let someone type "ছাত্র" into tenantType turned
+// into `ছাত্র is not a valid enum value`, which failed the whole save and
+// surfaced to a Bangla-speaking landlord as a raw English mongoose string. An
+// unrecognised answer to an optional question is an unanswered one, not an
+// error — the forms that do offer a fixed list still send exact values.
+const PROFILE_ENUMS = {
+  maritalStatus:        ['single', 'married', 'divorced', 'widowed'],
+  tenantType:           ['student', 'employee', 'business', 'freelancer', 'other'],
+  govtIdStatus:         ['has', 'none'],
+  govtIdType:           ['nid', 'passport'],
+  professionalIdStatus: ['has', 'none'],
+};
+
 // Nothing here is required — a tenant with no NID, no student ID and no
 // permanent address is a completely valid record. We only drop keys we don't
-// own and coerce to trimmed strings; the enums on the schema reject junk.
+// own and coerce to trimmed strings.
 function sanitiseTenantProfile(raw) {
   if (!raw || typeof raw !== 'object') return {};
   const out = {};
@@ -164,6 +183,19 @@ function sanitiseTenantProfile(raw) {
     if (raw[k] === undefined || raw[k] === null) return;
     out[k] = String(raw[k]).trim();
   });
+
+  // Anything outside the fixed list becomes '' (unanswered) instead of a crash.
+  Object.entries(PROFILE_ENUMS).forEach(([k, allowed]) => {
+    if (out[k] !== undefined && !allowed.includes(out[k])) out[k] = '';
+  });
+
+  // An ID NUMBER is itself the "আছে" answer. Callers that ask the আছে/নেই
+  // question outright send the status; the AI scanner's review screen only has
+  // the number, and requiring a status it never collects meant every NID and
+  // student ID a landlord typed there was silently deleted on the way in.
+  if (out.govtIdNumber && !out.govtIdStatus) out.govtIdStatus = 'has';
+  if (out.professionalIdNumber && !out.professionalIdStatus) out.professionalIdStatus = 'has';
+
   // "নেই" (or an unanswered question) can't leave a number behind — otherwise a
   // corrected record would keep the ID the landlord just said didn't exist.
   if (out.govtIdStatus !== 'has') { out.govtIdType = ''; out.govtIdNumber = ''; }
@@ -196,6 +228,8 @@ async function buildMemberFromInput(raw = {}, defaults = {}) {
     floor:     String(raw.floor || '').trim().slice(0, 40),
     roomLabel: String(raw.roomLabel || '').trim().slice(0, 40),
     seatLabel: String(raw.seatLabel || '').trim().slice(0, 40),
+    // How many seats this member occupies. 1 = normal; >1 = full-room booking.
+    seatsBooked: Math.max(1, Number(raw.seatsBooked) || 1),
     monthlyRent:     reqRent > 0 ? reqRent : (Number(defaults.monthlyRent) || 0),
     serviceCharge:   Math.max(0, Number(raw.serviceCharge) || 0),
     securityDeposit: Math.max(0, Number(raw.securityDeposit) || 0),
@@ -203,6 +237,7 @@ async function buildMemberFromInput(raw = {}, defaults = {}) {
     status:      'active',
   };
 }
+
 
 // Property meta used by booking creation + member defaults: `type` (flat /
 // sublet / hostel / …) drives multi-member (HOSTEL) vs single-tenant; the
@@ -547,6 +582,32 @@ async function listTenantBookings(req, res, next) {
         });
       }
     });
+
+    // ── WHICH ONE IS HOME RIGHT NOW ─────────────────────────────────────────
+    // A person lives in one place. When several tenancies are still open —
+    // because a landlord never closed the old row, or because the tenant came
+    // in through a path that predates settleMoveOut — the most recently
+    // started one is the home they are in, and the rest are places they have
+    // left but nobody stamped.
+    //
+    // Marked rather than filtered: those older rows still hold the tenant's
+    // rent history and receipts, and the Payments tab lists them as previous
+    // homes. Hiding them here would look like deleted records.
+    //
+    // Answered on the server so the overview, the Payments tab, the dues total
+    // and Smart Alerts cannot each pick a different "current".
+    const live = bookings.filter((b) => !b.isPastTenancy);
+    const currentId = live.length
+      ? sortByRecency(live, req.user._id, req.user.phone)[0].id
+      : null;
+    bookings.forEach((b) => {
+      b.isCurrentHome = !b.isPastTenancy && b.id === currentId;
+      // An open row that is NOT the current home: presumed left, not stamped.
+      // The UI says "previous home" for these but keeps them distinguishable
+      // from a properly closed tenancy, because this one is an inference.
+      b.isSupersededTenancy = !b.isPastTenancy && b.id !== currentId;
+    });
+
     return res.json({ bookings });
   } catch (err) {
     return next(err);
@@ -1000,6 +1061,29 @@ async function joinByInvite(req, res, next) {
       }
 
       await booking.save();
+
+      // ── THEY LIVE HERE NOW ────────────────────────────────────────────────
+      // Everywhere they used to live is now somewhere they used to live.
+      //
+      // THIS LINE WAS MISSING. The QR / link onboarding paths have always
+      // called settleMoveOut, so a tenant who joined that way ended up with
+      // exactly one home. A tenant who joined by CODE — this path, the "Add
+      // code" button on their dashboard — kept every previous landlord's
+      // booking live: four rent cards, four sets of dues, alerts for rooms
+      // they left months ago. Same user action, two different outcomes,
+      // decided by which door they came through.
+      //
+      // Only on a genuinely NEW membership (inside this `if`). Re-entering
+      // your own code, or a page that retries the request, must not read as
+      // moving house all over again.
+      await settleMoveOut({
+        tenantUserId:  req.user._id,
+        tenantPhone:   req.user.phone,
+        tenantName:    req.user.name || member.name || 'ভাড়াটিয়া',
+        keepBookingId: booking._id,
+        when:          new Date(),
+        reason:        `${req.user.name || 'ভাড়াটিয়া'} নতুন বাসায় উঠেছেন।`,
+      });
     }
 
     // Let the landlord's dashboard update in realtime.

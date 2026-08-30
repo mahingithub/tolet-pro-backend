@@ -43,6 +43,10 @@ const TenantOnboarding = require('../models/TenantOnboarding');
 const ApiError      = require('../utils/ApiError');
 const notifications = require('../services/notification.service');
 const { uniqueToken, inviteUrl } = require('../utils/inviteToken');
+// "One person lives in one place" — shared with booking.controller.joinByInvite.
+// seatsTaken is shared with the vacancy check that actually refuses a join, so
+// this page cannot offer a seat placeTenantInUnit would turn away.
+const { settleMoveOut, seatsTaken } = require('../services/tenancy.service');
 
 const bookingCtrl  = () => require('./booking.controller');
 const buildingCtrl = () => require('./building.controller');
@@ -239,7 +243,12 @@ async function findByToken(token) {
 function occupancyOf(unit, building, booking) {
   const isSeat   = building.rentedAs === 'seat';
   const capacity = isSeat ? Math.max(1, Number(unit.seatCapacity) || 1) : 1;
-  const taken    = activeMembers(booking).length;
+  // SEATS held, not people listed. A room one tenant has taken outright is one
+  // member row holding every seat; counting heads advertised the rest as free,
+  // and the person who picked one only found out at the end of the form — or,
+  // through a building-wide link, sat in the landlord's approval queue for a
+  // room that placeTenantInUnit was always going to refuse.
+  const taken    = seatsTaken(booking);
   return { capacity, taken, free: Math.max(0, capacity - taken) };
 }
 
@@ -558,147 +567,11 @@ async function attachToUnit({
 // Leaving a room
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// NOTHING HERE DELETES ANYTHING. A tenancy ends by being stamped with a
-// move-out date, never by being removed, because the landlord's question six
-// months later is "who was in 301 last winter and until when" — and the rent
-// ledger, the receipts and the NID that answer it all hang off the member row.
-// `status: 'moved-out'` is what every live view already filters on
-// (building.controller, RentTab, MembersManager), so closing a row takes it out
-// of circulation everywhere at once while leaving the history intact.
-
-/**
- * End one person's occupancy of one booking.
- *
- * Handles both shapes a tenancy comes in:
- *   • members[] — the normal case. Their member row is closed; co-occupants of
- *     a hostel room are untouched.
- *   • a LEGACY single-tenant booking with an empty members[], matched by
- *     tenantId / tenantPhone. There is no row to close, so the booking itself
- *     is completed and leaseEnd stamped — which is what the Booking model
- *     already documents as "the host handed the unit over".
- *
- * @returns {boolean} whether anything actually changed.
- */
-function closeMembership(booking, tenantUserId, tenantPhone, when) {
-  const core = phoneCore(tenantPhone);
-  let touched = false;
-
-  (booking.members || []).forEach((m) => {
-    if (!m || m.status === 'moved-out') return;
-    const mine = (m.userId && String(m.userId) === String(tenantUserId))
-      || (core && phoneCore(m.phone) === core);
-    if (!mine) return;
-    m.status = 'moved-out';
-    m.moveOutDate = when;
-    touched = true;
-  });
-
-  if (touched) {
-    booking.markModified('members');
-    // The unit is empty now. A whole-unit let mirrors its occupant into the
-    // booking's own tenant fields, and listTenantBookings matches on those, so
-    // leaving them set would keep handing the ex-tenant a live card for a room
-    // they no longer live in.
-    if (activeMembers(booking).length === 0) {
-      booking.status  = 'completed';
-      booking.leaseEnd = booking.leaseEnd || when;
-    }
-    return true;
-  }
-
-  // Legacy row: no members[] at all, the tenant is the booking.
-  const isLegacyTenant = (booking.tenantId && String(booking.tenantId) === String(tenantUserId))
-    || (core && phoneCore(booking.tenantPhone) === core);
-  if (!booking.members?.length && isLegacyTenant && booking.status !== 'completed') {
-    booking.status   = 'completed';
-    booking.leaseEnd = booking.leaseEnd || when;
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * The tenant moved house. Close every OTHER tenancy they still hold.
- *
- * This is the "two cards" fix. Without it, joining a new landlord left the
- * previous landlord's booking live on the tenant's dashboard forever — a second
- * rent card, a second set of dues, for a room they had already left. Nobody was
- * going to go back and tidy that up by hand: the old landlord has no reason to
- * think about a tenant who has gone, and the tenant has no button.
- *
- * ASSUMPTION, MADE ON PURPOSE: a person lives in one place. Joining somewhere
- * new is read as leaving everywhere else. That is right for the case this
- * serves and wrong for the rare tenant who genuinely holds two lets at once
- * (a shop and a home); they would have to be re-added by the landlord, which is
- * a landlord-side action that still exists. The rent history survives either
- * way, so the cost of being wrong is a re-add, not lost data.
- *
- * The landlord being left is TOLD. They are losing a tenant off their register
- * without touching anything, and finding that out by noticing an empty row
- * later is not acceptable.
- */
-async function closeOtherTenancies({ tenantUserId, tenantPhone, keepBookingId, when }) {
-  const core = phoneCore(tenantPhone);
-  const match = [{ 'members.userId': tenantUserId }, { tenantId: tenantUserId }];
-  if (core) {
-    match.push({ 'members.phone': new RegExp(`${core}$`) });
-    match.push({ tenantPhone: new RegExp(`${core}$`) });
-  }
-
-  const others = await Booking.find({
-    _id: { $ne: keepBookingId },
-    status: { $nin: ['cancelled', 'completed'] },
-    deletedAt: null,
-    $or: match,
-  });
-
-  const closed = [];
-  for (const booking of others) {
-    if (!closeMembership(booking, tenantUserId, tenantPhone, when)) continue;
-    await booking.save();
-    closed.push(booking);
-  }
-  return closed;
-}
-
-/**
- * Run after a tenant has been placed in a unit: close everything they left
- * behind and tell the landlords who lost them. Best-effort by design — the
- * placement itself has already committed, and a failure to tidy up the OLD
- * tenancy must never surface as "joining failed" to someone who has joined.
- */
-async function settleMoveOut({ tenantUserId, tenantPhone, tenantName, keepBookingId, when, reason }) {
-  try {
-    const closed = await closeOtherTenancies({
-      tenantUserId, tenantPhone, keepBookingId, when,
-    });
-    for (const booking of closed) {
-      await notifyLandlordOfMoveOut({ booking, tenantName, reason }).catch(() => {});
-    }
-    return closed;
-  } catch (err) {
-    console.warn('[invite] closing previous tenancies failed:', err.message);
-    return [];
-  }
-}
-
-async function notifyLandlordOfMoveOut({ booking, tenantName, reason }) {
-  const where = [booking.property, booking.roomNumber ? `রুম ${booking.roomNumber}` : '']
-    .filter(Boolean).join(' — ');
-  await notifications.emit({
-    userId: booking.landlordId,
-    type:   'tenant_onboarding',
-    title:  `${tenantName} বাসা ছেড়েছেন`,
-    body:   `${where} — ${reason} রেকর্ড ও ভাড়ার হিসাব মুছে যায়নি, আগের মতোই দেখতে পাবেন।`,
-    data: {
-      audience:  'landlord',
-      bookingId: String(booking._id),
-      kind:      'move_out',
-    },
-  });
-  notifySocket(booking.landlordId, 'rent:updated', { bookingId: String(booking._id) });
-}
+// closeMembership / closeOtherTenancies / settleMoveOut / notifyLandlordOfMoveOut
+// now live in services/tenancy.service.js. They were private to this file, so
+// only the QR + link onboarding paths below ran them — the invite-CODE path
+// (booking.controller.joinByInvite) never did, and a tenant who joined by code
+// kept every previous landlord's rent card live. One definition, both callers.
 
 async function notifyLandlordOfSubmission({ onboarding, building, unit, tenantName }) {
   const where = `${building.name} — ${floorLabel(unit.floor)}, রুম ${unit.roomNumber}`;
@@ -1127,5 +1000,7 @@ module.exports = {
   // exported for tests
   attachToUnit,
   findByToken,
-  closeOtherTenancies,
+  // Re-exported so the existing onboarding tests keep their import path while
+  // the implementation lives in services/tenancy.service.js.
+  closeOtherTenancies: require('../services/tenancy.service').closeOtherTenancies,
 };

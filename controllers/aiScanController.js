@@ -92,13 +92,19 @@ Each tenant object in the array must have EXACTLY these fields:
   "floorNumber": "string — floor number if visible, empty string otherwise",
   "moveInDate": "string — move-in date as YYYY-MM-DD if visible in the ledger, empty string otherwise",
   "fatherName": "string — father's name (পিতার নাম) if the ledger has that column, empty string otherwise",
+  "dob": "string — date of birth as YYYY-MM-DD if the ledger has that column, empty string otherwise",
+  "maritalStatus": "one of: single, married, divorced, widowed, or empty string",
   "permanentAddress": "string — permanent address if the ledger has that column, empty string otherwise",
   "govtIdNumber": "string — NID or passport number if the ledger has that column, empty string otherwise",
   "govtIdType": "one of: nid, passport, or empty string",
   "tenantType": "one of: student, employee, business, freelancer, other, or empty string",
   "organization": "string — university or company name if present, empty string otherwise",
+  "department": "string — department (students only) if present, empty string otherwise",
+  "professionalIdNumber": "string — student ID / employee ID / trade licence number if present, empty string otherwise",
   "emergencyName": "string — emergency contact name if present, empty string otherwise",
   "emergencyPhone": "string — emergency contact mobile if present, empty string otherwise",
+  "emergencyRelation": "string — relation of the emergency contact e.g. Father, Mother, empty string otherwise",
+  "emergencyAddress": "string — emergency contact address if present, empty string otherwise",
   "notes": "string — any extra notes visible for this tenant",
   "confidence": {
     "name": number between 0 and 1,
@@ -113,7 +119,8 @@ Rules:
 - For amounts: convert Bengali digits to English digits. Remove ৳ signs and commas.
 - confidence scores: 1.0 = certain, 0.5 = guessed, 0.0 = not found.
 - Set confidence.phone to 0.9 if you can clearly read a number starting with 01 (or ০১), even if it has hyphens or Bengali digits.
-- The extra fields (fatherName, govtIdNumber, etc.) are optional — only fill them if the ledger actually has that column or data. Most ledgers will leave them empty, and that is fine.
+- Dates: convert any format you see to YYYY-MM-DD.
+- The extra fields (fatherName, dob, govtIdNumber, department, emergencyRelation, etc.) are optional — only fill them if the ledger actually has that column or data. Most ledgers will leave them empty, and that is fine. NEVER guess one.
 - If you see no tenant data at all, return an empty array: []
 
 Return ONLY the JSON array, nothing else.`;
@@ -127,11 +134,22 @@ function normalizeBDDigits(str) {
   return String(str || '').replace(/[০-৯]/g, (ch) => ch.charCodeAt(0) - 0x09E6);
 }
 
+// Reduce anything a ledger might realistically carry to the canonical
+// `01XXXXXXXXX` form: Bengali digits, hyphens, spaces, and the +880 / 880
+// country prefix a landlord who saved the number from a contact card will have
+// written. Mirrors the frontend's toBdNationalPhone, which already stripped the
+// prefix — without this the two disagreed, and a khata written +8801712111111
+// lost the phone entirely on the way in.
+function normaliseBDPhone(p) {
+  let d = normalizeBDDigits(p).replace(/\D/g, '');
+  if (d.startsWith('880')) d = d.slice(3);
+  if (d.length === 10 && d.startsWith('1')) d = `0${d}`;
+  return d;
+}
+
 // Validate a BD mobile number: must be 11 digits starting with 01[3-9].
-// Accepts Bengali digits, hyphens and spaces — all are stripped before check.
 function isValidBDPhone(p) {
-  const d = normalizeBDDigits(p).replace(/\D/g, '');
-  return /^01[3-9]\d{8}$/.test(d);
+  return /^01[3-9]\d{8}$/.test(normaliseBDPhone(p));
 }
 
 // The two SDKs hand back the SAME text in different shapes: AI Studio wraps it
@@ -153,11 +171,9 @@ function sanitiseTenant(raw = {}, defaults = {}, isFormMode = false) {
     ? raw.confidence
     : { name: 0, phone: 0, monthlyRent: 0 };
 
-  // Normalise Bengali digits before validation so numbers like ০১৭১২-১১১১১১
-  // are correctly accepted rather than silently dropped.
-  const phone = isValidBDPhone(raw.phone)
-    ? normalizeBDDigits(raw.phone).replace(/\D/g, '')
-    : '';
+  // Normalise Bengali digits and any +880 prefix before validation, so numbers
+  // like ০১৭১২-১১১১১১ and +8801712111111 are accepted rather than dropped.
+  const phone = isValidBDPhone(raw.phone) ? normaliseBDPhone(raw.phone) : '';
 
   // Amounts may also be in Bengali digits on the original page.
   const toNum = (v) => Math.max(0, Number(normalizeBDDigits(String(v || '')).replace(/[^\d.]/g, '')) || 0);
@@ -427,6 +443,7 @@ async function batchCreateBookings(req, res, next) {
     const Building = require('../models/Building');
     const Unit     = require('../models/Unit');
     const buildingCtrl = require('./building.controller');
+    const { seatsTaken, hasWholeRoomHold } = require('../services/tenancy.service');
 
     if (!mongoose.Types.ObjectId.isValid(String(buildingId || ''))) {
       throw ApiError.badRequest('বিল্ডিং বাছুন — কোন বিল্ডিংয়ে যোগ হবে তা জানা দরকার।');
@@ -520,18 +537,18 @@ async function batchCreateBookings(req, res, next) {
       }
 
       if (!unit) {
-        // Genuinely new. Stored under its cleaned label ("Room 101" → "101") so
-        // that the database's own unique index on
-        // { buildingId, floor, roomNumber } can catch a future duplicate too.
+        // Genuinely new. Use the building's defaultSeatCapacity so a 2-seat
+        // hostel scanned in doesn't have to be corrected room by room.
         unit = await Unit.create({
           buildingId: building._id,
           landlordId: req.user._id,
           floor: floor === null ? 0 : floor,
           roomNumber: cleanRoomLabel(rawRoom) || rawRoom,
-          // Starts at one and grows below as more names in the same room turn
-          // up. Guessing higher would invent vacant seats that may not exist;
-          // the page is the only evidence of how many people are in the room.
-          seatCapacity: 1,
+          // Inherit the building's default seat count instead of always starting
+          // at 1. For non-seat buildings this has no effect (capacity is always 1).
+          seatCapacity: building.rentedAs === 'seat'
+            ? Math.max(1, Number(building.defaultSeatCapacity) || 1)
+            : 1,
           monthlyRent:   Number(t.monthlyRent) > 0 ? Number(t.monthlyRent) : building.defaultMonthlyRent,
           serviceCharge: building.defaultServiceCharge,
           rentDueDay:    Number(t.rentDueDay) || building.defaultRentDueDay,
@@ -552,8 +569,20 @@ async function batchCreateBookings(req, res, next) {
       try {
         const name = String(t.name || '').trim();
         if (!name) throw new Error('নাম নেই');
-        const phone = String(t.phone || '').trim();
+        // The review screen lets the landlord retype a number the scan misread,
+        // so what arrives here is hand-entered and unchecked. It used to be
+        // accepted on nothing but being non-empty: "123" saved, and so did a
+        // number still in Bengali digits, where it matched no account for the
+        // rest of its life because resolveUserIdByPhone compares ASCII.
+        // Normalised to one shape and validated once, at the door.
+        const phone = normaliseBDPhone(t.phone);
         if (!phone) throw new Error('মোবাইল নম্বর নেই');
+        if (!isValidBDPhone(phone)) throw new Error('মোবাইল নম্বর সঠিক নয় — ০১৩-০১৯ দিয়ে শুরু ১১ ডিজিট দিন');
+
+        // bookAs: 'room' means the tenant takes the whole room (all seats).
+        //         'seat' (or unset) means a normal single-seat booking.
+        const bookAs = String(t.bookAs || 'seat').trim();
+        const isFullRoom = bookAs === 'room' && building.rentedAs === 'seat';
 
         // Pinned room wins outright; otherwise match by meaning, and create
         // only when the room is genuinely new.
@@ -561,16 +590,35 @@ async function batchCreateBookings(req, res, next) {
         const unit = pinnedUnit || await resolveUnit(t);
         const roomNumber = unit.roomNumber;
 
+        const seatCap = Math.max(1, Number(unit.seatCapacity) || 1);
+        // seatsToBook: full-room means all seats; single means 1.
+        const seatsToBook = isFullRoom ? seatCap : 1;
+
         // Another name in a room we already filled ⇒ the room holds more seats
-        // than we knew. Grow it rather than rejecting the tenant: the page is
-        // the evidence of how many people actually live there.
-        if (building.rentedAs === 'seat') {
+        // than we knew, and the page is the evidence of how many people actually
+        // live there. Grow it rather than rejecting the tenant.
+        //
+        // With TWO exceptions, and the second is the one that matters:
+        //   • the incoming row is itself a full-room booking — the landlord said
+        //     one person takes the room, so there is nothing to discover;
+        //   • the room is ALREADY held whole by someone. Growing here would
+        //     manufacture a seat inside a room one tenant reserved outright and
+        //     put a stranger in it — the reservation would be undone by the very
+        //     next row naming that room. Guarding on the incoming row alone (as
+        //     this did) missed it, because the row arriving is an ordinary seat;
+        //     it is the room's existing state that forbids the growth.
+        // Refusing instead sends the row to errorDetails with a readable Bangla
+        // reason from placeTenantInUnit, which is the honest outcome: the page
+        // and the landlord's own answer disagree, and only they can settle it.
+        if (building.rentedAs === 'seat' && !isFullRoom) {
           // eslint-disable-next-line no-await-in-loop
           const live = await buildingCtrl.liveBookingForUnit(unit._id);
-          const taken = live && Array.isArray(live.members)
-            ? live.members.filter((m) => m && m.status !== 'moved-out').length : 0;
-          if (taken >= (Number(unit.seatCapacity) || 1)) {
-            unit.seatCapacity = Math.min(60, taken + 1);
+          const seatsUsed = seatsTaken(live);
+          if (seatsUsed >= seatCap && !hasWholeRoomHold(live)) {
+            // Grow past what is already taken, not merely past the old capacity:
+            // if a shrink left the room over-subscribed, seatCap + 1 would still
+            // be under water and the tenant would be rejected anyway.
+            unit.seatCapacity = Math.min(60, Math.max(seatCap, seatsUsed) + 1);
             // eslint-disable-next-line no-await-in-loop
             await unit.save();
           }
@@ -586,9 +634,22 @@ async function batchCreateBookings(req, res, next) {
             phone,
             moveInDate: t.moveInDate || t.leaseStart,
             tenantProfile: t.tenantProfile || {},
+            seatsToBook,
+            // The rent the landlord read on the review screen and confirmed —
+            // for a full-room booking exactly as much as for a single seat.
+            //
+            // This used to substitute unit.monthlyRent whenever the room was
+            // taken whole, which quietly threw away the number they had just
+            // approved: for a room that already existed the stored rent could be
+            // anything, including the 0 a landlord gets by leaving the building
+            // default blank (the wizard invites exactly that). The row then saved
+            // at ৳0 while the screen had said ৳5000, and the "rent must be > 0"
+            // guard passed because it was checking the value being discarded.
+            monthlyRent: t.monthlyRent || 0,
           }),
         });
-        created.push({ bookingId: String(out.booking._id), memberId: out.memberId, name, roomNumber });
+        created.push({ bookingId: String(out.booking._id), memberId: out.memberId, name, roomNumber, bookAs });
+
       } catch (err) {
         errors.push({ index: idx, name: t.name || '(no name)', reason: err.message });
       }

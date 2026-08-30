@@ -116,6 +116,13 @@ const MemberSchema = new mongoose.Schema(
     roomLabel: { type: String, trim: true, default: '', maxlength: 40 },
     seatLabel: { type: String, trim: true, default: '', maxlength: 40 },
 
+    // How many seats in the room this member occupies.
+    // 1 = normal single-seat booking (default).
+    // > 1 = the member is taking the whole room (full-room booking in a seat
+    // building). The capacity check in placeTenantInUnit sums this field across
+    // all active members so a full-room booking correctly fills the room.
+    seatsBooked: { type: Number, default: 1, min: 1, max: 60 },
+
     // Per-member money terms. Default from the booking's monthlyRent when omitted.
     monthlyRent:     { type: Number, default: 0, min: 0 },
     serviceCharge:   { type: Number, default: 0, min: 0 },
@@ -140,6 +147,7 @@ const MemberSchema = new mongoose.Schema(
   },
   { _id: true },
 );
+
 
 // Give members the same Map→object + id serialisation the booking uses, so the
 // frontend reads `member.ledger['2026-05']` and `member.id` directly.

@@ -17,6 +17,10 @@ const Booking  = require('../models/Booking');
 const ApiError = require('../utils/ApiError');
 
 const { RESIDENTIAL_SUB_CATEGORIES, FLAT_SUB_CATEGORIES } = Building.ENUMS;
+// Seats held, not heads counted — one member can hold a whole room. Shared with
+// the invite and scanner paths so every screen reports the same vacancy the
+// write check will actually honour.
+const { seatsTaken } = require('../services/tenancy.service');
 // Who a FLAT is suitable for. Per-unit, never per-building: one building holds
 // family flats, bachelor flats and both-flats side by side.
 const SUITABLE_FOR = ['', 'family', 'bachelor', 'both'];
@@ -138,7 +142,13 @@ async function createBuilding(req, res, next) {
       defaultMonthlyRent:   Math.max(0, Number(defaultMonthlyRent) || 0),
       defaultServiceCharge: Math.max(0, Number(defaultServiceCharge) || 0),
       defaultRentDueDay:    Math.min(28, Math.max(1, Number(defaultRentDueDay) || 5)),
+      // Clamped to the schema's own max, like every other seat count here — an
+      // unclamped 100 is a ValidationError and a 500, not a corrected number.
+      defaultSeatCapacity:  letAs === 'seat'
+        ? Math.min(60, Math.max(1, Number(req.body.defaultSeatCapacity) || 1))
+        : 1,
     });
+
 
     return res.status(201).json({ building });
   } catch (err) {
@@ -173,15 +183,16 @@ async function listBuildings(req, res, next) {
       seatCount.set(k, (seatCount.get(k) || 0) + (Number(u.seatCapacity) || 1));
     });
 
-    // Occupancy counts PEOPLE, not leases: a hostel room with four seats filled
-    // is four occupants on one booking.
+    // Occupancy counts SEATS TAKEN, not leases and not heads: a hostel room with
+    // four seats filled is four occupants on one booking — and a room one person
+    // has taken whole is also four, off a single member row. Counting heads
+    // there reported three vacancies the room does not have.
     const occupied = new Map();
     bookings.forEach((b) => {
       const k = String(b.buildingId);
-      const live = Array.isArray(b.members)
-        ? b.members.filter((m) => m && m.status !== 'moved-out').length
-        : 0;
-      occupied.set(k, (occupied.get(k) || 0) + (live || 1));
+      const seats = seatsTaken(b);
+      // A whole-unit let has no members at all; it is still one thing occupied.
+      occupied.set(k, (occupied.get(k) || 0) + (seats || 1));
     });
 
     buildings.forEach((b) => {
@@ -213,6 +224,10 @@ async function updateBuilding(req, res, next) {
     if (defaultMonthlyRent !== undefined)   building.defaultMonthlyRent   = Math.max(0, Number(defaultMonthlyRent) || 0);
     if (defaultServiceCharge !== undefined) building.defaultServiceCharge = Math.max(0, Number(defaultServiceCharge) || 0);
     if (defaultRentDueDay !== undefined)    building.defaultRentDueDay    = Math.min(28, Math.max(1, Number(defaultRentDueDay) || 5));
+    if (req.body.defaultSeatCapacity !== undefined && building.rentedAs === 'seat') {
+      building.defaultSeatCapacity = Math.min(60, Math.max(1, Number(req.body.defaultSeatCapacity) || 1));
+    }
+
 
     // category / subCategory / rentedAs stay NOT editable. Flipping a seat
     // building to a flat building would orphan every seat already let in it;
@@ -377,6 +392,11 @@ async function listUnits(req, res, next) {
           return mems.map((m) => ({
             bookingId: String(b._id), memberId: String(m._id),
             name: m.name || '', phone: m.phone || '', seatLabel: m.seatLabel || '',
+            // How many of the room's seats this one person holds. 1 normally;
+            // the whole capacity when they took the room outright. The seat grid
+            // needs it to draw one person across the seats they actually have,
+            // instead of leaving the rest tappable as "add a tenant here".
+            seatsBooked: Number(m.seatsBooked) || 1,
             joinDate: m.joinDate || null,
             avatar: m.avatar || '',
             // The intake details, so the landlord can read back what they
@@ -392,7 +412,9 @@ async function listUnits(req, res, next) {
           tenantProfile: signTenantPhoto(b.tenantProfile),
         }];
       });
-      u.occupiedSeats = u.occupants.length;
+      // SEATS taken, not people listed — one occupant holding the whole room
+      // fills it, and the room must not offer the seats they are sitting on.
+      u.occupiedSeats = u.occupants.reduce((n, o) => n + (Number(o.seatsBooked) || 1), 0);
       u.vacantSeats   = Math.max(0, (Number(u.seatCapacity) || 1) - u.occupiedSeats);
     });
 
@@ -421,13 +443,15 @@ async function updateUnit(req, res, next) {
 
     if (seatCapacity !== undefined) {
       const next = Math.min(60, Math.max(1, Number(seatCapacity) || 1));
-      // Shrinking below the people already in the room would strand them with
-      // no seat, so the floor is however many are actually living there.
+      // Shrinking below the seats already spoken for would strand them, so the
+      // floor is however many seats are held — which is not the same as how many
+      // people are here. One tenant holding a 4-seat room outright is 4, and
+      // letting capacity drop to 1 under them would leave the room permanently
+      // over-booked against its own limit.
       const live = await Booking.find({ unitId: unit._id, status: { $ne: 'cancelled' } }).select('members').lean();
-      const occupied = live.reduce((n, b) => n + (Array.isArray(b.members)
-        ? b.members.filter((m) => m && m.status !== 'moved-out').length : 1), 0);
+      const occupied = live.reduce((n, b) => n + (seatsTaken(b) || 1), 0);
       if (next < occupied) {
-        throw ApiError.badRequest(`এই রুমে এখন ${occupied} জন আছেন — সিট সংখ্যা তার কম করা যাবে না।`);
+        throw ApiError.badRequest(`এই রুমে এখন ${occupied}টি সিট নেওয়া আছে — সিট সংখ্যা তার কম করা যাবে না।`);
       }
       unit.seatCapacity = next;
     }
@@ -540,8 +564,12 @@ function tenantInputFrom(body = {}) {
     // outgoing occupant's). Left blank, placeTenantInUnit assigns the lowest
     // free one.
     seatLabel: String(body.seatLabel || '').trim().slice(0, 40),
+    // How many seats to consume. 1 = normal seat; >1 = full-room booking where
+    // one person takes every seat. Validated/clamped in placeTenantInUnit.
+    seatsToBook: Math.max(1, Number(body.seatsToBook) || 1),
   };
 }
+
 
 // ── POST /api/units/:unitId/tenants ─────────────────────────────────────────
 // Put a tenant into this unit. Creates the unit's booking only if it does not
@@ -558,68 +586,68 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
     const isSeat = building.rentedAs === 'seat';
     const capacity = isSeat ? Math.max(1, Number(unit.seatCapacity) || 1) : 1;
 
+    // How many seats this booking will consume.
+    //   1  → normal single-seat (default)
+    //   >1 → full-room booking (one person takes all seats)
+    const seatsToBook = isSeat ? Math.max(1, Number(input.seatsToBook) || 1) : 1;
+
     let booking = await liveBookingForUnit(unit._id);
 
-    // Room is full — this is a replace, not an add, and saying so plainly is
-    // more useful than silently creating a parallel booking (which is exactly
-    // what the old flow did).
-    if (booking && activeMembers(booking).length >= capacity) {
+    // Capacity is measured in SEATS BOOKED, not head count, so a full-room
+    // booking (seatsBooked = seatCapacity) fills the room off one member row.
+    // Same helper every vacancy display uses, so what a screen offers and what
+    // this check accepts cannot drift apart.
+    const seatsUsed = seatsTaken(booking);
+
+    // Room is full — refuse clearly.
+    if (seatsUsed + seatsToBook > capacity) {
       if (isSeat) {
-        throw ApiError.badRequest(`এই রুমে ${capacity}টি সিটই পূর্ণ — সিট সংখ্যা বাড়ান, অথবা কোনো সিটের ভাড়াটিয়া বদলান।`);
+        const free = capacity - seatsUsed;
+        if (free <= 0) {
+          throw ApiError.badRequest(`এই রুমে ${capacity}টি সিটই পূর্ণ — সিট সংখ্যা বাড়ান, অথবা কোনো সিটের ভাড়াটিয়া বদলান।`);
+        }
+        throw ApiError.badRequest(`এই রুমে মাত্র ${free}টি সিট খালি আছে — ${seatsToBook}টি সিট বুক করা সম্ভব নয়।`);
       }
-      // "Replace the old tenant" is the wrong instruction when a hostel ledger
-      // has been scanned into a flat building: the roommates are not
-      // replacements, the building was simply set up as whole-unit. Say which
-      // of the two it actually is.
       throw ApiError.badRequest(
         'এই ইউনিটে ইতিমধ্যে একজন ভাড়াটিয়া আছেন। একই ইউনিটে একাধিক জন রাখতে হলে বিল্ডিংটি "সিট হিসেবে" তৈরি করতে হবে; নয়তো পুরোনো ভাড়াটিয়া বদলান।',
       );
     }
 
-    // Which seat this person takes. Assigned HERE, centrally, so every writer
-    // gets one — the AI scanner was producing members with a blank seatLabel,
-    // and only the old lease form ever set one. The lowest free number within
-    // capacity is used, so a seat vacated by a move-out is filled again rather
-    // than the count simply climbing.
+    // Which seat label this person gets.
+    // For a full-room booking, label is "Room" (not "Seat 1") to make it clear.
     let seatLabel = String(input.seatLabel || '').trim();
     if (isSeat && !seatLabel) {
-      const taken = new Set(activeMembers(booking).map((m) => String(m.seatLabel || '').trim()).filter(Boolean));
-      for (let n = 1; n <= capacity; n += 1) {
-        const candidate = `Seat ${n}`;
-        if (!taken.has(candidate)) { seatLabel = candidate; break; }
+      if (seatsToBook > 1) {
+        // Full-room: label conveys that this person has the whole room.
+        seatLabel = `Room (${seatsToBook} seats)`;
+      } else {
+        const taken = new Set(activeMembers(booking).map((m) => String(m.seatLabel || '').trim()).filter(Boolean));
+        for (let n = 1; n <= capacity; n += 1) {
+          const candidate = `Seat ${n}`;
+          if (!taken.has(candidate)) { seatLabel = candidate; break; }
+        }
+        if (!seatLabel) seatLabel = `Seat ${activeMembers(booking).length + 1}`;
       }
-      // Capacity is about to grow past its own labels (the scanner does this as
-      // more names in one room turn up); fall back to the next number up.
-      if (!seatLabel) seatLabel = `Seat ${activeMembers(booking).length + 1}`;
     }
 
     const member = await bookingCtrl().buildMemberFromInput(
       {
         name: input.name,
         phone: input.phone,
-        // Normally absent: the landlord types a name and a number, and
-        // buildMemberFromInput resolves an account from the phone if one exists.
-        // Self-onboarding is the one case where we already know exactly who this
-        // is — they were logged in when they filled the form — so the account is
-        // linked from their session rather than inferred from a number they may
-        // have typed differently from the one they registered with.
         userId: input.userId || null,
         tenantProfile: input.tenantProfile,
         monthlyRent: input.monthlyRent,
+        seatsBooked: seatsToBook,
         rentType: isSeat ? 'seat' : (building.rentedAs === 'room' ? 'room' : 'flat'),
         floor: String(unit.floor),
         roomLabel: unit.roomNumber,
         seatLabel,
         joinDate: input.moveInDate,
       },
-      // A seat inherits nothing by default: leaving monthlyRent at 0 is what
-      // makes seatShare() divide the room rent equally between the occupants.
       { monthlyRent: isSeat ? 0 : unit.monthlyRent, rentType: isSeat ? 'seat' : 'flat' },
     );
 
     if (!booking) {
-      // FIRST tenant in this unit — the unit's one booking is created here, and
-      // it takes its money terms from the room, not from a form.
       booking = await Booking.create({
         landlordId,
         buildingId:   building._id,
@@ -644,8 +672,6 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
       });
     } else {
       booking.members.push(member);
-      // A whole-unit let keeps the primary tenant fields in step with its one
-      // occupant, since the rest of the app reads those.
       if (!isSeat) {
         booking.tenant = input.name;
         booking.tenantPhone = input.phone.length >= 10 ? input.phone : null;
@@ -659,6 +685,7 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
     return { booking, memberId: String(added._id) };
   }
 }
+
 
 // ── POST /api/units/:unitId/tenants ─────────────────────────────────────────
 // Put a tenant into this unit. Creates the unit's booking only if it does not

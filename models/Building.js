@@ -77,6 +77,12 @@ const BuildingSchema = new mongoose.Schema(
     defaultServiceCharge: { type: Number, default: 0, min: 0 },
     defaultRentDueDay:   { type: Number, default: 5, min: 1, max: 28 },
 
+    // Default seat count for rooms in this building. Only meaningful when
+    // rentedAs === 'seat'. New rooms created via AI scan inherit this value so
+    // a 2-seat hostel doesn't have to be corrected room by room after scanning.
+    defaultSeatCapacity: { type: Number, default: 1, min: 1, max: 60 },
+
+
     // ── Tenant self-onboarding ───────────────────────────────────────────────
     // The building's UNIVERSAL invite token — the one a landlord drops into the
     // house WhatsApp group, or prints and tapes by the gate. Whoever opens it
