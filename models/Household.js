@@ -168,6 +168,27 @@ const HouseholdSchema = new mongoose.Schema(
       meal: { type: Number, default: 0, min: 0 },
     },
 
+    // ── offline write dedupe ────────────────────────────────────────────────
+    // Every mutation the client sends carries an `opId` it generated. A phone
+    // that wrote while offline replays its queue when the network returns, and
+    // a request that reached us but whose RESPONSE was lost gets sent again —
+    // so without this the same bazar entry lands twice. We remember the ids we
+    // have already applied and answer a repeat with the current wallet instead
+    // of applying it a second time.
+    //
+    // Capped + time-pruned in living.controller.rememberOp(): a queue only ever
+    // replays recent work, so a long memory buys nothing and costs document size.
+    appliedOps: {
+      type: [
+        {
+          _id: false,
+          opId: { type: String, required: true },
+          at: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
+
     // Shared ledger data.
     expenses: { type: [ExpenseSchema], default: [] },
     bills: { type: [BillSchema], default: [] },

@@ -22,6 +22,7 @@ const ApiError      = require('../utils/ApiError');
 const cloud         = require('../services/cloudinary.service');
 const { getIo, emitToUser } = require('../socket');
 const { invalidateInsightsCache } = require('../services/insights.service');
+const { idempotent } = require('../utils/idempotency');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 function isObjectId(v) {
@@ -217,6 +218,11 @@ async function buildMemberFromInput(raw = {}, defaults = {}) {
   const reqRent = Number(raw.monthlyRent);
   const profile = sanitiseTenantProfile(raw.tenantProfile);
   return {
+    // An occupant added with no network arrives with the id the phone gave
+    // them, so the rent collected against that seat while still offline points
+    // at the same person once this reaches us. Only the shape is trusted — the
+    // member is embedded in a booking that is already scoped to its landlord.
+    ...(isObjectId(raw.id) ? { _id: raw.id } : {}),
     userId,
     name,
     phone,
@@ -359,7 +365,25 @@ async function createBooking(req, res, next) {
     }
     const inviteCode = await uniqueInviteCode();
 
+    // ── A lease created with no network ──────────────────────────────────
+    // The phone mints the id so the tenant is REAL the moment they are written
+    // down: rent can be collected against them, in their own name, before this
+    // record has ever reached us. A server-issued id would have meant every
+    // offline payment pointing at a placeholder that has to be rewritten later
+    // — and rewriting ids under money is how ledgers get lost.
+    //
+    // Nothing is trusted beyond the shape: the row is still stamped with this
+    // landlord's id below, so a made-up id can only ever create their own
+    // booking. If it already exists, the queue is replaying a lease we already
+    // took — hand back the one we have rather than failing on a duplicate key.
+    const clientId = req.body.id;
+    if (isObjectId(clientId)) {
+      const already = await Booking.findOne({ _id: clientId, landlordId: req.user._id });
+      if (already) return res.status(200).json({ booking: already, replayed: true });
+    }
+
     const booking = await Booking.create({
+      ...(isObjectId(clientId) ? { _id: clientId } : {}),
       landlordId:       req.user._id,
       tenantId:         linkedTenantId,
       propertyId:       (propertyId && isObjectId(propertyId)) ? propertyId : null,
@@ -391,7 +415,12 @@ async function createBooking(req, res, next) {
       // Late fee is opt-in: absent / 0 / junk ⇒ no fee is ever charged and the
       // reminders never mention one. Capped so a typo can't invent a ৳9,99,999 fee.
       lateFeeAmount:    Math.max(0, Math.min(100000, Number(lateFeeAmount) || 0)),
-      gracePeriodDays:  Math.max(0, Math.min(28, Number(gracePeriodDays) ?? 5)),
+      // `?? 5` never fired: Number(undefined) is NaN, and ?? only catches
+      // null/undefined — so a booking created without this field failed
+      // validation outright ("Cast to Number failed for value NaN"). Written
+      // this way rather than `|| 5` because an explicit 0 is a real answer:
+      // rent is late from the day it is due.
+      gracePeriodDays:  Math.max(0, Math.min(28, Number.isFinite(Number(gracePeriodDays)) ? Number(gracePeriodDays) : 5)),
       reminderLeadDays: Number(reminderLeadDays) || 3,
       autoReminder:     autoReminder !== false,
       serviceCharge:    Number(serviceCharge) || 0,
@@ -643,6 +672,14 @@ async function updateLedger(req, res, next) {
         paidOn:        req.body.paidOn,
         method:        req.body.method,
         txnId:         req.body.txnId,
+        // What arrived THIS time. applyPayment folds it into whatever the month
+        // already holds and derives the total itself — the whole point of the
+        // accumulate fix, which never actually ran over HTTP because this field
+        // was left out of the hand-written list below. Without it the server
+        // stores whatever total the client worked out, which is wrong the
+        // moment two people record against the same month (a landlord's queued
+        // collection and the tenant's own payment, say).
+        amountReceived: req.body.amountReceived,
         amount:        req.body.amount,
         balance:       req.body.balance,
         lateFee:       req.body.lateFee,
@@ -830,6 +867,12 @@ async function addMember(req, res, next) {
       throw ApiError.forbidden('এই বুকিং আপনার নয়।');
     }
 
+    // Already here? The phone is replaying an occupant we have taken before
+    // (its dedupe record can expire; the seat it created does not).
+    if (isObjectId(req.body.id) && booking.members.id(req.body.id)) {
+      return res.status(200).json({ booking, replayed: true });
+    }
+
     const rentTypeDefault = await propertyRentTypeDefault(booking.propertyId);
     const memberDoc = await buildMemberFromInput(req.body, {
       monthlyRent: booking.monthlyRent,
@@ -972,6 +1015,14 @@ async function updateMemberLedger(req, res, next) {
         paidOn:        req.body.paidOn,
         method:        req.body.method,
         txnId:         req.body.txnId,
+        // What arrived THIS time. applyPayment folds it into whatever the month
+        // already holds and derives the total itself — the whole point of the
+        // accumulate fix, which never actually ran over HTTP because this field
+        // was left out of the hand-written list below. Without it the server
+        // stores whatever total the client worked out, which is wrong the
+        // moment two people record against the same month (a landlord's queued
+        // collection and the tenant's own payment, say).
+        amountReceived: req.body.amountReceived,
         amount:        req.body.amount,
         balance:       req.body.balance,
         lateFee:       req.body.lateFee,
@@ -1117,19 +1168,39 @@ async function joinByInvite(req, res, next) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Offline write dedupe
+// ─────────────────────────────────────────────────────────────────────────────
+// A landlord records rent while walking the building, where the signal dies.
+// Those writes queue on the phone and replay on reconnect, so the same one can
+// reach us twice — and applyPayment ACCUMULATES, meaning a duplicate ৳5,000
+// would become ৳10,000 collected. Every mutation below is therefore claimed by
+// its `X-Op-Id` exactly once (utils/idempotency.js).
+//
+// The answer to a repeat is the booking as it stands now: the phone's queue
+// wants a current snapshot, and it makes no difference to it whether this
+// particular request was the one that did the work.
+async function replayBooking(req, res) {
+  const id = req.params.id || (req.body && req.body.id);
+  const booking = isObjectId(id)
+    ? await Booking.findOne({ _id: id, landlordId: req.user._id })
+    : null;
+  return res.json({ booking: booking || null, replayed: true });
+}
+
 module.exports = {
-  createBooking,
+  createBooking: idempotent(createBooking, replayBooking),
   listHostBookings,
   listTenantBookings,
-  updateLedger,
-  undoLedger,
-  updateBooking,
-  cancelBooking,
-  addMember,
-  updateMember,
-  removeMember,
-  updateMemberLedger,
-  undoMemberLedger,
+  updateLedger: idempotent(updateLedger, replayBooking),
+  undoLedger: idempotent(undoLedger, replayBooking),
+  updateBooking: idempotent(updateBooking, replayBooking),
+  cancelBooking: idempotent(cancelBooking, async (req, res) => res.json({ success: true, replayed: true })),
+  addMember: idempotent(addMember, replayBooking),
+  updateMember: idempotent(updateMember, replayBooking),
+  removeMember: idempotent(removeMember, replayBooking),
+  updateMemberLedger: idempotent(updateMemberLedger, replayBooking),
+  undoMemberLedger: idempotent(undoMemberLedger, replayBooking),
   joinByInvite,
   // Shared with building.controller.js, which puts tenants INTO units. Exported
   // rather than duplicated so there is one definition of what a member is and

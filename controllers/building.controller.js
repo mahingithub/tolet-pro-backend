@@ -21,6 +21,7 @@ const { RESIDENTIAL_SUB_CATEGORIES, FLAT_SUB_CATEGORIES } = Building.ENUMS;
 // the invite and scanner paths so every screen reports the same vacancy the
 // write check will actually honour.
 const { seatsTaken } = require('../services/tenancy.service');
+const { idempotent } = require('../utils/idempotency');
 // Who a FLAT is suitable for. Per-unit, never per-building: one building holds
 // family flats, bachelor flats and both-flats side by side.
 const SUITABLE_FOR = ['', 'family', 'bachelor', 'both'];
@@ -277,7 +278,17 @@ async function createUnit(req, res, next) {
       ? Math.min(60, Math.max(1, Number(seatCapacity) || 1))
       : 1;
 
+    // A room added with no network arrives with the id the phone gave it, so a
+    // tenant placed in that room while still offline lands in the same room
+    // once both reach us. Already here? The queue is replaying a room we took.
+    const clientId = req.body.id;
+    if (isObjectId(clientId)) {
+      const already = await Unit.findOne({ _id: clientId, landlordId: req.user._id });
+      if (already) return res.status(200).json({ unit: already, replayed: true });
+    }
+
     const unit = await Unit.create({
+      ...(isObjectId(clientId) ? { _id: clientId } : {}),
       buildingId:  building._id,
       landlordId:  req.user._id,
       floor:       Math.round(flr),
@@ -553,6 +564,11 @@ async function ownedUnit(req, unitId) {
 // the invite controller, which takes it from the tenant's OWN session.
 function tenantInputFrom(body = {}) {
   return {
+    // Ids minted by the phone when the tenant was written down with no network,
+    // so rent collected against that seat while still offline points at the same
+    // person and the same lease once this reaches the server.
+    id:        body.id || null,
+    bookingId: body.bookingId || null,
     name:  String(body.name || '').trim().slice(0, 100),
     phone: String(body.phone || '').trim().slice(0, 20),
     moveInDate: body.moveInDate ? new Date(body.moveInDate) : new Date(),
@@ -630,8 +646,16 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
       }
     }
 
+    // Already placed? The phone is replaying a tenant we have taken before.
+    // Answering with the seat as it stands is the only safe reply — pushing the
+    // member again would put one person in two seats and charge them twice.
+    if (isObjectId(input.id) && booking && booking.members.id(input.id)) {
+      return { booking, memberId: String(input.id), replayed: true };
+    }
+
     const member = await bookingCtrl().buildMemberFromInput(
       {
+        id: input.id,
         name: input.name,
         phone: input.phone,
         userId: input.userId || null,
@@ -649,6 +673,7 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
 
     if (!booking) {
       booking = await Booking.create({
+        ...(isObjectId(input.bookingId) ? { _id: input.bookingId } : {}),
         landlordId,
         buildingId:   building._id,
         unitId:       unit._id,
@@ -910,18 +935,34 @@ async function shiftTenantToUnit(req, res, next) {
   }
 }
 
+// Rooms and tenant placements are written offline too, so the same
+// exactly-once guard the rent ledger uses applies here (utils/idempotency.js).
+// A replay is answered with the room / lease as it stands rather than creating
+// a second one. Capacity is still decided HERE and only here: if the last seat
+// filled up while the phone was away, the queued placement is refused with the
+// message the landlord needs to act on, not quietly forced through.
+const replayUnit = async (req, res) => {
+  const id = req.params.unitId || (req.body && req.body.id);
+  const unit = isObjectId(id) ? await Unit.findOne({ _id: id, landlordId: req.user._id }) : null;
+  return res.json({ unit: unit || null, replayed: true });
+};
+
 module.exports = {
   createBuilding,
   listBuildings,
   updateBuilding,
   archiveBuilding,
-  createUnit,
-  createUnitsBulk,
+  createUnit: idempotent(createUnit, replayUnit),
+  createUnitsBulk: idempotent(createUnitsBulk, async (req, res) => res.json({ units: [], replayed: true })),
   expandRoomRange,
   listUnits,
-  updateUnit,
-  archiveUnit,
-  addTenantToUnit,
+  updateUnit: idempotent(updateUnit, replayUnit),
+  archiveUnit: idempotent(archiveUnit, replayUnit),
+  addTenantToUnit: idempotent(addTenantToUnit, async (req, res) => {
+    const { unitId } = req.params;
+    const booking = await liveBookingForUnit(unitId);
+    return res.json({ booking: booking || null, memberId: (req.body && req.body.id) || null, replayed: true });
+  }),
   placeTenantInUnit,
   tenantInputFrom,
   liveBookingForUnit,

@@ -70,9 +70,13 @@ function findMine(userId) {
   return Household.findOne({ 'members.userId': userId });
 }
 
+// Memoised per request: the idempotency wrapper below already had to load the
+// household to check the opId, so the handler must not pay for it twice.
 async function loadMine(req) {
+  if (req._hh) return req._hh;
   const hh = await findMine(req.user._id);
   if (!hh) throw ApiError.notFound('আপনি কোনো হাউসহোল্ডে নেই।', { code: 'no_household' });
+  req._hh = hh;
   return hh;
 }
 
@@ -191,8 +195,63 @@ function emitSync(hh) {
   }
 }
 
+// ── offline write dedupe ─────────────────────────────────────────────────────
+// An offline phone queues its writes and replays them when the network is back.
+// Two things make a write arrive twice: the queue retrying after a response was
+// lost in flight, and two devices flushing the same shared action. The client
+// stamps every mutation with an `opId`, and we apply each id exactly once.
+const OP_MEMORY = 400; // ids kept per household
+const OP_TTL_MS = 7 * 24 * 60 * 60 * 1000; // ...and only for a week
+
+const readOpId = (req) => {
+  const fromHeader = typeof req.get === 'function' ? req.get('X-Op-Id') : null;
+  return String(req.body?.opId || fromHeader || '').slice(0, 40);
+};
+
+function alreadyApplied(hh, opId) {
+  return !!opId && (hh.appliedOps || []).some((o) => o.opId === opId);
+}
+
+// Record the op this request carried, then drop the ids we no longer need.
+function rememberOp(hh, req) {
+  const opId = req._opId;
+  if (!opId || alreadyApplied(hh, opId)) return;
+  const cutoff = Date.now() - OP_TTL_MS;
+  hh.appliedOps = [...(hh.appliedOps || []), { opId, at: new Date() }]
+    .filter((o) => new Date(o.at).getTime() >= cutoff)
+    .slice(-OP_MEMORY);
+}
+
+/**
+ * Wraps a mutation handler so a replayed opId is answered with the wallet as it
+ * stands, without applying anything. Done here rather than inside all 19
+ * handlers so no future handler can forget it — and the household it loads is
+ * memoised onto the request, so this costs no extra query.
+ */
+function idempotent(handler) {
+  return async function guarded(req, res, next) {
+    try {
+      const opId = readOpId(req);
+      if (opId) {
+        req._opId = opId;
+        const hh = await findMine(req.user._id);
+        if (hh) {
+          req._hh = hh;
+          if (alreadyApplied(hh, opId)) {
+            return res.json({ household: serialize(hh, req.user._id), replayed: true });
+          }
+        }
+      }
+      return await handler(req, res, next);
+    } catch (err) {
+      return next(err);
+    }
+  };
+}
+
 // Save + broadcast + respond in one go.
 async function commit(hh, req, res, status = 200) {
+  rememberOp(hh, req);
   await hh.save();
   emitSync(hh);
   return res.status(status).json({ household: serialize(hh, req.user._id) });
@@ -481,18 +540,28 @@ async function addBill(req, res, next) {
     const mine = myMemberId(hh, req.user._id);
     const type = BILL_TYPES.includes(req.body.type) ? req.body.type : 'electricity';
     const dueDate = parseDate(req.body.dueDate);
-    const status = req.body.status === 'paid' ? 'paid' : 'unpaid';
+    const amount = clampNum(req.body.amount);
+    // A bill can arrive already (part-)paid: a phone that was offline may have
+    // added it AND paid it before its queue drained, in which case both land in
+    // this one request. `status: 'paid'` stays supported as the older shorthand.
+    const paidAmount =
+      req.body.paidAmount != null && req.body.paidAmount !== ''
+        ? Math.min(amount, clampNum(req.body.paidAmount))
+        : req.body.status === 'paid'
+          ? amount
+          : 0;
+    const status = paidAmount <= 0 ? 'unpaid' : paidAmount >= amount ? 'paid' : 'partial';
     // Who fronted the money — defaults to whoever is adding the bill.
     const paidBy = valid.has(String(req.body.paidBy)) ? String(req.body.paidBy) : mine;
     const recurring = req.body.recurring === true || req.body.recurring === 'true';
     hh.bills.push({
       type,
-      amount: clampNum(req.body.amount),
+      amount,
       dueDate,
       status,
-      paidDate: status === 'paid' ? new Date() : null,
+      paidDate: paidAmount > 0 ? new Date() : null,
       paidBy,
-      paidAmount: status === 'paid' ? clampNum(req.body.amount) : 0,
+      paidAmount,
       reminder: req.body.reminder !== false,
       recurring,
       dueDay: recurring ? clampDueDay(req.body.dueDay || dueDate.getDate()) : null,
@@ -714,26 +783,29 @@ async function deleteDeposit(req, res, next) {
   }
 }
 
+// Every mutation goes out through `idempotent`, so a replayed offline write is
+// answered with the current wallet instead of being applied twice. getHousehold
+// is a plain read and needs no guard.
 module.exports = {
   getHousehold,
-  createHousehold,
-  joinHousehold,
-  leaveHousehold,
-  regenerateCode,
-  updateHousehold,
-  addMember,
-  removeMember,
-  addExpense,
-  updateExpense,
-  deleteExpense,
-  addBill,
-  updateBill,
-  deleteBill,
-  setMeal,
-  addGrocery,
-  deleteGrocery,
-  addSettlement,
-  deleteSettlement,
-  addDeposit,
-  deleteDeposit,
+  createHousehold: idempotent(createHousehold),
+  joinHousehold: idempotent(joinHousehold),
+  leaveHousehold: idempotent(leaveHousehold),
+  regenerateCode: idempotent(regenerateCode),
+  updateHousehold: idempotent(updateHousehold),
+  addMember: idempotent(addMember),
+  removeMember: idempotent(removeMember),
+  addExpense: idempotent(addExpense),
+  updateExpense: idempotent(updateExpense),
+  deleteExpense: idempotent(deleteExpense),
+  addBill: idempotent(addBill),
+  updateBill: idempotent(updateBill),
+  deleteBill: idempotent(deleteBill),
+  setMeal: idempotent(setMeal),
+  addGrocery: idempotent(addGrocery),
+  deleteGrocery: idempotent(deleteGrocery),
+  addSettlement: idempotent(addSettlement),
+  deleteSettlement: idempotent(deleteSettlement),
+  addDeposit: idempotent(addDeposit),
+  deleteDeposit: idempotent(deleteDeposit),
 };
