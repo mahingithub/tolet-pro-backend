@@ -9,8 +9,23 @@ const express = require('express');
 const router = express.Router();
 const requireAuth = require('../middleware/requireAuth');
 const ctrl = require('../controllers/living.controller');
+const solo = require('../controllers/livingSolo.controller');
 
 router.use(requireAuth);
+
+// ── solo খাতা ───────────────────────────────────────────────────────────────
+// The private, single-user wallet. Mounted ahead of the household routes so
+// `/solo` can never be swallowed by a `/:id` pattern added below later.
+router.get('/solo', solo.getSolo);
+router.post('/solo/merge', solo.mergeSolo);
+router.patch('/solo', solo.updateSolo);
+router.delete('/solo', solo.resetSolo);
+router.post('/solo/people', solo.addPerson);
+router.patch('/solo/people/:id', solo.updatePerson);
+router.delete('/solo/people/:id', solo.deletePerson);
+router.post('/solo/entries', solo.addEntry);
+router.patch('/solo/entries/:id', solo.updateEntry);
+router.delete('/solo/entries/:id', solo.deleteEntry);
 
 // ── household ──────────────────────────────────────────────────────────────
 router.get('/household', ctrl.getHousehold);

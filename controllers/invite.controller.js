@@ -43,6 +43,9 @@ const TenantOnboarding = require('../models/TenantOnboarding');
 const ApiError      = require('../utils/ApiError');
 const notifications = require('../services/notification.service');
 const { uniqueToken, inviteUrl } = require('../utils/inviteToken');
+// The strict rulebook for a form the TENANT fills in. Deliberately not applied
+// to anything a landlord writes — see the file's header for the asymmetry.
+const { assertSelfOnboardingProfile } = require('../utils/tenantSelfOnboarding');
 // "One person lives in one place" — shared with booking.controller.joinByInvite.
 // seatsTaken is shared with the vacancy check that actually refuses a join, so
 // this page cannot offer a seat placeTenantInUnit would turn away.
@@ -377,6 +380,15 @@ async function submitOnboarding(req, res, next) {
     // Same sanitiser the landlord's own intake form goes through, so a
     // self-filled profile and a landlord-typed one are the same record.
     const tenantProfile = bookingCtrl().sanitiseTenantProfile(req.body.tenantProfile);
+
+    // …and then the one rule that is NOT the same. The landlord may save a
+    // tenant they know almost nothing about; a tenant filling in their own
+    // record may not, because the landlord requires the NID, the professional
+    // ID, the father's name and an emergency contact, and this person is the
+    // one holding all of it. The form refuses the same submission, but the
+    // form's validation is a courtesy — this is the rule. See
+    // utils/tenantSelfOnboarding.js.
+    assertSelfOnboardingProfile(tenantProfile, { moveInDate: req.body.moveInDate });
 
     // ARE THEY ALREADY IN THIS ROOM?
     //

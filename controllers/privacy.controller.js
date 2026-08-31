@@ -95,7 +95,8 @@ exports.revokeAllOtherSessions = asyncH(async (req, res) => {
 //   {
 //     theme, language, marketingEmails, smsAlerts, callNotifications, aiLearningOptIn,
 //     notifications: { push, email, sound, frequency, dnd:{…}, messages, … },
-//     app:      { currency, autoplayVideos, reduceMotion, defaultLandingRole },
+//     app:      { currency, autoplayVideos, reduceMotion, defaultLandingRole,
+//                 defaultHome, livingMode },
 //     tenant:   { profileVisibility, savedSearchAlerts, defaultCity, … },
 //     landlord: { inquiryNotifications, autoReplyEnabled, quietHours:{…}, … },
 //   }
@@ -106,7 +107,7 @@ exports.revokeAllOtherSessions = asyncH(async (req, res) => {
 // Cross-cutting flat fields the rest of the server reads directly.
 const FLAT_KEYS     = ['aiLearningOptIn', 'marketingEmails', 'smsAlerts', 'callNotifications', 'theme', 'language'];
 const NOTIF_KEYS    = ['push', 'email', 'sound', 'frequency', 'messages', 'bookings', 'payments', 'inquiries', 'visits', 'priceAlerts', 'whatsappOptIn', 'marketingPush'];
-const APP_KEYS      = ['currency', 'autoplayVideos', 'reduceMotion', 'defaultLandingRole'];
+const APP_KEYS      = ['currency', 'autoplayVideos', 'reduceMotion', 'defaultLandingRole', 'defaultHome', 'livingMode'];
 const TENANT_KEYS   = ['profileVisibility', 'showContactToLandlords', 'savedSearchAlerts', 'defaultCity', 'defaultArea', 'defaultBudgetMin', 'defaultBudgetMax', 'defaultPropertyType'];
 const LANDLORD_KEYS = ['inquiryNotifications', 'autoReplyEnabled', 'autoReplyMessage', 'showPhoneOnListings', 'instantBooking', 'allowVisitRequests', 'defaultListingType'];
 const WINDOW_KEYS   = ['enabled', 'from', 'until']; // shared by dnd + quietHours

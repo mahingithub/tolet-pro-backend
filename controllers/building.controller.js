@@ -583,6 +583,10 @@ function tenantInputFrom(body = {}) {
     // How many seats to consume. 1 = normal seat; >1 = full-room booking where
     // one person takes every seat. Validated/clamped in placeTenantInUnit.
     seatsToBook: Math.max(1, Number(body.seatsToBook) || 1),
+    // The advance / deposit this occupant handed over on the day they moved in,
+    // and the rail it came through. Kept on the member (see MemberSchema).
+    advancePayment: Math.max(0, Number(body.advancePayment) || 0),
+    paymentMethod:  String(body.paymentMethod || '').trim().slice(0, 30),
   };
 }
 
@@ -661,6 +665,8 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
         userId: input.userId || null,
         tenantProfile: input.tenantProfile,
         monthlyRent: input.monthlyRent,
+        advancePayment: input.advancePayment,
+        paymentMethod: input.paymentMethod,
         seatsBooked: seatsToBook,
         rentType: isSeat ? 'seat' : (building.rentedAs === 'room' ? 'room' : 'flat'),
         floor: String(unit.floor),

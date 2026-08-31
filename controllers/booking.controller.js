@@ -239,6 +239,10 @@ async function buildMemberFromInput(raw = {}, defaults = {}) {
     monthlyRent:     reqRent > 0 ? reqRent : (Number(defaults.monthlyRent) || 0),
     serviceCharge:   Math.max(0, Number(raw.serviceCharge) || 0),
     securityDeposit: Math.max(0, Number(raw.securityDeposit) || 0),
+    // What this person paid up front, and how. See MemberSchema for why it is
+    // held per occupant rather than on the booking.
+    advancePayment:  Math.max(0, Number(raw.advancePayment) || 0),
+    paymentMethod:   String(raw.paymentMethod || '').trim().slice(0, 30),
     joinDate:    raw.joinDate ? new Date(raw.joinDate) : new Date(),
     status:      'active',
   };

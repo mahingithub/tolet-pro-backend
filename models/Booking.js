@@ -128,6 +128,14 @@ const MemberSchema = new mongoose.Schema(
     serviceCharge:   { type: Number, default: 0, min: 0 },
     securityDeposit: { type: Number, default: 0, min: 0 },
 
+    // The up-front money THIS person handed over when they moved in, and the
+    // rail it came through. Per-member rather than per-booking because a seat
+    // room is one booking with many occupants who each pay their own advance
+    // on their own day — writing it at booking level would let the second
+    // tenant's advance overwrite the first one's.
+    advancePayment: { type: Number, default: 0, min: 0 },
+    paymentMethod:  { type: String, trim: true, default: '', maxlength: 30 },
+
     joinDate:    { type: Date, default: Date.now },
     moveOutDate: { type: Date, default: null },
     status:      { type: String, enum: ['active', 'moved-out'], default: 'active' },

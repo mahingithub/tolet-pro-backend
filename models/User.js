@@ -261,6 +261,25 @@ const AppPrefsSchema = new mongoose.Schema(
     reduceMotion:   { type: Boolean, default: false },
     // Which dashboard a multi-role user lands on after login.
     defaultLandingRole: { type: String, enum: ['auto', 'tenant', 'landlord'], default: 'auto' },
+
+    // Which SCREEN the app opens on. Distinct from defaultLandingRole above,
+    // which only ever picked between the two dashboards: someone can be a
+    // tenant whose home base is the Living খাতা rather than their tenancy, and
+    // that is a different question from which role they are.
+    //   auto    — what the app has always done (landlord → host dashboard,
+    //             a tenant with a booking → tenant dashboard, else the
+    //             public home). Nothing changes until the user chooses.
+    //   living  — the খাতা / mess wallet
+    //   tenant  — the tenant dashboard
+    //   host    — the host dashboard
+    //   explore — the public homepage
+    defaultHome: { type: String, enum: ['auto', 'living', 'tenant', 'host', 'explore'], default: 'auto' },
+
+    // Which Living wallet the user runs: their own খাতা or a shared mess one.
+    // Lives on the account, not the phone, because it is an answer about the
+    // person ("I live alone") rather than about the device — reinstalling the
+    // app should not ask again. '' = never answered; Living shows the picker.
+    livingMode: { type: String, enum: ['', 'solo', 'joint'], default: '' },
   },
   { _id: false },
 );
