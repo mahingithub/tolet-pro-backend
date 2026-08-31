@@ -62,3 +62,13 @@ __tests__/
 *.spec.jsx
 *.test.ts
 *.spec.ts
+
+# Sensitive Docs & Tests
+*.md
+!README.md
+docs/
+scripts/test-*.js
+scripts/verify-*.js
+test-*.js
+verify-*.js
+
