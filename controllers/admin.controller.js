@@ -21,6 +21,7 @@
  */
 
 const User = require('../models/User');
+const adminRoles = require('../utils/adminRoles');
 const auditLog = require('../services/auditLog.service');
 const cloud = require('../services/cloudinary.service');
 const cache = require('../config/redis');
@@ -555,12 +556,16 @@ async function unbanUser(req, res, next) {
 }
 
 // ─── PUT /api/admin/users/:id/role ──────────────────────────────────────────
+// The User Management dropdown. Super-admin-only (gated on the route) and now
+// subject to the SAME rails as the Admin Team page: you cannot change your own
+// role, and the last super admin can never be demoted.
+//
+// Those guards used to live only in admin.team.controller, which made this
+// endpoint a way around them — one flip of this dropdown could demote the last
+// super admin, and since /api/admin/team/* is itself super-admin-only, that
+// locked the platform out of its own admin tooling permanently.
 async function updateUserRole(req, res, next) {
   try {
-    if (!req.user || !req.user.roles.includes('super_admin')) {
-      return res.status(403).json({ message: 'Only super admins can change user roles.' });
-    }
-
     const { id } = req.params;
     const { role } = req.body;
     if (!role) {
@@ -575,20 +580,16 @@ async function updateUserRole(req, res, next) {
     const user = await User.findById(id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    await adminRoles.assertRoleChangeAllowed(req.user, user, role);
+
     const previousRole = user.role;
-    
-    user.role = role;
-    const newRoles = ['tenant'];
-    if (user.landlordProfile && user.landlordProfile.fullName) {
-      newRoles.push('landlord');
-    }
-    if (['support_agent', 'moderator', 'super_admin'].includes(role)) {
-      newRoles.push(role);
-    } else if (role === 'landlord' && !newRoles.includes('landlord')) {
-      newRoles.push('landlord');
-    }
-    
-    user.roles = [...new Set(newRoles)];
+
+    // Base roles (tenant/landlord) survive; only the admin role is swapped.
+    // Rebuilding the array from scratch is how flipping someone to "Tenant"
+    // used to silently revoke a landlord who had passed landlord KYC but had
+    // no landlordProfile.fullName set.
+    user.roles = adminRoles.withRole(user, role);
+    user.role  = role;
     await user.save();
     // Refresh the dashboard counts this action moved (KYC queues, landlord /
     // tenant totals, banned users). Applied to EVERY admin user write rather

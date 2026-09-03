@@ -55,7 +55,10 @@ router.post('/users/:id/ban',               ctl.banUser);
 router.post('/users/:id/unban',             ctl.unbanUser);
 router.post('/users/:id/suspect',           ctl.suspectUser);
 router.post('/users/:id/unsuspect',         ctl.unsuspectUser);
-router.put ('/users/:id/role',              ctl.updateUserRole);
+// Role changes are super-admin-only, gated here rather than inside the handler
+// so it reads the same way as /team below. The handler additionally refuses to
+// let you change your own role or demote the last super admin.
+router.put ('/users/:id/role',              requireSuperAdmin, ctl.updateUserRole);
 router.delete('/users/:id',                 ctl.deleteUser);
 
 // ─── User reports (abuse reports raised from chat) ──────────────────────────

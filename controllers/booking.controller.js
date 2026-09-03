@@ -933,6 +933,44 @@ async function updateMember(req, res, next) {
     for (const key of whitelist) {
       if (req.body[key] !== undefined) member[key] = req.body[key];
     }
+
+    // ── Correcting the intake details ────────────────────────────────────────
+    // The eleven fields and the photo were writable exactly once, when the
+    // person was seated. A landlord who typed a name in a corridor could never
+    // afterwards put the NID, the profession or the emergency number right:
+    // this endpoint accepted the edit and dropped the whole object on the floor.
+    //
+    // MERGED, not assigned. The edit form sends the complete profile, but a
+    // caller correcting one field must not blank the other ten.
+    if (req.body.tenantProfile !== undefined) {
+      const current = member.tenantProfile?.toObject?.() || member.tenantProfile || {};
+      const incoming = (req.body.tenantProfile && typeof req.body.tenantProfile === 'object')
+        ? req.body.tenantProfile
+        : {};
+      const oldPublicId = current.photoPublicId || '';
+      // MERGE FIRST, SANITISE THE WHOLE RECORD. The আছে/নেই rules in
+      // sanitiseTenantProfile are about the record as it will stand, not about
+      // the handful of keys this patch happened to carry: run over the patch
+      // alone, "no govtIdStatus in this body" reads as "নেই" and deletes an NID
+      // the patch never mentioned.
+      const merged = sanitiseTenantProfile({ ...current, ...incoming });
+      // The photo leaves here SIGNED (signTenantPhoto) and that signature
+      // expires, so a form echoing back what it was shown would store a dead
+      // link. The publicId is the identity of the asset: unchanged means the
+      // same photo, and the stored URL stays exactly as it is.
+      if (String(merged.photoPublicId || '') === String(oldPublicId)) {
+        merged.photoUrl = current.photoUrl || '';
+      }
+      member.tenantProfile = merged;
+      // Replaced or cleared ⇒ nothing points at the old asset any more, and
+      // "removed" has to mean the bytes are gone rather than that we stopped
+      // rendering them.
+      if (oldPublicId && String(merged.photoPublicId || '') !== String(oldPublicId)) {
+        destroyTenantPhoto({ photoPublicId: oldPublicId });
+      }
+      member.markModified('tenantProfile');
+    }
+
     // If a phone was (re)set and no account is linked yet, try to link one.
     if (req.body.phone !== undefined && !member.userId && member.phone) {
       const uid = await resolveUserIdByPhone(member.phone);

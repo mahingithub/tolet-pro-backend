@@ -24,14 +24,14 @@
 
 const User = require('../models/User');
 const ApiError = require('../utils/ApiError');
-
-const ADMIN_ROLES = ['support_agent', 'moderator', 'super_admin'];
-const isAdminRole = (r) => ADMIN_ROLES.includes(r);
+// Shared with admin.controller's PUT /users/:id/role — the other role editor —
+// so both enforce the same self-lockout and last-super-admin rails.
+const {
+  ADMIN_ROLES, isAdminRole, rolesOf, isSuperAdmin, countSuperAdmins,
+  withRole, assertRoleChangeAllowed,
+} = require('../utils/adminRoles');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
-
-const rolesOf = (u) =>
-  (Array.isArray(u.roles) && u.roles.length ? u.roles : (u.role ? [u.role] : []));
 
 function pickAdmin(u) {
   const j = u.toJSON ? u.toJSON() : u;
@@ -54,12 +54,6 @@ function pickAdmin(u) {
     lastLoginAt: j.lastLoginAt || null,
   };
 }
-
-const isSuperAdmin = (u) => [u.role, ...rolesOf(u)].includes('super_admin');
-
-// Count via EITHER field so a legacy `role`-only super admin still counts.
-const countSuperAdmins = () =>
-  User.countDocuments({ $or: [{ roles: 'super_admin' }, { role: 'super_admin' }] });
 
 // GET /api/admin/team — everyone who currently holds an admin role (matched by
 // `roles[]` OR the active `role`, so nobody with admin access is hidden).
@@ -99,22 +93,9 @@ async function applyAdminRole(req, targetId, role) {
   const user = await User.findById(targetId);
   if (!user) throw ApiError.notFound('ইউজার পাওয়া যায়নি।', { code: 'user_not_found' });
 
-  if (String(user._id) === String(req.user._id)) {
-    throw ApiError.badRequest('আপনি নিজের রোল পরিবর্তন করতে পারবেন না।', {
-      code: 'cannot_modify_self',
-    });
-  }
+  await assertRoleChangeAllowed(req.user, user, role);
 
-  const current = rolesOf(user);
-  const wasSuper = isSuperAdmin(user);
-  if (wasSuper && role !== 'super_admin' && (await countSuperAdmins()) <= 1) {
-    throw ApiError.conflict('শেষ সুপার অ্যাডমিনকে ডিমোট করা যাবে না।', {
-      code: 'last_super_admin',
-    });
-  }
-
-  const base = current.filter((r) => !isAdminRole(r));
-  user.roles = [...new Set([...base, role])];
+  user.roles = withRole(user, role);
   user.role = role; // make the admin role active so their console reflects it
   await user.save();
   return user;
