@@ -20,12 +20,19 @@ const mongoose = require('mongoose');
 
 const MessageSchema = new mongoose.Schema(
   {
-    conversationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Conversation', required: true, index: true },
-    senderId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User',         required: true, index: true },
+    // Prefix of { conversationId, createdAt } below — no standalone index needed.
+    conversationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Conversation', required: true },
+    // Not indexed: senderId only ever appears as `{ $ne: me }` (unread counts,
+    // response-time stats). A $ne matches nearly every key in the index, so
+    // Mongo cannot seek with it — the index was write cost with no read to show
+    // for it.
+    senderId:       { type: mongoose.Schema.Types.ObjectId, ref: 'User',         required: true },
 
     // What kind of message this is. Defaults to 'text' so every existing
     // document (created before this field existed) reads back as a text message.
-    type: { type: String, enum: ['text', 'image', 'audio', 'video', 'document'], default: 'text', index: true },
+    // Not indexed: nothing filters messages by type; the client branches on it
+    // after the thread is loaded.
+    type: { type: String, enum: ['text', 'image', 'audio', 'video', 'document'], default: 'text' },
 
     // Text body (or optional caption for media). Not required — an image or
     // voice message can stand on its own.

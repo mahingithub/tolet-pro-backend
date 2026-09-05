@@ -87,7 +87,11 @@ const RefreshTokenSchema = new mongoose.Schema(
     expiresAt: {
       type: Date,
       required: true,
-      index: true,
+      // NO `index: true` HERE — the TTL index near the bottom of this file
+      // declares the same key with expireAfterSeconds: 0. Declaring both made
+      // Mongo reject the TTL one (IndexOptionsConflict), so expired refresh
+      // tokens were never reaped and the collection grew for the life of the
+      // deployment. The TTL index serves plain expiresAt queries too.
     },
     
     // Whether token has been revoked (manual or due to security event)

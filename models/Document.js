@@ -20,7 +20,8 @@ const mongoose = require('mongoose');
 const DocumentSchema = new mongoose.Schema(
   {
     // Owner — every query is scoped to this so one landlord never sees another's files.
-    landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    // Prefix of { landlordId, folder, createdAt } below.
+    landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 
     // Which tenant this file is about (optional — e.g. a legal doc may have none).
     tenantId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
@@ -28,11 +29,12 @@ const DocumentSchema = new mongoose.Schema(
     tenantPhone: { type: String, trim: true, default: '' },   // snapshot
     bookingId:   { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', default: null },
 
+    // Not indexed alone: a folder is only ever opened inside one landlord's
+    // drive, never across the platform.
     folder: {
       type: String,
       enum: ['agreements', 'nids', 'payments', 'legal'],
       default: 'legal',
-      index: true,
     },
 
     fileName: { type: String, required: true, trim: true, maxlength: 200 },

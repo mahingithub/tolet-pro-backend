@@ -176,12 +176,16 @@ MemberSchema.set('toJSON', {
 
 const BookingSchema = new mongoose.Schema(
   {
-    landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    tenantId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+    // INDEXES: the id fields below deliberately carry no `index: true`. Every
+    // one of them is the leading field of a compound index at the bottom of the
+    // file, and Mongo serves a single-field query from a compound's prefix — so
+    // the standalone copies were duplicate b-trees, paid for on every write.
+    landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    tenantId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     // Optional: a booking is either linked to a listing (propertyId) OR created
     // manually with just a typed property name (propertyId null). Manual entry
     // lets a host add multiple bookings that aren't tied to a single listing.
-    propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', default: null, index: true },
+    propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', default: null },
     inquiryId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Inquiry', default: null },
 
     // ── Building → Unit → (seat) ────────────────────────────────────────────
@@ -193,8 +197,8 @@ const BookingSchema = new mongoose.Schema(
     // label and a fallback for legacy rows only.
     //
     // Null on pre-restructure bookings until the migration backfills them.
-    buildingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Building', default: null, index: true },
-    unitId:     { type: mongoose.Schema.Types.ObjectId, ref: 'Unit',     default: null, index: true },
+    buildingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Building', default: null },
+    unitId:     { type: mongoose.Schema.Types.ObjectId, ref: 'Unit',     default: null },
 
     // Denormalized display fields so dashboards don't need JOINs every render.
     property:    { type: String, trim: true, default: '', maxlength: 200 },
@@ -209,11 +213,14 @@ const BookingSchema = new mongoose.Schema(
     // booking form + badges. Derived from the property's `intent` at create
     // time (commercial when intent==='commercial'); residential by default so
     // every legacy/manual booking keeps its current behaviour.
+    // Not indexed: nothing filters bookings by dealType. It is read off a
+    // document the caller already has, to pick a form and a badge. An index
+    // here was writing a b-tree entry per booking for a field no query has
+    // ever used as a predicate.
     dealType: {
       type: String,
       enum: ['residential', 'commercial'],
       default: 'residential',
-      index: true,
     },
     // Unit location within the property. Floor for all formats; room number for
     // single-room + hostel bookings. Hostel seats live per-member (members[]).
@@ -307,11 +314,11 @@ const BookingSchema = new mongoose.Schema(
 
     deletedAt:        { type: Date, default: null },
 
+    // Served by the { status, deletedAt, leaseEnd } index below as its prefix.
     status: {
       type: String,
       enum: ['draft', 'active', 'completed', 'cancelled'],
       default: 'active',
-      index: true,
     },
   },
   { timestamps: true },
@@ -334,13 +341,69 @@ BookingSchema.set('toJSON', {
   },
 });
 
-// ─── Compound indexes for AI Insights aggregations ─────────────────────────
-// Revenue queries filter by landlordId + sort by createdAt descending.
+// ─── Indexes ────────────────────────────────────────────────────────────────
+// Ordered by the read path each one serves. The rule applied throughout:
+// EQUALITY fields first, then the RANGE/SORT field last, so Mongo can seek to
+// the start of the matching run and walk it in the order the caller asked for
+// — no in-memory sort, no examining rows the filter will throw away.
+
+// GET /api/bookings/host — `{ landlordId, status: { $ne: 'cancelled' } }`
+// sorted by createdAt.
+//
+// TWO indexes, not one, and the reason is worth writing down because the
+// single-index version measured WORSE than what it replaced.
+//
+// `{ landlordId, status, createdAt }` looks like the obvious one index for
+// both this and the insights aggregation. It is not, because `$ne` is a RANGE
+// predicate: once the planner uses a range on `status`, the keys it walks are
+// no longer in `createdAt` order, so the sort has to be redone in memory. The
+// combined index turned a sort-free query into a blocking sort.
+//
+// So the sort-shaped query gets an index whose second field IS the sort key,
+// and the equality-shaped one (insights: `status: 'active'`) gets its own.
 BookingSchema.index({ landlordId: 1, createdAt: -1 });
+BookingSchema.index({ landlordId: 1, status: 1 });
+
 // Occupancy / property-scoped queries filter by propertyId + status.
 BookingSchema.index({ propertyId: 1, status: 1 });
-// Member self-view: "which bookings am I an occupant of?" (listTenantBookings).
-BookingSchema.index({ 'members.userId': 1 });
+
+// ─── The tenant's own view, and the one-person-one-home rule ────────────────
+// listTenantBookings and tenancy.service both look a person up four ways —
+// linked id or phone, on the booking or on a member row — and OR them together.
+// An $or costs whatever its worst branch costs: one unindexed branch and Mongo
+// gives up on all four and scans. All four are indexed here for that reason.
+//
+// The phone indexes are the ones that were missing. They are also only half a
+// fix: tenancy.service matches phones with a `/<last-10-digits>$/` regex, and a
+// suffix regex cannot seek in a b-tree — it can only scan every key. The index
+// caps the damage at an index scan instead of a collection scan; removing the
+// scan needs a normalised phone column, which is written up as a schema change
+// rather than smuggled in here.
+BookingSchema.index({ 'members.userId': 1, status: 1 });
+BookingSchema.index({ 'members.phone': 1 });
+BookingSchema.index({ tenantId: 1, status: 1 });
+BookingSchema.index({ tenantPhone: 1 });
+
+// Invite-code redemption — `{ inviteCode, status: { $ne: 'cancelled' } }`.
+// (inviteCode's own unique+sparse index is declared on the field.)
+
+// ─── Cron sweeps ────────────────────────────────────────────────────────────
+// These run on a timer against the WHOLE collection, so they are the queries
+// most likely to be quietly expensive: nobody is watching a dashboard spinner
+// when the nightly sweep reads every booking in the database.
+
+// leaseExpiryReminder — { status, deletedAt, leaseEnd: <range> }. leaseEnd is
+// the range field, so it goes last. Doubles as the plain { status } index.
+BookingSchema.index({ status: 1, deletedAt: 1, leaseEnd: 1 });
+
+// rentReminder — { status: 'active', autoReminder: true }.
+BookingSchema.index({ status: 1, autoReminder: 1 });
+
+// ─── Building → Unit occupancy ──────────────────────────────────────────────
+// building.controller checks "who is live in this unit / this building" before
+// it will seat anyone, so these run on every placement.
+BookingSchema.index({ unitId: 1, status: 1 });
+BookingSchema.index({ buildingId: 1, status: 1 });
 
 module.exports = mongoose.model('Booking', BookingSchema);
 

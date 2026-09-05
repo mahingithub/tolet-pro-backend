@@ -25,13 +25,18 @@ const mongoose = require('mongoose');
 
 const ReceiptSchema = new mongoose.Schema(
   {
-    bookingId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', required: true, index: true },
-    landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    tenantId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+    // NOTE ON INDEXES: none of these four carry `index: true` any more. Each is
+    // the leading field of a compound index declared at the bottom of the file,
+    // and a compound index already answers every query its prefix could — so a
+    // standalone copy bought nothing and cost a second b-tree to write on every
+    // receipt issued. See the index block below.
+    bookingId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', required: true },
+    landlordId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    tenantId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     // Which member (occupant) this receipt belongs to. null = legacy
     // single-tenant / whole-unit receipt. Part of the unique key below so each
     // member gets their own one-receipt-per-month guarantee.
-    memberId:   { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+    memberId:   { type: mongoose.Schema.Types.ObjectId, default: null },
     memberName: { type: String, trim: true, default: '' },
     // Optional — manual (non-listed) bookings have no propertyId.
     propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', default: null },
@@ -86,6 +91,29 @@ const ReceiptSchema = new mongoose.Schema(
 // NOTE: the OLD {bookingId, monthKey} unique index must be dropped in the
 // database before this one takes effect — see scripts/migrateBookingMembers.js.
 ReceiptSchema.index({ bookingId: 1, memberId: 1, monthKey: 1 }, { unique: true });
+
+// ─── Read paths ─────────────────────────────────────────────────────────────
+// Receipts are the fastest-growing collection in the app: one row per occupant
+// per month, kept forever, because a receipt is a document the tenant is
+// entitled to produce years later. That makes an unindexed sort here worse
+// every month it runs, which is exactly what the two dashboard queries were
+// doing — `landlordId` and `tenantId` had standalone indexes, but `issuedAt`
+// had none, so Mongo fetched every one of a landlord's receipts and sorted
+// them in memory on each dashboard load.
+//
+// Putting issuedAt in the index makes the sort disappear: Mongo walks the
+// b-tree in issuedAt order and stops at the page boundary.
+
+// GET /api/receipts/host — landlord's issued receipts, newest first.
+ReceiptSchema.index({ landlordId: 1, issuedAt: -1 });
+
+// GET /api/receipts/tenant — the tenant's own receipts. The controller matches
+// `{ $or: [{ tenantId }, { tenantPhone }] }` because receipts issued before the
+// occupant had an account carry only the phone. An $or is only as fast as its
+// SLOWEST branch: with tenantPhone unindexed the whole thing fell back to a
+// collection scan, so both branches are indexed here.
+ReceiptSchema.index({ tenantId: 1, issuedAt: -1 });
+ReceiptSchema.index({ tenantPhone: 1, issuedAt: -1 });
 
 ReceiptSchema.set('toJSON', {
   virtuals: true,

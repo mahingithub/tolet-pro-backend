@@ -225,14 +225,19 @@ const PropertySchema = new mongoose.Schema(
   {
     title:       { type: String, required: true, trim: true, minlength: 3, maxlength: 160 },
     description: { type: String, trim: true, default: '', maxlength: 4000 },
-    intent:      { type: String, enum: INTENTS,       default: 'rent', index: true },
+    // `intent` and `division` are the leading fields of compound indexes at the
+    // bottom of this file, so they need no standalone index of their own —
+    // Mongo reads a single-field predicate straight off the compound's prefix.
+    // `type` and `category` DO keep theirs: they are real filter fields that
+    // are not the prefix of anything.
+    intent:      { type: String, enum: INTENTS,       default: 'rent' },
     // Default type is now 'flat' — the wizard's rent intent renames
     // "Apartment" to "Flat". Legacy 'apartment' rows are auto-rewritten to
     // 'flat' inside the pre('validate') hook.
     type:        { type: String, enum: PROPERTY_TYPES, default: 'flat', index: true },
     category:    { type: String, enum: CATEGORIES,    default: 'family', index: true },
 
-    division:    { type: String, enum: DIVISIONS, required: true, lowercase: true, trim: true, index: true },
+    division:    { type: String, enum: DIVISIONS, required: true, lowercase: true, trim: true },
     district:    { type: String, trim: true, default: '', maxlength: 80 },
     // Thana / upazila — the level tenants actually search by, since a district
     // like Dhaka or Bhola is far too broad. Stored as the English display label
@@ -257,7 +262,10 @@ const PropertySchema = new mongoose.Schema(
     //   room  → subdivided into rooms, each rented separately
     //   seat  → hostel / mess: rooms subdivided into seats/beds
     //   mixed → a combination (rentType then lives per-member on the booking)
-    rentalType:  { type: String, enum: ['flat', 'room', 'seat', 'mixed'], default: 'flat', index: true },
+    // Not indexed: rentalType is never a query predicate. It is read off a
+    // property the caller already loaded, to pick the default member.rentType
+    // when a landlord adds occupants (booking.controller → fetchPropertyMeta).
+    rentalType:  { type: String, enum: ['flat', 'room', 'seat', 'mixed'], default: 'flat' },
     // Total rentable slots (seats / rooms). Occupancy = active members on the
     // booking; Vacancy = capacity - occupancy. 0 = not tracked (whole-flat).
     capacity:    { type: Number, default: 0, min: 0, max: 500 },
@@ -302,12 +310,14 @@ const PropertySchema = new mongoose.Schema(
     price:         { type: Number, required: true, min: 0, max: 1_000_000_000 },
     originalPrice: { type: Number, default: null, min: 0, max: 1_000_000_000 },
 
-    status:        { type: String, enum: STATUSES, default: 'active', index: true },
+    // Both are covered by the { status, availabilityStatus, createdAt } feed
+    // index below — and neither is ever queried without the other, because the
+    // public feed always asks for "active AND not already taken".
+    status:        { type: String, enum: STATUSES, default: 'active' },
     availabilityStatus: {
       type: String,
       enum: ['available', 'booked', 'rented'],
       default: 'available',
-      index: true,
     },
 
     // When this listing was marked 'rented' (stamped by booking.controller
@@ -315,15 +325,21 @@ const PropertySchema = new mongoose.Schema(
     // countdown — for RENTED_RETENTION_DAYS, then permanently removed by the
     // sweep in services/rentedCleanup.service.js. Null for any non-rented
     // listing; indexed because the cleanup query filters on it.
-    rentedAt: { type: Date, default: null, index: true },
+    // Covered by { status, rentedAt } below — the cleanup sweep always pairs
+    // the two ("rented listings whose retention window has run out"), and a
+    // rentedAt-only predicate does not exist anywhere in the app.
+    rentedAt: { type: Date, default: null },
 
     // ─── Ownership snapshot ──────────────────────────────────────────────
     // ownerUserId is the canonical link; ownerName + ownerPhone are stored as
     // a denormalised snapshot so listing cards don't have to JOIN to render.
-    ownerUserId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    ownerUserId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     ownerName:     { type: String, trim: true, default: '', maxlength: 80 },
     ownerPhone:    { type: String, trim: true, default: '', maxlength: 20 },
-    hostTier:      { type: String, enum: ['free', 'plus', 'pro'], default: 'free', index: true },
+    // Not indexed: hostTier is a SORT key in the feed, never a filter — and it
+    // is the second key of a sort whose first key is computed at query time
+    // (activeBoost), so no index on it could be used for that sort anyway.
+    hostTier:      { type: String, enum: ['free', 'plus', 'pro'], default: 'free' },
 
     // ─── Search boost (Plus perk) ────────────────────────────────────────
     // A Plus host may spend one monthly credit to pin a listing to the top of
@@ -331,7 +347,11 @@ const PropertySchema = new mongoose.Schema(
     // A sweep is deliberately NOT required to un-boost: the feed query filters
     // on boostedUntil > now, so an expired boost stops ranking on its own even
     // if `boosted` is still true. See services/boost.service.js.
-    boosted:      { type: Boolean, default: false, index: true },
+    // Not indexed: `boosted` is never a query predicate. The feed does not
+    // filter on it — it recomputes activeBoost per request from boostedUntil
+    // (see the comment above), so the stored flag is only ever read back off a
+    // document that was already fetched.
+    boosted:      { type: Boolean, default: false },
     boostedUntil: { type: Date, default: null },
 
     // ─── Counters (denormalised) ─────────────────────────────────────────
@@ -357,10 +377,32 @@ const PropertySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Mongo text index for richer multi-word search. The regex fallback in
-// services/searchService.js still handles substring matches that text-index
-// stemming misses (e.g. "dhanmondi 12" inside "Dhanmondi-12").
+// Mongo text index for richer multi-word search.
+//
+// READ THIS BEFORE ASSUMING IT IS DOING ANYTHING. Nothing in the codebase
+// issues a $text query — searchService.buildSearchFilter builds $regex clauses
+// against searchHaystack instead, and that is the only search path there is.
+// So today this index is written on every property save and read by nobody,
+// which for a text index (it tokenises the whole haystack string on each write)
+// is the most expensive way in the schema to store nothing.
+//
+// It is kept rather than dropped because the recommended fix is to START USING
+// it — a $text query is what turns the search from a collection scan into an
+// index seek. That change alters which listings match and in what order, so it
+// is a product decision, written up separately rather than slipped in here. If
+// that write-up is rejected and regex search is kept, drop this index.
 PropertySchema.index({ searchHaystack: 'text' });
+
+// ─── The public feed ────────────────────────────────────────────────────────
+// THE hot query in the app: every visit to the listing page runs it twice, once
+// for the page and once for `countDocuments` on the same filter. The filter is
+// always `{ status: 'active', availabilityStatus: { $nin: ['rented','booked'] } }`
+// plus whatever the user narrowed by, so those two lead. createdAt trails them
+// so the default "newest first" sort is read in b-tree order.
+//
+// This also makes the count cheap: with every field of the filter in one index,
+// countDocuments answers from the index alone and never touches a document.
+PropertySchema.index({ status: 1, availabilityStatus: 1, createdAt: -1 });
 
 // Common filter combo — division + status + createdAt — used by the listing
 // page's "Newest in Dhaka" feed and the "active only" homepage.
@@ -371,11 +413,23 @@ PropertySchema.index({ division: 1, status: 1, createdAt: -1 });
 // pages off a collection scan.
 PropertySchema.index({ intent: 1, status: 1, createdAt: -1 });
 
-// ─── Compound indexes for AI Insights aggregations ─────────────────────────
+// ─── Host dashboard ─────────────────────────────────────────────────────────
+// listMyProperties: every property a host owns, newest first, no status filter
+// (a host sees their paused and rented listings too). Without createdAt in the
+// index this fetched the host's whole portfolio and sorted it in memory.
+// `_id: -1` is included because the query sorts by `{ createdAt: -1, _id: -1 }`
+// and an index that stops short of the tie-break key cannot serve that sort.
+PropertySchema.index({ ownerUserId: 1, createdAt: -1, _id: -1 });
+// Host property lookups filtered to a status — insights + the listing quota check.
+PropertySchema.index({ ownerUserId: 1, status: 1 });
+
+// ─── Sweeps + analytics ─────────────────────────────────────────────────────
+// rentedCleanup.service: rented listings whose retention window has expired.
+// Equality on status, range on rentedAt — range last, so the scan starts at the
+// cutoff instead of at the first rented listing ever.
+PropertySchema.index({ status: 1, rentedAt: 1 });
 // Market opportunity comparisons: find comparable properties by area + type.
 PropertySchema.index({ area: 1, type: 1, price: 1 });
-// Host property lookups: list a host's active properties efficiently.
-PropertySchema.index({ ownerUserId: 1, status: 1 });
 
 // ─── Auto-build slug + haystack on save ────────────────────────────────────
 PropertySchema.pre('validate', function preValidate(next) {

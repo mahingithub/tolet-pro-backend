@@ -71,4 +71,14 @@ const aiGuideSchema = new mongoose.Schema(
 	}
 );
 
+// ─── Indexes ────────────────────────────────────────────────────────────────
+// This collection had none at all. Every guide lookup — and the public one runs
+// on page load for anonymous visitors, so it is the query least protected by a
+// logged-in user's patience — read the whole collection and sorted it in
+// memory. The three read paths all filter on isActive + placement and order by
+// `order`, so one index covers them: equality fields first, sort key last.
+aiGuideSchema.index({ isActive: 1, placement: 1, order: 1 });
+// getGuidesByPlacement additionally narrows by audience.
+aiGuideSchema.index({ isActive: 1, placement: 1, audience: 1, order: 1 });
+
 module.exports = mongoose.model("AIGuide", aiGuideSchema);

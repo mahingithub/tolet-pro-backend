@@ -73,7 +73,13 @@ const loginHistorySchema = new mongoose.Schema(
       type: Date,
       required: true,
       default: Date.now,
-      index: true,
+      // NO `index: true` HERE — deliberately. The TTL index at the bottom of
+      // this file declares the SAME key ({ loginAt: 1 }) with
+      // expireAfterSeconds. Declaring both made Mongo reject the second
+      // createIndex with IndexOptionsConflict, and the one it rejected was the
+      // TTL — so login history never expired and grew without bound. The plain
+      // index is redundant anyway: the TTL index is a normal b-tree that any
+      // loginAt query can use.
     },
     logoutAt: {
       type: Date,

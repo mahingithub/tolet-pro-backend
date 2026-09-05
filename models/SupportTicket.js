@@ -32,11 +32,12 @@ MessageSchema.set('toJSON', {
 
 const SupportTicketSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    // Both lead compound indexes declared below, so neither needs its own.
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     userName: { type: String, required: true },
     userPhone: { type: String, required: true },
     subject: { type: String, required: true },
-    status: { type: String, enum: ['open', 'pending_user', 'resolved', 'closed'], default: 'open', index: true },
+    status: { type: String, enum: ['open', 'pending_user', 'resolved', 'closed'], default: 'open' },
     priority: { type: String, enum: ['low', 'normal', 'urgent'], default: 'normal' },
     
     assignedAdminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
@@ -54,6 +55,18 @@ const SupportTicketSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// ─── Indexes ────────────────────────────────────────────────────────────────
+// Both ticket lists sort by updatedAt (most recently active first) and neither
+// had an index that could do it, so each load sorted in memory. A ticket
+// document embeds its whole message thread, which makes those sorts unusually
+// expensive per row — the documents being shuffled are large.
+
+// GET /api/support/tickets — the user's own tickets.
+SupportTicketSchema.index({ userId: 1, updatedAt: -1 });
+
+// The admin queue, optionally filtered to one status.
+SupportTicketSchema.index({ status: 1, updatedAt: -1 });
 
 SupportTicketSchema.set('toJSON', {
   virtuals: true,

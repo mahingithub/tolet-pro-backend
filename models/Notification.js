@@ -32,7 +32,8 @@ const mongoose = require('mongoose');
 
 const NotificationSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    // Prefix of the two compound indexes at the bottom of the file.
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     type:   {
       type: String,
       enum: [
@@ -54,13 +55,31 @@ const NotificationSchema = new mongoose.Schema(
     // free-form payload — keep it small.
     data:   { type: mongoose.Schema.Types.Mixed, default: {} },
 
-    read:   { type: Boolean, default: false, index: true },
+    // Not indexed alone: "every unread notification on the platform" is not a
+    // query. read only ever narrows one user's own list.
+    read:   { type: Boolean, default: false },
     readAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
 
-NotificationSchema.index({ userId: 1, read: 1, createdAt: -1 });
+// The unread badge + the "unread only" filter.
+//
+// `_id: -1` is the last key of both indexes here for a specific reason: the
+// controller sorts by `{ createdAt: -1, _id: -1 }`, using _id as the tie-break
+// that keeps paging stable when two notifications land in the same
+// millisecond. An index that stops at createdAt cannot satisfy that two-key
+// sort, so Mongo re-sorted in memory anyway — the index looked right and did
+// nothing. Whatever the query sorts by, the index has to spell out in full.
+NotificationSchema.index({ userId: 1, read: 1, createdAt: -1, _id: -1 });
+
+// The DEFAULT bell view — listForUser with unreadOnly off, which is what most
+// opens of the panel are. It looked covered by the index above, but is not:
+// with `read` sitting between userId and createdAt, a query that does not
+// constrain `read` cannot use createdAt for ordering, so Mongo pulled the
+// user's whole notification history and sorted it in memory. This index puts
+// createdAt directly after userId, which is the order that query needs.
+NotificationSchema.index({ userId: 1, createdAt: -1, _id: -1 });
 
 NotificationSchema.set('toJSON', {
   virtuals: true,

@@ -36,7 +36,10 @@ const ConversationSchema = new mongoose.Schema(
     inquiryId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Inquiry',  default: null, index: true },
 
     lastMessageText: { type: String, default: '', maxlength: 600 },
-    lastMessageAt:   { type: Date,   default: null, index: true },
+    // Not indexed alone: "most recent threads across the whole platform" is not
+    // a query anyone makes. lastMessageAt only ever orders ONE user's inbox,
+    // which is what the { participants, lastMessageAt } index below serves.
+    lastMessageAt:   { type: Date,   default: null },
     lastSenderId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 
     // Map<userIdString, unreadCount>
@@ -77,7 +80,14 @@ const ConversationSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// find-or-create a thread for a given peer + listing.
 ConversationSchema.index({ participants: 1, propertyId: 1 });
+
+// listConversations — the chat inbox, ordered by most recent message. This is a
+// MULTIKEY index (participants is an array), which is fine and is what makes
+// "threads I am in" a seek instead of a scan. Without lastMessageAt in the key,
+// every inbox load pulled the user's entire thread history back to sort it.
+ConversationSchema.index({ participants: 1, lastMessageAt: -1 });
 
 ConversationSchema.set('toJSON', {
   virtuals: true,

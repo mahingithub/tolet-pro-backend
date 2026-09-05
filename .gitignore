@@ -72,3 +72,7 @@ scripts/verify-*.js
 test-*.js
 verify-*.js
 
+# Benchmarks & profiling
+.bench/
+scripts/bench-*.js
+bench-*.js
