@@ -114,6 +114,11 @@ class CacheManager {
     // Log noisy connection errors at most once every 30s so a Redis outage
     // can't flood the Render log (and the log-based billing with it).
     this._lastErrorLog = 0;
+    // …but let the FIRST connection failure through unconditionally — see
+    // _logError(). That one carries the diagnosis.
+    this._loggedFirstConnError = false;
+    /** @type {{label:string,code:string|null,message:string,at:string}|null} */
+    this.lastError = null;
 
     this.TTL = TTL;
     this.KEY = KEY;
@@ -796,10 +801,90 @@ class CacheManager {
 
   /** Rate-limited error logging so an outage can't flood the logs. */
   _logError(label, err) {
+    // Always REMEMBER the most recent failure, even when we don't log it.
+    // The rate limit below exists to protect the log bill, but it was also
+    // hiding the cause: a Redis that never connects logs once, thirty seconds
+    // into a deploy, and then goes quiet forever while /healthz reports a bare
+    // "disconnected" with no reason. Keeping the last error costs nothing and
+    // is what `diagnose()` reports.
+    this.lastError = {
+      label,
+      code: err.code || err.errno || null,
+      message: err.message,
+      at: new Date().toISOString(),
+    };
+
+    // The FIRST connection failure is logged unconditionally, with the
+    // actionable hint, because that is the one that explains the other
+    // thousand. Subsequent ones stay rate-limited.
+    if (label === 'connection' && !this._loggedFirstConnError) {
+      this._loggedFirstConnError = true;
+      const d = this.diagnose();
+      console.error(
+        `[cache] REDIS UNREACHABLE — cache is bypassed, every read goes to MongoDB.\n` +
+        `        target : ${d.target}\n` +
+        `        error  : ${d.code || 'unknown'} — ${err.message}\n` +
+        `        likely : ${d.hint}`,
+      );
+      return;
+    }
+
     const now = Date.now();
     if (now - this._lastErrorLog < 30_000) return;
     this._lastErrorLog = now;
     console.warn(`[cache] ${label} failed: ${err.message} (falling back to DB)`);
+  }
+
+  /**
+   * Why is the cache down? Safe to expose on /healthz.
+   *
+   * Returns the error CODE and a plain-language hint, never the URL's
+   * credentials — /healthz is unauthenticated, so the password and the full
+   * internal hostname must not appear in it. The host is redacted to its first
+   * and last few characters, which is enough to tell two Redis instances apart
+   * without publishing the address of either.
+   */
+  diagnose() {
+    const code = this.lastError?.code || null;
+
+    // Each of these is a different fix, and telling them apart by hand means
+    // reading ioredis stack traces. Map them once, here.
+    const HINTS = {
+      ENOTFOUND:
+        'hostname does not resolve. On Render an INTERNAL Key Value hostname '
+        + '(red-xxxx, no domain) only resolves from the SAME REGION — check that the '
+        + 'web service and the Key Value instance are both in the same one, or switch '
+        + 'REDIS_URL to the External URL (rediss://…render.com:6379).',
+      EAI_AGAIN: 'DNS lookup failed temporarily — usually the same region mismatch as ENOTFOUND.',
+      ECONNREFUSED: 'host resolves but nothing is listening on that port — check the port in REDIS_URL.',
+      ETIMEDOUT: 'connection timed out — usually a firewall or a cross-region internal URL.',
+      ECONNRESET: 'connection dropped by the server — often a plain redis:// URL against a TLS-only endpoint (try rediss://).',
+      NOAUTH: 'server wants a password and REDIS_URL has none.',
+      WRONGPASS: 'password in REDIS_URL is wrong (it rotates when the instance is recreated).',
+      ERR_SSL_WRONG_VERSION_NUMBER: 'TLS mismatch — the endpoint expects rediss:// (TLS), or expects plain redis:// and got TLS.',
+    };
+
+    return {
+      enabled: this.enabled,
+      status: this.isReady() ? 'connected' : (this.enabled ? 'disconnected' : 'disabled'),
+      target: this._redactedTarget(),
+      code,
+      at: this.lastError?.at || null,
+      hint: code ? (HINTS[code] || 'see the backend logs for the full error') : null,
+    };
+  }
+
+  /** `rediss://red-da1***tsg:6379` — enough to identify, nothing to leak. */
+  _redactedTarget() {
+    if (!env.redisUrl) return 'not set';
+    try {
+      const u = new URL(env.redisUrl);
+      const h = u.hostname;
+      const short = h.length > 12 ? `${h.slice(0, 6)}***${h.slice(-3)}` : '***';
+      return `${u.protocol}//${short}:${u.port || '6379'}`;
+    } catch {
+      return 'unparseable REDIS_URL';
+    }
   }
 }
 

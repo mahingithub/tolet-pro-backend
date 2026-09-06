@@ -230,6 +230,12 @@ app.get('/healthz', async (_req, res) => {
     ok,
     db,
     redis,
+    // WHY the cache is down, when it is. `redis: 'disconnected'` on its own
+    // sent us hunting through Render logs for a cause that was rate-limited
+    // out of them; this carries the error code and the fix. cache.diagnose()
+    // redacts the host and never includes the password — /healthz is
+    // unauthenticated.
+    ...(redis === 'disconnected' ? { redisDiagnostic: cache.diagnose() } : {}),
     cacheStats: {
       hits: stats.hits,
       misses: stats.misses,
