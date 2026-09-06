@@ -9,6 +9,7 @@
  */
 
 const mongoose      = require('mongoose');
+const { phoneCore } = require('../utils/phone');
 const Booking       = require('../models/Booking');
 const Receipt       = require('../models/Receipt');
 const User          = require('../models/User');
@@ -29,23 +30,43 @@ function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
 }
 
-// Reduce any phone format (+880 1712-xxxxxx, 01712xxxxxx, 8801712xxxxxx) down to
-// its 10-digit BD mobile core so we can match a booking's typed phone against a
-// registered User's stored phone regardless of formatting.
-function phoneCore(p) {
-  const d = String(p || '').replace(/\D/g, '');
-  return d.length >= 10 ? d.slice(-10) : '';
-}
+// phoneCore() — reduces any phone format to its comparable 10-digit core — now
+// lives in utils/phone.js, imported above. It used to be copy-pasted into five
+// files; one definition means one place for the matching rule to change.
 
 // Find a registered tenant's user id from a phone number. Used to link manual /
 // legacy bookings to a real account so Profile / Call / Message work. Returns
 // null when no account matches (unregistered tenant → no profile to open).
+//
+// FAST PATH, THEN SELF-HEALING FALLBACK.
+//
+// The indexed `phoneCore` lookup answers this in two key reads. It only misses
+// for a user row written before phoneCore existed and not yet touched by the
+// backfill (migrations/2026-09-06-phone-core.js), so the old suffix-regex scan
+// stays as a second attempt — correctness first, speed where it is available.
+//
+// When the fallback DOES find someone, their phoneCore is written back. That
+// makes the slow path self-extinguishing: every legacy row that anybody
+// actually looks up repairs itself, so the scan gets rarer even if the
+// migration is never run. listHostBookings calls this once per unlinked
+// booking on every dashboard load, which is exactly the traffic that does the
+// repairing.
 async function resolveUserIdByPhone(phone) {
   const core = phoneCore(phone);
   if (!core) return null;
   try {
-    const user = await User.findOne({ phone: new RegExp(`${core}$`) }).select('_id').lean();
-    return user?._id || null;
+    const fast = await User.findOne({ phoneCore: core }).select('_id').lean();
+    if (fast) return fast._id;
+
+    const legacy = await User.findOne({ phone: new RegExp(`${core}$`) })
+      .select('_id').lean();
+    if (!legacy) return null;
+
+    // Backfill this one row. Deliberately not awaited into the response path —
+    // a failed repair must not fail the lookup that already succeeded.
+    User.updateOne({ _id: legacy._id }, { $set: { phoneCore: core } })
+      .catch(() => {});
+    return legacy._id;
   } catch {
     return null;
   }
@@ -541,8 +562,20 @@ async function listTenantBookings(req, res, next) {
   try {
     // Match the viewer as the single tenant OR as one of the booking's members
     // (by linked userId or by phone).
+    //
+    // The phone branches match on the NORMALISED core, not the raw string.
+    // They used to be `{ tenantPhone: req.user.phone }` — an exact match on
+    // whatever format each side happened to store, so a tenant who signed up
+    // as "+8801712345678" did not match the "01712345678" their landlord typed
+    // at intake. The comparison a few lines below already knew this and used
+    // phoneCore(); the QUERY did not, so the row it wanted was filtered out
+    // before it ever arrived. Matching on the core fixes that and is indexed.
     const conditions = [{ tenantId: req.user._id }, { 'members.userId': req.user._id }];
-    if (req.user.phone) {
+    const myCore = phoneCore(req.user.phone);
+    if (myCore) {
+      conditions.push({ tenantPhoneCore: myCore });
+      conditions.push({ 'members.phoneCore': myCore });
+      // Legacy rows the backfill has not reached yet.
       conditions.push({ tenantPhone: req.user.phone });
       conditions.push({ 'members.phone': req.user.phone });
     }

@@ -18,6 +18,7 @@
  */
 
 const mongoose = require('mongoose');
+const { phoneCore } = require('../utils/phone');
 const Booking  = require('../models/Booking');
 const RentPaymentSubmission = require('../models/RentPaymentSubmission');
 const cloudinary = require('../services/cloudinary.service');
@@ -31,10 +32,7 @@ function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
 }
 
-function phoneCore(p) {
-  const d = String(p || '').replace(/\D/g, '');
-  return d.length >= 10 ? d.slice(-10) : '';
-}
+// phoneCore() — see utils/phone.js, imported above.
 
 // Room-correct realtime emit (sockets join room `user:<id>`).
 function notifySocket(userId, event, payload) {

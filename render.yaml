@@ -6,10 +6,18 @@
 # =============================================================
 services:
   - type: web
-    name: tolet-pro-backend
+    name: toletpro-backend
     runtime: node
-    plan: free
-    region: singapore          # closest Render region to Bangladesh
+    # Starter, not free: a free instance sleeps after 15 minutes of no traffic
+    # and takes ~50s to wake, which looks exactly like the site being down.
+    plan: starter
+    # Singapore, and it MUST match the MongoDB Atlas region (currently
+    # AWS / ap-southeast-1) and the Key Value instance. This is not a
+    # preference — Render's private network is per-region, so a Key Value
+    # instance in another region is unreachable (ENOTFOUND), and an Atlas
+    # cluster in another region puts a ~300ms Pacific crossing on every query.
+    # Both of those were live production faults before 2026-09-06.
+    region: singapore
     branch: main
     buildCommand: npm install
     startCommand: npm start
@@ -19,6 +27,17 @@ services:
     envVars:
       - key: COOKIE_SAMESITE
         value: none
+
+      # Cache + rate limiter + Socket.IO adapter. MUST be the INTERNAL URL of a
+      # Key Value instance in THIS SERVICE'S REGION — see the region note above.
+      # Left as sync:false rather than wired with fromService because the
+      # instance predates this blueprint; paste the Internal Key Value URL.
+      #
+      # Optional: with no REDIS_URL the app runs uncached (config/redis.js
+      # degrades gracefully). /healthz reports `redis` plus, when it cannot
+      # connect, a `redisDiagnostic` block naming the cause.
+      - key: REDIS_URL
+        sync: false
       - key: NODE_ENV
         value: production
 

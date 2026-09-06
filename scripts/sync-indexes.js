@@ -47,8 +47,44 @@ const DRY     = args.includes('--dry-run');
 const YES     = args.includes('--yes');
 const isProd  = (process.env.NODE_ENV || 'development') === 'production';
 
+/**
+ * A comparable identity for an index key.
+ *
+ * TEXT INDEXES NEED SPECIAL HANDLING. Mongo does not store `{searchHaystack:
+ * 'text'}` — it stores `{_fts: 'text', _ftsx: 1}` and puts the real field names
+ * in a separate `weights` object. Comparing raw keys therefore never matched
+ * the declared spec, so every run planned a DROP + CREATE of the text index.
+ * That is not just noise: rebuilding a text index re-tokenises every document
+ * in the collection, which on `properties` is the single most expensive index
+ * build in the schema, and it would have happened on every invocation.
+ *
+ * Normalising both sides to `{<field>: 'text', …}` (fields sorted, so key order
+ * cannot cause a false mismatch) makes the comparison stable and the script
+ * idempotent.
+ */
 function keyStr(spec) {
   return JSON.stringify(spec);
+}
+
+/** Identity of an index as the DATABASE reports it. */
+function existingKeyStr(ix) {
+  if (ix.key && ix.key._fts === 'text' && ix.weights) {
+    const out = {};
+    for (const f of Object.keys(ix.weights).sort()) out[f] = 'text';
+    return JSON.stringify(out);
+  }
+  return keyStr(ix.key);
+}
+
+/** Identity of an index as the SCHEMA declares it. */
+function declaredKeyStr(spec) {
+  const textFields = Object.keys(spec).filter((f) => spec[f] === 'text');
+  if (textFields.length) {
+    const out = {};
+    for (const f of textFields.sort()) out[f] = 'text';
+    return JSON.stringify(out);
+  }
+  return keyStr(spec);
 }
 
 async function main() {
@@ -58,8 +94,26 @@ async function main() {
     process.exit(1);
   }
 
-  if (isProd && !DRY && !YES) {
-    console.error('Refusing to modify production indexes without --yes (or use --dry-run).');
+  // Is this a throwaway database, or somebody's live one?
+  //
+  // NODE_ENV is the wrong question to ask. The dangerous case is a developer's
+  // laptop — where NODE_ENV is unset, so it reads as "development" — pointed at
+  // an Atlas URI it picked up from .env. That is precisely the situation that
+  // caused an accidental apply against production, and the old
+  // `isProd && !DRY && !YES` check would not have stopped it.
+  //
+  // Judge the TARGET instead: anything that is not plainly a local host is
+  // treated as live and needs --yes said out loud.
+  const isLocalTarget = /^mongodb:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0)(:|\/)/.test(uri);
+  const isLive = isProd || !isLocalTarget;
+
+  if (isLive && !DRY && !YES) {
+    console.error(
+      'Refusing to modify a non-local database without --yes.\n' +
+      `  target : ${uri.replace(/\/\/[^@]*@/, '//***@')}\n` +
+      '  try    : node scripts/sync-indexes.js --dry-run\n' +
+      '  or     : node scripts/sync-indexes.js --yes',
+    );
     process.exit(1);
   }
 
@@ -94,18 +148,18 @@ async function main() {
 
     // _id_ is implicit and must never be touched.
     const existingByKey = new Map(
-      existing.filter((i) => i.name !== '_id_').map((i) => [keyStr(i.key), i]),
+      existing.filter((i) => i.name !== '_id_').map((i) => [existingKeyStr(i), i]),
     );
-    const declaredKeys = new Set(declared.map(([spec]) => keyStr(spec)));
+    const declaredKeys = new Set(declared.map(([spec]) => declaredKeyStr(spec)));
 
     const toDrop = [...existingByKey.entries()].filter(([k]) => !declaredKeys.has(k));
-    const toAdd  = declared.filter(([spec]) => !existingByKey.has(keyStr(spec)));
+    const toAdd  = declared.filter(([spec]) => !existingByKey.has(declaredKeyStr(spec)));
 
     // Also catch the IndexOptionsConflict case: same key, different options
     // (a plain index where a TTL is declared, or vice versa). Those need the
     // old one dropped before the new one can be built.
     const toRebuild = declared.filter(([spec, opts]) => {
-      const cur = existingByKey.get(keyStr(spec));
+      const cur = existingByKey.get(declaredKeyStr(spec));
       if (!cur) return false;
       const wantTtl = opts && opts.expireAfterSeconds;
       const hasTtl  = cur.expireAfterSeconds;
@@ -126,7 +180,7 @@ async function main() {
     }
 
     for (const [spec, opts] of toRebuild) {
-      const cur = existingByKey.get(keyStr(spec));
+      const cur = existingByKey.get(declaredKeyStr(spec));
       console.log(`   REBUILD ${keyStr(spec)}  [${cur.name}] — options changed (TTL)`);
       if (!DRY) {
         try {
@@ -166,4 +220,20 @@ async function main() {
   process.exit(failed ? 1 : 0);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+// RUN ONLY WHEN INVOKED DIRECTLY.
+//
+// This guard is not boilerplate — it is here because its absence caused a real
+// incident. A bare `require('./scripts/sync-indexes.js')`, typed to check that
+// the file parsed, executed main(): dotenv had already loaded the production
+// MONGO_URI from .env, NODE_ENV was unset (so the isProd guard below did not
+// engage), and the script connected to the live database in APPLY mode. It was
+// killed by a closed stdout pipe before it dropped anything, which was luck,
+// not design.
+//
+// A module that mutates a production database as a side effect of being
+// imported is a loaded gun. require.main is the safety catch.
+if (require.main === module) {
+  main().catch((e) => { console.error(e); process.exit(1); });
+}
+
+module.exports = { main, existingKeyStr, declaredKeyStr };

@@ -32,6 +32,7 @@
  */
 
 const mongoose  = require('mongoose');
+const { phoneCore } = require('../utils/phone');
 const QRCode    = require('qrcode');
 
 const Building         = require('../models/Building');
@@ -58,12 +59,9 @@ function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
 }
 
-// Same reduction booking.controller uses, so a phone typed on the invite form
-// matches a placeholder the landlord typed months ago in a different format.
-function phoneCore(p) {
-  const d = String(p || '').replace(/\D/g, '');
-  return d.length >= 10 ? d.slice(-10) : '';
-}
+// phoneCore() (utils/phone.js, imported above) is what makes a phone typed on
+// the invite form match a placeholder the landlord typed months ago in a
+// different format.
 
 function notifySocket(userId, event, payload) {
   try {

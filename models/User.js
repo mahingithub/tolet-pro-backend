@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const { computeTenantTrust, computeLandlordTrust, tierFor } = require('../utils/trustScore');
+const { phoneCore } = require('../utils/phone');
 
 // ─── ROLES ─────────────────────────────────────────────────────────────────
 // Every user can carry multiple roles (e.g. "I rent my flat AND I also
@@ -367,6 +368,20 @@ const UserSchema = new mongoose.Schema(
       trim: true,
       match: [/^\+\d{8,15}$/, 'Invalid phone format'],
     },
+
+    // The last 10 digits of `phone` — the COMPARISON key, written by the hook
+    // below and never by hand.
+    //
+    // A landlord types "01712345678" into an intake form; the same person
+    // signed up as "+8801712345678". Matching those meant a suffix regex
+    // (`/1712345678$/`), which no index can serve — Mongo scanned every key in
+    // the phone index to find one row. This column turns that into an equality
+    // match. See utils/phone.js for the full reasoning.
+    //
+    // NOT unique, deliberately: `phone` already carries the uniqueness
+    // constraint, and adding a second one here would fail the backfill on any
+    // pre-existing duplicate rather than surfacing it.
+    phoneCore: { type: String, index: true, maxlength: 10, default: '' },
     // Always hidden from queries by default; explicit `.select('+password')` to load.
     password: { type: String, required: true, select: false },
 
@@ -505,6 +520,34 @@ UserSchema.virtual('isLocked').get(function isLocked() {
 });
 
 // ─── Pre-save: keep `roles[]` and `tenantProfile.trustScore` consistent ───
+// ─── Keep phoneCore in lockstep with phone ──────────────────────────────────
+// `validate` rather than `save` so the value exists before any validator or
+// unique check looks at the document, and so a caller that only ever calls
+// .validate() still gets a consistent row.
+UserSchema.pre('validate', function derivePhoneCore(next) {
+  this.phoneCore = phoneCore(this.phone);
+  next();
+});
+
+// The document hook above does NOT run for query-based updates
+// (findOneAndUpdate / updateOne / updateMany), and those are how an admin tool
+// or a migration edits a phone. Without this, such an update would leave
+// phoneCore pointing at the OLD number — a stale index entry is worse than a
+// missing one, because the lookup silently returns the wrong person.
+function derivePhoneCoreOnUpdate(next) {
+  const u = this.getUpdate() || {};
+  const set = u.$set || u;
+  if (Object.prototype.hasOwnProperty.call(set, 'phone')) {
+    if (u.$set) u.$set.phoneCore = phoneCore(set.phone);
+    else u.phoneCore = phoneCore(set.phone);
+    this.setUpdate(u);
+  }
+  next();
+}
+UserSchema.pre('findOneAndUpdate', derivePhoneCoreOnUpdate);
+UserSchema.pre('updateOne', derivePhoneCoreOnUpdate);
+UserSchema.pre('updateMany', derivePhoneCoreOnUpdate);
+
 UserSchema.pre('save', function preSave(next) {
   // 1. `role` must always be present inside `roles[]`.
   if (this.role && Array.isArray(this.roles) && !this.roles.includes(this.role)) {

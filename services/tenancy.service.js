@@ -32,12 +32,8 @@
  */
 
 const Booking = require('../models/Booking');
+const { phoneCore, phoneMatchBranches } = require('../utils/phone');
 const notifications = require('./notification.service');
-
-function phoneCore(p) {
-  const d = String(p || '').replace(/\D/g, '');
-  return d.length >= 10 ? d.slice(-10) : '';
-}
 
 function notifySocket(userId, event, payload) {
   if (!userId) return;
@@ -172,10 +168,11 @@ function closeMembership(booking, tenantUserId, tenantPhone, when) {
 async function findLiveTenancies(tenantUserId, tenantPhone) {
   const core = phoneCore(tenantPhone);
   const match = [{ 'members.userId': tenantUserId }, { tenantId: tenantUserId }];
-  if (core) {
-    match.push({ 'members.phone': new RegExp(`${core}$`) });
-    match.push({ tenantPhone: new RegExp(`${core}$`) });
-  }
+  // Indexed equality on the normalised core, PLUS the legacy suffix-regex for
+  // rows the backfill has not reached yet. phoneMatchBranches() builds both —
+  // see utils/phone.js for why the regex alone could never use an index.
+  match.push(...phoneMatchBranches('members.phoneCore', 'members.phone', core));
+  match.push(...phoneMatchBranches('tenantPhoneCore', 'tenantPhone', core));
   const rows = await Booking.find({
     status: { $nin: ['cancelled', 'completed'] },
     deletedAt: null,
@@ -207,10 +204,11 @@ async function findLiveTenancies(tenantUserId, tenantPhone) {
 async function closeOtherTenancies({ tenantUserId, tenantPhone, keepBookingId, when }) {
   const core = phoneCore(tenantPhone);
   const match = [{ 'members.userId': tenantUserId }, { tenantId: tenantUserId }];
-  if (core) {
-    match.push({ 'members.phone': new RegExp(`${core}$`) });
-    match.push({ tenantPhone: new RegExp(`${core}$`) });
-  }
+  // Indexed equality on the normalised core, PLUS the legacy suffix-regex for
+  // rows the backfill has not reached yet. phoneMatchBranches() builds both —
+  // see utils/phone.js for why the regex alone could never use an index.
+  match.push(...phoneMatchBranches('members.phoneCore', 'members.phone', core));
+  match.push(...phoneMatchBranches('tenantPhoneCore', 'tenantPhone', core));
 
   const others = await Booking.find({
     _id: { $ne: keepBookingId },

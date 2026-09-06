@@ -17,6 +17,7 @@
  */
 
 const mongoose      = require('mongoose');
+const { phoneCore } = require('../utils/phone');
 const PaymentMethod = require('../models/PaymentMethod');
 const Booking       = require('../models/Booking');
 const cloudinary    = require('../services/cloudinary.service');
@@ -28,12 +29,9 @@ function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
 }
 
-// Reduce any phone format down to its 10-digit BD mobile core so a booking's
-// typed tenantPhone can be matched against the logged-in user's stored phone.
-function phoneCore(p) {
-  const d = String(p || '').replace(/\D/g, '');
-  return d.length >= 10 ? d.slice(-10) : '';
-}
+// phoneCore() (utils/phone.js, imported above) matches a booking's typed
+// tenantPhone against the logged-in user's stored phone, whatever format each
+// is in.
 
 // Human label for reminders / receipts (bkash → 'bKash').
 function labelForType(type) {
