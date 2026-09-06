@@ -595,6 +595,15 @@ const rateLimiters = {
     windowMs: 5 * 60 * 1000,
     max: 60,
     burst: 20,
+    // Writes only — same reasoning as `search`, in the other direction. This is
+    // mounted on WHOLE routers (/api/bookings, /api/buildings, /api/units,
+    // /api/rent-payments…), so without this the host dashboard's reads spend a
+    // budget sized for spam prevention: one mount fires buildings + units +
+    // bookings + pending rent, then polls every 30–60s, and burst 20 (refilling
+    // one token per 5s) is gone before the page finishes painting. Reads fall
+    // through to the global `api` limiter (4500 / 15 min), which is the right
+    // shape for them; POST/PATCH/DELETE still pay full price here.
+    skip: (req) => req.method === 'GET' || req.method === 'HEAD',
     message: 'অনেক বেশি অনুরোধ। একটু পরে আবার চেষ্টা করুন।',
     fallback: legacy.writeLimiter,
   }),
