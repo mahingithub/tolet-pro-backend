@@ -32,7 +32,7 @@ module.exports = async function requireAuth(req, _res, next) {
     }
     const user = await User.findById(decoded.sub);
     if (!user) throw ApiError.unauthorized('অ্যাকাউন্ট পাওয়া যায়নি।', { code: 'user_missing' });
-    if (user.passwordChangedAt && decoded.iat * 1000 < user.passwordChangedAt.getTime()) {
+    if (tokenService.isTokenStaleAfterPasswordChange(decoded, user.passwordChangedAt)) {
       throw ApiError.unauthorized('পাসওয়ার্ড পরিবর্তিত হয়েছে। আবার লগইন করুন।', {
         code: 'password_changed',
       });

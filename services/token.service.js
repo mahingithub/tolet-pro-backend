@@ -67,6 +67,34 @@ function verifyAdminToken(token) {
 }
 
 /**
+ * True when `passwordChangedAt` post-dates the token, i.e. the password moved
+ * after this token was minted and the token must be refused.
+ *
+ * Both sides are compared in WHOLE SECONDS because that is the only precision a
+ * JWT has: `iat` is `Math.floor(Date.now() / 1000)`. `passwordChangedAt` is a
+ * millisecond Date, so a naive `iat * 1000 < passwordChangedAt` reads the
+ * discarded milliseconds as "the password changed after this token" — and calls
+ * a token issued in the very same instant stale.
+ *
+ * That is not a theoretical race. Signup verification sets passwordChangedAt
+ * and signs the access token in one breath, so unless the stamp landed exactly
+ * on a whole second (~1 time in 1000) the brand-new account's very first
+ * request came back 401 `password_changed` and the app had no option but to
+ * send the user to the login screen — right after it had just verified their
+ * OTP. scripts/smoke-properties.js works around the same truncation by
+ * backdating its fixtures 5 seconds; this fixes it at the source instead.
+ *
+ * Comparing in seconds keeps the guarantee that matters: a password changed in
+ * second N invalidates every token issued in second N-1 or earlier. Only
+ * sub-second ordering is given up, and a JWT could never express that anyway.
+ */
+function isTokenStaleAfterPasswordChange(decoded, passwordChangedAt) {
+  if (!passwordChangedAt) return false;
+  if (typeof decoded?.iat !== 'number') return false;
+  return Math.floor(passwordChangedAt.getTime() / 1000) > decoded.iat;
+}
+
+/**
  * Short-lived reset token issued AFTER forgot-password OTP is verified.
  * Encodes the userId + a one-shot nonce — we don't persist these server-side;
  * we trust the JWT signature + tight expiry instead.
@@ -129,6 +157,7 @@ module.exports = {
   verifyResetToken,
   sign2FATempToken,
   verify2FATempToken,
+  isTokenStaleAfterPasswordChange,
   USER_AUDIENCE,
   ADMIN_AUDIENCE,
 };

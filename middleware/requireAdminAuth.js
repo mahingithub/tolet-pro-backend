@@ -49,7 +49,7 @@ module.exports = async function requireAdminAuth(req, _res, next) {
     if (!user) throw ApiError.unauthorized('অ্যাকাউন্ট পাওয়া যায়নি।', { code: 'user_missing' });
 
     // Token minted before a password change is dead.
-    if (user.passwordChangedAt && decoded.iat * 1000 < user.passwordChangedAt.getTime()) {
+    if (tokenService.isTokenStaleAfterPasswordChange(decoded, user.passwordChangedAt)) {
       throw ApiError.unauthorized('পাসওয়ার্ড পরিবর্তিত হয়েছে। আবার লগইন করুন।', {
         code: 'password_changed',
       });
