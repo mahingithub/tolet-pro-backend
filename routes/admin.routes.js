@@ -12,6 +12,7 @@
 
 const express = require('express');
 const ctl = require('../controllers/admin.controller');
+const usageCtl = require('../controllers/admin.usage.controller');
 const subCtl = require('../controllers/admin.subscription.controller');
 const teamCtl = require('../controllers/admin.team.controller');
 const sellInterestCtl = require('../controllers/sellInterest.controller');
@@ -28,6 +29,12 @@ router.use(requireAdminAuth);
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 router.get('/overview', ctl.getOverview);
+
+// ─── Feature usage tracking ────────────────────────────────────────────────
+// How many landlords run the management system, how many buildings it keeps,
+// and how many people are on each Living wallet (share vs solo). Counts only —
+// the handler never projects an identity (see admin.usage.controller.js).
+router.get('/usage', usageCtl.getUsage);
 
 // ─── "Interested in selling" demand gauge (Coming Soon lead capture) ────────
 // Count of people who tapped "I am interested in selling my property" + a
