@@ -114,10 +114,11 @@ const env = {
   // ─── WhatsApp reminders ──────────────────────────────────────────────────
   // Used by services/whatsapp.service.js to deliver rent + visit reminders
   // straight to the user's WhatsApp number. Provider-agnostic: set
-  // WHATSAPP_PROVIDER to 'meta' (WhatsApp Business Cloud API — default) or
-  // 'twilio'. When the required keys for the chosen provider are missing the
-  // service no-ops (logs a warning) so the app runs fine without WhatsApp
-  // configured. Fill these in .env once you have your API credentials.
+  // WHATSAPP_PROVIDER to 'meta' (WhatsApp Business Cloud API — default),
+  // 'twilio', or 'openwa' (self-hosted WhatsApp Web gateway). When the
+  // required keys for the chosen provider are missing the service no-ops
+  // (logs a warning) so the app runs fine without WhatsApp configured. Fill
+  // these in .env once you have your API credentials.
   whatsapp: {
     provider: (process.env.WHATSAPP_PROVIDER || 'meta').toLowerCase(),
 
@@ -131,6 +132,20 @@ const env = {
     twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || '',
     twilioAuthToken:  process.env.TWILIO_AUTH_TOKEN || '',
     twilioFrom:       process.env.TWILIO_WHATSAPP_FROM || '',
+
+    // OpenWA — a SELF-HOSTED WhatsApp Web gateway. Messages leave from your
+    // own WhatsApp number over the WhatsApp Web protocol, so there is no Meta
+    // Business account and no per-message fee, but also no approved templates
+    // (see whatsapp.service.js) and the number must stay QR-linked to a live
+    // session. `openwaSessionId` is the id of that session in the OpenWA
+    // dashboard; `openwaApiKey` is sent as the X-API-Key header.
+    //
+    // The trailing slash is trimmed so 'http://host:2785/' and
+    // 'http://host:2785' build the same request URL instead of a '//api/...'
+    // path the gateway answers with 404.
+    openwaApiUrl:    (process.env.OPENWA_API_URL || 'http://localhost:2785').replace(/\/+$/, ''),
+    openwaApiKey:    process.env.OPENWA_API_KEY || '',
+    openwaSessionId: process.env.OPENWA_SESSION_ID || '',
 
     // Default template language code (used only for template messages).
     defaultLang: process.env.WHATSAPP_DEFAULT_LANG || 'bn',

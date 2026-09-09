@@ -10,6 +10,15 @@
  * Supported providers (set WHATSAPP_PROVIDER in .env):
  *   • 'meta'   → WhatsApp Business Cloud API (graph.facebook.com)  [default]
  *   • 'twilio' → Twilio WhatsApp (api.twilio.com)
+ *   • 'openwa' → self-hosted WhatsApp Web gateway (your own number)
+ *
+ * TEXT vs TEMPLATE, per provider. Every reminder in this app (rent, visits,
+ * lease expiry, invoices, late fees) sends plain TEXT, which all three
+ * providers handle. Only the admin marketing blast sends a Meta TEMPLATE, and
+ * only 'meta' can deliver one — a template's approved wording lives on Meta's
+ * servers and this side only ever holds its NAME, so the other two providers
+ * have nothing to render. Both degrade instead of inventing a body: Twilio
+ * sends an empty text, OpenWA skips the send outright.
  *
  * Design principles (mirrors sms.service.js but SAFER for background jobs):
  *   • FIRE-AND-FORGET SAFE — sendWhatsAppMessage NEVER throws. It resolves to
@@ -75,6 +84,12 @@ function logPhone(msisdn) {
 function isConfigured() {
   if (cfg.provider === 'twilio') {
     return Boolean(cfg.twilioAccountSid && cfg.twilioAuthToken && cfg.twilioFrom);
+  }
+  if (cfg.provider === 'openwa') {
+    // Credentials only — whether the session is actually QR-linked and `ready`
+    // is a runtime state the gateway answers with (409), not something we can
+    // know here without a network call on every isConfigured() caller.
+    return Boolean(cfg.openwaApiUrl && cfg.openwaApiKey && cfg.openwaSessionId);
   }
   // default: meta
   return Boolean(cfg.accessToken && cfg.phoneNumberId);
@@ -159,6 +174,30 @@ async function sendViaTwilio(msisdn, tpl) {
   return { messageId: resp.data?.sid || null, raw: resp.data };
 }
 
+// ─── OpenWA (self-hosted WhatsApp Web gateway) ───────────────────────────────
+async function sendViaOpenWA(msisdn, tpl) {
+  // OpenWA addresses an individual chat by its WhatsApp id: "<msisdn>@c.us"
+  // (groups use "@g.us", which reminders never target).
+  const chatId = `${msisdn}@c.us`;
+  const url = `${cfg.openwaApiUrl}/api/sessions/${cfg.openwaSessionId}/messages/send-text`;
+
+  const resp = await axios.post(
+    url,
+    { chatId, text: tpl.body },
+    {
+      headers: {
+        'X-API-Key': cfg.openwaApiKey,
+        'Content-Type': 'application/json',
+      },
+      timeout: 15_000,
+    },
+  );
+
+  // OpenWA returns { messageId, timestamp } — NOT Meta's { messages: [{ id }] }
+  // and not a bare `id`.
+  return { messageId: resp.data?.messageId || null, raw: resp.data };
+}
+
 /**
  * Send a WhatsApp message. NEVER throws — always resolves to a result object.
  *
@@ -185,15 +224,30 @@ async function sendWhatsAppMessage(phone, templateData) {
     return { success: false, skipped: true, error: 'not_configured' };
   }
 
+  // A Meta template cannot survive the trip through OpenWA: only its NAME
+  // reaches us, so the best we could put in the chat is the literal string
+  // "promo_eid_2026" — spam, sent to a real tenant, that also reports back as
+  // a successful delivery. Skip instead, so the marketing console shows the
+  // blast as skipped-for-config rather than silently mis-sending it.
+  if (cfg.provider === 'openwa' && tpl.kind === 'template' && !tpl.body) {
+    console.warn(
+      `[whatsapp] skip — provider 'openwa' cannot send Meta template ` +
+      `"${tpl.name}" (set WHATSAPP_PROVIDER=meta for marketing blasts)`,
+    );
+    return { success: false, skipped: true, error: 'template_unsupported' };
+  }
+
   // Verification-friendly log: shows the function WAS invoked with the right
   // recipient + payload (full number in dev, redacted in production).
   console.log(`[whatsapp] → ${logPhone(msisdn)} via ${cfg.provider}: "${summary}"`);
 
   try {
     const { messageId, raw } =
-      cfg.provider === 'twilio'
-        ? await sendViaTwilio(msisdn, tpl)
-        : await sendViaMeta(msisdn, tpl);
+      cfg.provider === 'openwa'
+        ? await sendViaOpenWA(msisdn, tpl)
+        : cfg.provider === 'twilio'
+          ? await sendViaTwilio(msisdn, tpl)
+          : await sendViaMeta(msisdn, tpl);
 
     console.log(`[whatsapp] sent ok → ${logPhone(msisdn)} (id: ${messageId || 'n/a'})`);
     return { success: true, messageId, raw };
