@@ -249,6 +249,11 @@ app.get('/healthz', async (_req, res) => {
     },
     // Cross-instance Socket.IO delivery. False on a single instance is normal.
     socketAdapter: require('./socket').isRedisAdapterActive(),
+    // How close today's WhatsApp traffic is to the caps that keep the number
+    // from being banned. Worth seeing BEFORE reminders start silently coming
+    // back `rate_limited` — a throttled send looks identical to a quiet day
+    // from the outside. Counts are per instance and reset on restart.
+    whatsapp: require('./services/whatsapp.service').throttleStatus(),
     uptime: process.uptime(),
   });
 });

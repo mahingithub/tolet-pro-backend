@@ -5,7 +5,7 @@ const multer  = require('multer');
 const ctl = require('../controllers/auth.controller');
 const additions = require('../controllers/auth.controller.additions');
 const { uploadDoc, deleteDoc, saveDirectUploadDoc } = require('../controllers/verification.controller');
-const { uploadSingle } = require('../middleware/uploadMiddleware');
+const { uploadSingleImage } = require('../middleware/uploadMiddleware');
 const v = require('../validators/auth.validators');
 const validate = require('../middleware/validate');
 const requireAuth = require('../middleware/requireAuth');
@@ -18,7 +18,8 @@ const loginHistory = require('../services/loginHistory.service');
 // dedicated multer instance here rather than extending uploadMiddleware
 // so the original single-file flow stays untouched. memoryStorage keeps
 // the buffer in RAM long enough for the controller to stream it to
-// Cloudinary. 5MB ceiling matches the existing uploadSingle defaults.
+// Cloudinary. 5MB ceiling matches uploadSingleImage, which the other
+// still-image routes on this router use.
 const uploadLandlordVerificationFields = multer({
   storage: multer.memoryStorage(),
   limits:  { fileSize: 5 * 1024 * 1024 },
@@ -189,7 +190,10 @@ router.post ('/me/active-role',         requireAuth, additions.setActiveRole);
 router.post ('/me/verification/submit', requireAuth, additions.submitVerification);
 
 // ─── Avatar upload (Cloudinary, multipart) ──────────────────────────────────
-router.post ('/me/avatar',              requireAuth, uploadSingle, additions.uploadAvatar);
+// uploadSingleImage (5 MB), not uploadSingle (22 MB, sized for chat video):
+// an avatar over the cap is cut off at the socket and answered 413 rather
+// than buffered whole and then rejected downstream.
+router.post ('/me/avatar',              requireAuth, uploadSingleImage, additions.uploadAvatar);
 
 // ─── Landlord verification submission (Path A or B — see controller) ────────
 // Multi-file upload. Path A (verified tenant) sends only utilityBill.
@@ -201,7 +205,9 @@ router.post(
   additions.submitLandlordVerification,
 );
 
-router.post ('/me/verification/upload/:kind', requireAuth, uploadSingle, uploadDoc);
+// NID / profession / photo slots — stills too, and uploadDoc already refuses
+// anything over 5 MB, so cap at the same place multer can act on it.
+router.post ('/me/verification/upload/:kind', requireAuth, uploadSingleImage, uploadDoc);
 router.post ('/me/verification/direct-upload/:kind', requireAuth, saveDirectUploadDoc);
 router.delete('/me/verification/upload/:kind', requireAuth, deleteDoc);
 

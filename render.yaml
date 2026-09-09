@@ -78,6 +78,19 @@ services:
       - key: CLOUDINARY_API_SECRET
         sync: false
 
+      # Public base URL of THIS api, trailing "/api" REQUIRED. Baked into every
+      # FCM push payload (services/fcm.service.js) as the endpoint the incoming
+      # call notification's decline button POSTs to, so it has to be a host the
+      # BROWSER can reach — the same value the frontend bundle is built with
+      # (VITE_API_BASE_URL in the frontend's .env.production).
+      #
+      # Declared with a literal value rather than sync:false on purpose: unset,
+      # fcm.service.js logs an error and falls back to a hardcoded host, and
+      # that fallback has silently gone stale twice. The custom domain is used
+      # instead of the onrender.com host because it survives a service rename.
+      - key: PUBLIC_API_BASE_URL
+        value: https://api.toletpro.rent/api
+
       # Set AFTER your frontend is live on Vercel. Comma-separate
       # multiple origins, no trailing slash. Example:
       #   https://tolet-pro.vercel.app

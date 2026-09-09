@@ -198,6 +198,98 @@ async function sendViaOpenWA(msisdn, tpl) {
   return { messageId: resp.data?.messageId || null, raw: resp.data };
 }
 
+// ─── Throttle ────────────────────────────────────────────────────────────────
+// WhatsApp Web is not an API with a published quota; it is a consumer account
+// being automated, and the way an account gets banned is by looking like a bot:
+// dozens of identical messages fired in the same second, or one number hammered
+// all day. Both are exactly what a rent-reminder sweep does by default — the
+// 09:00 cron previously fired every send in parallel with no spacing at all.
+//
+// So every send in this process funnels through here, whatever called it (cron,
+// the landlord's Remind button, visit reminders, lease expiry, invoices). One
+// choke point means a new caller cannot forget to be careful.
+//
+// Three limits, all env-tunable:
+//   • a minimum gap between sends, with jitter so the spacing isn't machine-
+//     regular either
+//   • a per-recipient daily cap — nobody gets nagged more than this many times
+//   • a whole-account daily cap — the blast radius if something loops
+//
+// IN-MEMORY, therefore PER INSTANCE and reset by a restart. That is honest for
+// the current single-instance deploy and still removes the burst pattern that
+// actually triggers bans; if the backend is ever scaled to several instances,
+// this has to move to Redis to stay a real ceiling.
+const throttle = {
+  minGapMs:     cfg.minGapMs,
+  perNumberDay: cfg.maxPerNumberPerDay,
+  perDay:       cfg.maxPerDay,
+  maxQueue:     cfg.maxQueue,
+};
+
+let sendChain  = Promise.resolve();
+let queueDepth = 0;
+let lastSentAt = 0;
+const counters = { day: '', total: 0, byNumber: new Map() };
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Day boundary in the timezone rent actually runs on, so "today's cap" matches
+// the landlord's day rather than UTC's.
+function today() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: process.env.CRON_TZ || 'Asia/Dhaka' });
+}
+
+function rollDay() {
+  const d = today();
+  if (counters.day !== d) {
+    counters.day = d;
+    counters.total = 0;
+    counters.byNumber.clear();
+  }
+}
+
+/** Would this send breach a daily cap? Checked BEFORE queueing, so a capped
+ *  message fails fast instead of occupying a slot it can never use. */
+function capBreach(msisdn) {
+  rollDay();
+  if (throttle.perDay && counters.total >= throttle.perDay) return 'daily_cap';
+  if (throttle.perNumberDay && (counters.byNumber.get(msisdn) || 0) >= throttle.perNumberDay) {
+    return 'recipient_cap';
+  }
+  return null;
+}
+
+function countSend(msisdn) {
+  rollDay();
+  counters.total += 1;
+  counters.byNumber.set(msisdn, (counters.byNumber.get(msisdn) || 0) + 1);
+}
+
+/**
+ * Run `fn` on the shared send queue, spaced by minGapMs (±40% jitter).
+ *
+ * The queue is bounded: past maxQueue waiters we refuse rather than accept work
+ * we would only get to in an hour — a caller that is told "rate_limited" now can
+ * react, one left waiting silently cannot.
+ */
+function schedule(fn) {
+  if (queueDepth >= throttle.maxQueue) return Promise.reject(Object.assign(new Error('queue_full'), { rateLimited: true }));
+  queueDepth += 1;
+
+  const run = sendChain.then(async () => {
+    const jitter = throttle.minGapMs * (0.8 + Math.random() * 0.4);
+    const wait = Math.max(0, lastSentAt + jitter - Date.now());
+    if (wait > 0) await sleep(wait);
+    lastSentAt = Date.now();
+    return fn();
+  });
+
+  // The chain must survive a failed send, or one rejection deadlocks every
+  // later message behind it.
+  sendChain = run.then(() => {}, () => {}).finally(() => { queueDepth -= 1; });
+  return run;
+}
+
 /**
  * Send a WhatsApp message. NEVER throws — always resolves to a result object.
  *
@@ -237,21 +329,42 @@ async function sendWhatsAppMessage(phone, templateData) {
     return { success: false, skipped: true, error: 'template_unsupported' };
   }
 
+  // Refused BEFORE queueing: a message over its cap will never be sendable
+  // today, so making the caller wait in line for it would only delay the
+  // answer. Reported as `skipped` — nothing failed, we chose not to send.
+  const breach = capBreach(msisdn);
+  if (breach) {
+    console.warn(
+      `[whatsapp] throttled (${breach}) → ${logPhone(msisdn)}: "${summary}" ` +
+      `[today ${counters.total}/${throttle.perDay}, this number ` +
+      `${counters.byNumber.get(msisdn) || 0}/${throttle.perNumberDay}]`,
+    );
+    return { success: false, skipped: true, error: 'rate_limited', reason: breach };
+  }
+
   // Verification-friendly log: shows the function WAS invoked with the right
   // recipient + payload (full number in dev, redacted in production).
   console.log(`[whatsapp] → ${logPhone(msisdn)} via ${cfg.provider}: "${summary}"`);
 
   try {
-    const { messageId, raw } =
+    // Spaced out on the shared queue — see the throttle block above.
+    const { messageId, raw } = await schedule(() =>
       cfg.provider === 'openwa'
-        ? await sendViaOpenWA(msisdn, tpl)
+        ? sendViaOpenWA(msisdn, tpl)
         : cfg.provider === 'twilio'
-          ? await sendViaTwilio(msisdn, tpl)
-          : await sendViaMeta(msisdn, tpl);
+          ? sendViaTwilio(msisdn, tpl)
+          : sendViaMeta(msisdn, tpl));
+
+    // Counted only on a real send, so failures don't burn a tenant's daily quota.
+    countSend(msisdn);
 
     console.log(`[whatsapp] sent ok → ${logPhone(msisdn)} (id: ${messageId || 'n/a'})`);
     return { success: true, messageId, raw };
   } catch (err) {
+    if (err.rateLimited) {
+      console.warn(`[whatsapp] throttled (queue_full) → ${logPhone(msisdn)}: "${summary}"`);
+      return { success: false, skipped: true, error: 'rate_limited', reason: 'queue_full' };
+    }
     // Log the real gateway reason for ops, but swallow it for the caller so
     // background jobs never break on a WhatsApp failure.
     const detail = err.response?.data || err.message;
@@ -260,4 +373,25 @@ async function sendWhatsAppMessage(phone, templateData) {
   }
 }
 
-module.exports = { sendWhatsAppMessage, isConfigured, normalizeMsisdn };
+/** Current throttle state — for /healthz and tests. */
+function throttleStatus() {
+  rollDay();
+  return {
+    day: counters.day,
+    sentToday: counters.total,
+    dailyCap: throttle.perDay,
+    perNumberCap: throttle.perNumberDay,
+    minGapMs: throttle.minGapMs,
+    queueDepth,
+  };
+}
+
+// __resetThrottle is exported for tests only — module state would otherwise
+// leak counters between cases.
+module.exports = {
+  sendWhatsAppMessage, isConfigured, normalizeMsisdn, throttleStatus,
+  __resetThrottle: () => {
+    counters.day = ''; counters.total = 0; counters.byNumber.clear();
+    lastSentAt = 0; queueDepth = 0; sendChain = Promise.resolve();
+  },
+};

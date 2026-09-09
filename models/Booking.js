@@ -154,6 +154,15 @@ const MemberSchema = new mongoose.Schema(
     lastReminderKey: { type: String, default: '' },
     lastReminderAt:  { type: Date, default: null },
 
+    // MANUAL "Remind" button only — one press per rent month, per occupant,
+    // forever. Keyed by the rent month ('2026-09' → when it was pressed) rather
+    // than a rolling timer, because a timer resets and this cap must not: it is
+    // what stops a landlord from working around the automatic 3-per-month cap
+    // by tapping the button instead, which is the traffic pattern that gets a
+    // WhatsApp number banned. Kept separate from lastReminderKey so a manual
+    // send and the cron's milestones never overwrite each other's history.
+    manualReminders: { type: Map, of: Date, default: {} },
+
     // Who this seat's occupant is, beyond a name and a number. Per-member so a
     // hostel room holds four different people with four different profiles.
     tenantProfile: { type: TenantProfileSchema, default: () => ({}) },
@@ -318,6 +327,10 @@ const BookingSchema = new mongoose.Schema(
     // day, repeating on later days until the rent is paid.
     lastReminderKey: { type: String, default: '' },
     lastReminderAt:  { type: Date, default: null },
+
+    // Manual "Remind" button, single-tenant bookings. Same one-press-per-rent-
+    // month rule as MemberSchema.manualReminders above.
+    manualReminders: { type: Map, of: Date, default: {} },
 
     deletedAt:        { type: Date, default: null },
 

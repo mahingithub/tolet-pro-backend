@@ -147,6 +147,20 @@ const env = {
     openwaApiKey:    process.env.OPENWA_API_KEY || '',
     openwaSessionId: process.env.OPENWA_SESSION_ID || '',
 
+    // ── Send throttle (see services/whatsapp.service.js) ─────────────────
+    // OpenWA drives a real consumer WhatsApp account, which gets banned for
+    // LOOKING automated rather than for exceeding a published quota. These are
+    // the ceilings that keep our traffic shaped like a landlord nudging
+    // tenants: a gap between sends, a per-recipient daily cap, and an
+    // account-wide daily cap. Tune them down if the number ever looks stressed;
+    // 0 disables an individual cap.
+    minGapMs:          Math.max(0, Number(process.env.WHATSAPP_MIN_GAP_MS || 3000)),
+    maxPerNumberPerDay: Math.max(0, Number(process.env.WHATSAPP_MAX_PER_NUMBER_PER_DAY || 4)),
+    maxPerDay:         Math.max(0, Number(process.env.WHATSAPP_MAX_PER_DAY || 500)),
+    // Past this many waiting sends we refuse rather than queue work we would
+    // only reach in an hour.
+    maxQueue:          Math.max(1, Number(process.env.WHATSAPP_MAX_QUEUE || 200)),
+
     // Default template language code (used only for template messages).
     defaultLang: process.env.WHATSAPP_DEFAULT_LANG || 'bn',
 

@@ -28,6 +28,13 @@ router.delete('/:id/members/:memberId',                  requireAuth, ctrl.remov
 router.patch('/:id/members/:memberId/ledger/:monthKey',  requireAuth, ctrl.updateMemberLedger);
 router.delete('/:id/members/:memberId/ledger/:monthKey', requireAuth, ctrl.undoMemberLedger);
 
+// The landlord's "Remind" button. GET fills the confirm dialog (who, which
+// month, the editable default wording, whether this month's one send is spent);
+// POST actually sends it. Before the bare '/:id' routes for the same reason as
+// '/join' above.
+router.get('/:id/remind/preview',         requireAuth, ctrl.remindPreview);
+router.post('/:id/remind',                requireAuth, ctrl.remindBooking);
+
 router.patch('/:id',                      requireAuth, ctrl.updateBooking);
 // "Delete / Exclude" a booking — SOFT delete (status → 'cancelled').
 router.delete('/:id',                     requireAuth, ctrl.cancelBooking);

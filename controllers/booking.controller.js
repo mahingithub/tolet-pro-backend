@@ -19,6 +19,11 @@ const { applyPayment } = require('../services/bookingPayment.service');
 // it lives in a service because invite.controller already requires this file,
 // so requiring it back would be circular. See tenancy.service.js.
 const { settleMoveOut, sortByRecency } = require('../services/tenancy.service');
+// The landlord's "Remind" button delivers through the SAME service as the 09:00
+// sweep, so the wording, the milestone rules and the channel fan-out cannot
+// drift between the automatic and the manual path.
+const { sendManualReminder, previewManualReminder } = require('../services/rentReminder.service');
+const { tiersForUsers } = require('../services/subscription.service');
 const ApiError      = require('../utils/ApiError');
 const cloud         = require('../services/cloudinary.service');
 const { getIo, emitToUser } = require('../socket');
@@ -1254,6 +1259,123 @@ async function joinByInvite(req, res, next) {
 //
 // The answer to a repeat is the booking as it stands now: the phone's queue
 // wants a current snapshot, and it makes no difference to it whether this
+// Shared by the preview and the send: load the booking, prove it's the caller's,
+// and enforce the plan gate.
+//
+// Rent reminders ARE the Smart Alerts feature, which is Pro-only — the same gate
+// the 09:00 sweep applies (see rentReminder.service's PLAN GATE note). The
+// button must not be a way around it. Checked on the PREVIEW too, so a free
+// landlord is told before composing a message rather than after pressing Send.
+//
+// Gated here rather than in the service so the service stays reusable by the
+// cron, which has already batch-resolved tiers for the whole sweep.
+async function loadOwnBookingForReminder(req) {
+  const { id } = req.params;
+  if (!isObjectId(id)) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+  const booking = await Booking.findById(id);
+  if (!booking) throw ApiError.notFound('বুকিং পাওয়া যায়নি।');
+  if (String(booking.landlordId) !== String(req.user._id)) {
+    throw ApiError.forbidden('এই বুকিং আপনার নয়।');
+  }
+
+  const tiers = await tiersForUsers([booking.landlordId]);
+  if ((tiers.get(String(booking.landlordId)) || 'free') !== 'pro') {
+    throw ApiError.forbidden('রিমাইন্ডার পাঠাতে Pro প্ল্যান লাগবে।', { code: 'pro_required' });
+  }
+
+  return booking;
+}
+
+// Every refusal the reminder service can return, mapped to a status the client
+// can act on. Anything unmapped is a bug here, not a bad request — surfaced as
+// 400 with its raw reason rather than a misleading success.
+function reminderRefusal(result) {
+  const refusals = {
+    member_not_found: () => ApiError.notFound('সদস্য পাওয়া যায়নি।'),
+    moved_out:        () => ApiError.badRequest('এই ভাড়াটিয়া চলে গেছেন।'),
+    no_channel:       () => ApiError.badRequest('এই ভাড়াটিয়ার WhatsApp নম্বর বা লিংকড অ্যাকাউন্ট নেই।'),
+    already_paid:     () => ApiError.badRequest('এই মাসের ভাড়া পরিশোধ হয়ে গেছে।'),
+    no_unpaid_month:  () => ApiError.badRequest('বকেয়া কোনো মাস নেই।'),
+    bad_month:        () => ApiError.badRequest('মাসের ফর্ম্যাট: YYYY-MM'),
+    message_too_long: () => ApiError.badRequest('মেসেজটি অনেক বড় — ছোট করে লিখুন।'),
+    already_sent_this_month: () => ApiError.tooMany(
+      'এই মাসে এই ভাড়াটিয়াকে একবার রিমাইন্ডার পাঠানো হয়ে গেছে।',
+      { code: 'already_sent_this_month', details: { monthKey: result.monthKey, sentAt: result.sentAt } },
+    ),
+  };
+  return (refusals[result.reason] || (() => ApiError.badRequest(result.reason)))();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/bookings/:id/remind/preview?monthKey=&memberId=
+//
+// What the confirm dialog shows before anything is sent: who, which month, how
+// much, the default wording (which the landlord can then edit), and whether
+// this month's single manual reminder has already been used.
+//
+// Exists so the Bengali wording lives ONLY on the server. A client-side copy
+// would drift from the one the cron sends, and the landlord would be editing a
+// message that no longer matched what goes out.
+// ─────────────────────────────────────────────────────────────────────────────
+async function remindPreview(req, res, next) {
+  try {
+    const booking = await loadOwnBookingForReminder(req);
+    const result = await previewManualReminder({
+      booking,
+      memberId: req.query?.memberId || null,
+      monthKey: req.query?.monthKey || null,
+    });
+    if (!result.ok) throw reminderRefusal(result);
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookings/:id/remind — send a rent reminder to one occupant NOW.
+//
+// The landlord's "Remind" button, after they confirmed the dialog. Until this
+// existed the button only showed a toast reading "reminder sent" and called
+// nothing at all, so tenants were never nudged and landlords had no way to know.
+//
+// body: { monthKey?: 'YYYY-MM', memberId?: string, message?: string }
+//   monthKey omitted → the earliest unpaid month for that occupant
+//   memberId omitted → the booking-level tenant (flat / single tenancy)
+//   message  omitted → the default wording from the preview
+//
+// Refusals are reported as 4xx with a Bengali message the UI shows verbatim,
+// because "nothing happened and we won't say why" is the bug this replaces.
+// ─────────────────────────────────────────────────────────────────────────────
+async function remindBooking(req, res, next) {
+  try {
+    const booking = await loadOwnBookingForReminder(req);
+
+    const result = await sendManualReminder({
+      booking,
+      memberId:      req.body?.memberId || null,
+      monthKey:      req.body?.monthKey || null,
+      customMessage: req.body?.message  || null,
+    });
+
+    if (!result.ok) throw reminderRefusal(result);
+
+    return res.json({
+      ok: true,
+      monthKey:   result.monthKey,
+      milestone:  result.milestone,
+      tenantName: result.tenantName,
+      amountDue:  result.amountDue,
+      customised: result.customised,
+      // Per-channel truth, so the toast can say "WhatsApp-এ পাঠানো হয়েছে" only
+      // when it actually was.
+      channels:   result.channels,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // particular request was the one that did the work.
 async function replayBooking(req, res) {
   const id = req.params.id || (req.body && req.body.id);
@@ -1276,6 +1398,11 @@ module.exports = {
   removeMember: idempotent(removeMember, replayBooking),
   updateMemberLedger: idempotent(updateMemberLedger, replayBooking),
   undoMemberLedger: idempotent(undoMemberLedger, replayBooking),
+  // Deliberately NOT idempotent-wrapped: sending is not a queued offline write
+  // (there is no WhatsApp to send from a plane), and the once-a-month cap
+  // already absorbs a double-tap.
+  remindBooking,
+  remindPreview,
   joinByInvite,
   // Shared with building.controller.js, which puts tenants INTO units. Exported
   // rather than duplicated so there is one definition of what a member is and

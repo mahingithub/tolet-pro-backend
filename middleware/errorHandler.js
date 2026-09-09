@@ -1,5 +1,6 @@
 'use strict';
 
+const multer = require('multer');
 const ApiError = require('../utils/ApiError');
 const env = require('../config/env');
 
@@ -19,6 +20,20 @@ module.exports = function errorHandler(err, req, res, _next) {
       message: 'ইনপুট সঠিক নয়।',
       code: 'mongoose_validation',
       details: Object.fromEntries(Object.entries(err.errors).map(([k, v]) => [k, v.message])),
+    });
+  }
+  // multer rejects (size cap, unexpected field, too many parts) fire before
+  // any controller runs, so nothing else gets a chance to shape them. Without
+  // this branch they fell through to the generic 500 below and an oversized
+  // avatar looked to the client like the server had crashed.
+  if (err instanceof multer.MulterError) {
+    const tooLarge = err.code === 'LIMIT_FILE_SIZE';
+    return res.status(tooLarge ? 413 : 400).json({
+      message: tooLarge
+        ? 'ফাইলটি অনেক বড়। ছোট একটি ফাইল বেছে নিন।'
+        : 'ফাইল আপলোড করা যায়নি।',
+      code: err.code,
+      ...(err.field ? { details: { field: err.field } } : {}),
     });
   }
   if (err instanceof ApiError) {

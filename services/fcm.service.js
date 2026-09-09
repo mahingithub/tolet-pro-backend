@@ -23,13 +23,39 @@ let warnedOnce = false;
 
 const { createCallActionToken } = require('../utils/callActionToken');
 
+// Public base URL of THIS api, trailing '/api' included. It is baked into every
+// push payload as `callActionUrl`, which is what the notification's "কাটুন"
+// button POSTs to — so a wrong value here is invisible right up until a user
+// declines a call from a push and the caller keeps ringing.
+//
+// The literal is a LAST RESORT and it shouts, because a fallback in this file
+// has now rotted twice while looking perfectly fine. The one it replaces,
+// 'https://tolet-pro-backend.onrender.com/api', was never the live host at all:
+// Render's service is `toletpro-backend` (render.yaml), and the hyphenated
+// spelling 404s on every path. The value below is the custom domain the
+// frontend is actually built against (VITE_API_BASE_URL in .env.production) —
+// preferred over the onrender.com host because it survives a service rename,
+// which is the exact failure that produced both dead fallbacks.
+const LAST_RESORT_API_BASE_URL = 'https://api.toletpro.rent/api';
+let warnedNoApiBase = false;
+
 function publicApiBaseUrl() {
-  return (
+  const configured =
     process.env.PUBLIC_API_BASE_URL ||
     process.env.API_BASE_URL ||
-    process.env.VITE_API_BASE_URL ||
-    'https://tolet-pro-backend.onrender.com/api'
-  ).replace(/\/$/, '');
+    process.env.VITE_API_BASE_URL;
+
+  if (configured) return configured.replace(/\/$/, '');
+
+  if (!warnedNoApiBase) {
+    warnedNoApiBase = true;
+    console.error(
+      `[fcm] PUBLIC_API_BASE_URL is not set — falling back to ${LAST_RESORT_API_BASE_URL}. ` +
+        'Push "decline" actions POST to this host and fail silently if it is wrong. ' +
+        'Set PUBLIC_API_BASE_URL (render.yaml declares it).',
+    );
+  }
+  return LAST_RESORT_API_BASE_URL;
 }
 
 // Same env chain (and same www-not-apex reasoning) as utils/inviteToken.js.
