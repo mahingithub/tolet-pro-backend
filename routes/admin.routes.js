@@ -85,6 +85,14 @@ router.delete('/properties/:id',            ctl.deleteProperty);
 // Sending is gated to super admins: it spends real money (SMS) and reaches
 // users outside the app, so it is not something a support agent should be
 // able to trigger. Reading the table stays open to the whole console.
+//
+// NOTE the mount order: the two literal sub-paths are declared BEFORE
+// '/subscriptions' would ever be asked to match them. Express matches in
+// declaration order, and '/subscriptions/targets' is a different path from
+// '/subscriptions', so this is not strictly required today — but adding a
+// '/subscriptions/:id' route later would swallow both if they sat below it.
+router.get ('/subscriptions/targets',    subCtl.listCampaignTargets);
+router.get ('/subscriptions/links',      subCtl.listCampaignLinks);
 router.get ('/subscriptions',            subCtl.listSubscriptions);
 router.post('/subscriptions/send-offer', requireSuperAdmin, subCtl.sendOffer);
 

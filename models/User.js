@@ -507,6 +507,38 @@ const UserSchema = new mongoose.Schema(
         lastSeenAt: { type: Date, default: Date.now },
       }
     ],
+    // ─── App clients: who actually HAS the app ────────────────────────────
+    // WHY THIS IS NOT `deviceTokens`.
+    // deviceTokens only exists for a device that GRANTED NOTIFICATION
+    // PERMISSION — the token is a by-product of that grant. So the marketing
+    // console's "app installed" column, which was derived from it, answered a
+    // different question than the one it asked: a user who installed the app
+    // and tapped "Don't allow" on the notification prompt (the majority, on
+    // Android 13+) reads as NOT INSTALLED and is excluded from every campaign
+    // aimed at app users.
+    //
+    // This array is written by POST /api/app/opened on every app launch, which
+    // needs no permission at all. One entry per device, keyed by a client-
+    // generated `deviceId`, kept to the 10 most recently added so a user who
+    // reinstalls repeatedly cannot grow the document without bound.
+    appClients: [
+      {
+        // Random id minted and stored by the client on first launch. NOT a
+        // device fingerprint: it is per-install, so an uninstall/reinstall
+        // legitimately produces a new one.
+        deviceId:   { type: String, required: true, maxlength: 64 },
+        // 'android' | 'ios' | 'web' — Capacitor.getPlatform(), matching what
+        // deviceTokens stores so both can answer "is this native?" the same way.
+        platform:   { type: String, default: 'web', maxlength: 20 },
+        // How the app is being run: 'native' (Capacitor shell), 'pwa'
+        // (installed to the home screen / dock) or 'browser' (a normal tab).
+        // Only 'native' and 'pwa' represent an installed app.
+        kind:       { type: String, default: 'browser', maxlength: 20 },
+        appVersion: { type: String, maxlength: 32 },
+        firstSeenAt:{ type: Date, default: Date.now },
+        lastSeenAt: { type: Date, default: Date.now },
+      }
+    ],
     pendingDeletion: {
       scheduledAt:     { type: Date, default: null },
       restoreDeadline: { type: Date, default: null },

@@ -329,6 +329,15 @@ app.use('/api/ai-chat',       rateLimiters.ai, require('./routes/aiChatRoutes'))
 // returns structured tenant data for the host to review before batch-saving.
 app.use('/api/ai',            rateLimiters.ai, require('./routes/aiScan.routes'));
 app.use('/api/push',          require('./routes/push.routes'));
+// "This account just opened the app" — the signal behind the marketing
+// console's App-installed column. See controllers/appClient.controller.js for
+// why a push token could not answer that question.
+app.use('/api/app',           require('./routes/appClient.routes'));
+// Campaign short links (/r/<code>). PUBLIC — the recipient of a promotional
+// SMS is usually signed out, and a link that needs a session before it will
+// resolve dead-ends for exactly the people a re-engagement blast is aimed at.
+// The frontend route of the same name calls this and navigates in-app.
+app.use('/api/r',             require('./routes/campaignLink.routes'));
 // UPLOAD limiter — new. This route mints signed Cloudinary credentials, so an
 // unthrottled caller could burn storage/bandwidth quota; it previously relied
 // on the global limiter alone.

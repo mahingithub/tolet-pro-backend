@@ -96,4 +96,17 @@ async function sendOtp(to, otp) {
   return sendSms(to, msg);
 }
 
-module.exports = { sendSms, sendOtp, normalizeMsisdn };
+/**
+ * Can this deployment send an SMS at all? `SMS_API_KEY` is the only credential
+ * sendSms needs, so its absence is the whole answer.
+ *
+ * Exists so a caller can ASK before dispatching rather than learn it one
+ * thrown error per recipient — the marketing console shows "SMS is not set up
+ * on this server" next to the channel instead of reporting a blast as failed
+ * for all 400 people.
+ */
+function isConfigured() {
+  return Boolean(env.smsApiKey);
+}
+
+module.exports = { sendSms, sendOtp, normalizeMsisdn, isConfigured };

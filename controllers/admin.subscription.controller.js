@@ -16,7 +16,9 @@
  */
 
 const marketing = require('../services/marketing.service');
+const campaignLinks = require('../services/campaignLink.service');
 const auditLog = require('../services/auditLog.service');
+const { listTargets, normalizeTarget } = require('../utils/campaignTargets');
 const ApiError = require('../utils/ApiError');
 
 // ─── GET /api/admin/subscriptions ───────────────────────────────────────────
@@ -31,11 +33,36 @@ async function listSubscriptions(req, res, next) {
   }
 }
 
+// ─── GET /api/admin/subscriptions/targets ───────────────────────────────────
+// The destination presets the composer offers, straight from the same list the
+// send endpoint validates against — so the picker can never offer a page the
+// server will then reject.
+async function listCampaignTargets(_req, res, next) {
+  try {
+    return res.json(listTargets());
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── GET /api/admin/subscriptions/links ─────────────────────────────────────
+// Click counts for recent campaigns. This is the only delivery-to-action signal
+// SMS and WhatsApp produce at all — both report "sent" and nothing further.
+async function listCampaignLinks(req, res, next) {
+  try {
+    const rows = await campaignLinks.recentLinks(req.query?.limit);
+    return res.json({ rows });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // ─── POST /api/admin/subscriptions/send-offer ───────────────────────────────
 // Body: {
 //   channels: ['inapp','push','sms','whatsapp'],
 //   title, body, smsText?,
-//   whatsapp?: { template, languageCode?, params?: [] },
+//   targetPath?: '/subscription',   // where a tap lands; defaults to the plan page
+//   whatsapp?: { mode:'text'|'template', body?, template?, languageCode?, params?: [] },
 //   userIds?: [],            // explicit recipients (wins over filters)
 //   filters?: { tier, installed, whatsapp, search },
 // }
@@ -46,6 +73,7 @@ async function sendOffer(req, res, next) {
       title = '',
       body = '',
       smsText = '',
+      targetPath = '',
       whatsapp = null,
       userIds = [],
       filters = {},
@@ -72,13 +100,54 @@ async function sendOffer(req, res, next) {
       }
     }
 
-    // Fail fast rather than letting whatsapp.service reject every single
-    // recipient one at a time — a template name is not optional for marketing.
-    if (selected.includes('whatsapp') && !String(whatsapp?.template || '').trim()) {
-      throw ApiError.badRequest(
-        'WhatsApp মার্কেটিং বার্তার জন্য অনুমোদিত টেমপ্লেট নাম দিন।',
-        { code: 'no_whatsapp_template' },
-      );
+    // ── WhatsApp: which of the two send modes, and does this server have it ──
+    // Getting this wrong is not a rejected request, it is a blast that reports
+    // "dispatched" and delivers to nobody: whatsapp.service skips a Meta
+    // template on any other provider, one recipient at a time, and the console
+    // renders a skip as consent working normally.
+    let waMode = null;
+    if (selected.includes('whatsapp')) {
+      const caps = marketing.channelCapabilities().whatsapp;
+      waMode = whatsapp?.mode === 'text' || whatsapp?.mode === 'template'
+        ? whatsapp.mode
+        : caps.mode;
+
+      if (waMode === 'template' && caps.provider !== 'meta') {
+        throw ApiError.badRequest(
+          `এই সার্ভারের WhatsApp প্রোভাইডার '${caps.provider}' — এটি Meta টেমপ্লেট পাঠাতে পারে না। বার্তার টেক্সট লিখুন।`,
+          { code: 'whatsapp_template_unsupported' },
+        );
+      }
+      if (waMode === 'template' && !String(whatsapp?.template || '').trim()) {
+        throw ApiError.badRequest(
+          'WhatsApp মার্কেটিং বার্তার জন্য অনুমোদিত টেমপ্লেট নাম দিন।',
+          { code: 'no_whatsapp_template' },
+        );
+      }
+      // Text mode falls back to the shared body, so it only fails when BOTH
+      // are empty — which would send a bare link with no context.
+      if (waMode === 'text' && !String(whatsapp?.body || body || '').trim()) {
+        throw ApiError.badRequest('WhatsApp বার্তার টেক্সট লিখুন।', { code: 'no_whatsapp_body' });
+      }
+      if (!caps.configured) {
+        throw ApiError.badRequest(
+          'এই সার্ভারে WhatsApp কনফিগার করা নেই — গেটওয়ে সেট করে আবার চেষ্টা করুন।',
+          { code: 'whatsapp_not_configured' },
+        );
+      }
+    }
+
+    // ── Where the tap lands ──────────────────────────────────────────────
+    // Validated here rather than at the link-minting step so a bad destination
+    // is a 400 BEFORE anything is sent, not a broken link discovered after the
+    // SMS has been billed. An empty value keeps the historical default.
+    let resolvedTarget = '';
+    if (String(targetPath || '').trim()) {
+      const target = normalizeTarget(targetPath);
+      if (!target.ok) {
+        throw ApiError.badRequest(target.reason, { code: 'bad_target_path' });
+      }
+      resolvedTarget = target.path;
     }
 
     // Input guard only. These bounds match the Notification schema, but the copy
@@ -93,7 +162,12 @@ async function sendOffer(req, res, next) {
       title: String(title).slice(0, 160),
       body: String(body).slice(0, 600),
       smsText: String(smsText || '').slice(0, 600),
-      whatsapp: whatsapp || undefined,
+      targetPath: resolvedTarget || undefined,
+      whatsapp: whatsapp
+        ? { ...whatsapp, mode: waMode, body: String(whatsapp.body || '').slice(0, 900) }
+        : undefined,
+      // requireAdminAuth attaches the admin document as `req.user`.
+      adminId: req.user?._id || null,
       userIds: Array.isArray(userIds) ? userIds : [],
       filters: filters || {},
       data: { source: 'admin_offer' },
@@ -119,6 +193,12 @@ async function sendOffer(req, res, next) {
           attempted: out.attempted,
           capped: out.capped,
           sent: out.sent,
+          // The destination and the exact short links that went out. Without
+          // these the trail records that a campaign was sent but not where it
+          // pointed — which is the part anyone reviewing it afterwards needs.
+          targetPath: out.targetPath,
+          links: out.links,
+          whatsappMode: waMode || undefined,
           filters: Array.isArray(userIds) && userIds.length ? { explicitIds: userIds.length } : filters,
         },
       });
@@ -135,10 +215,14 @@ async function sendOffer(req, res, next) {
       capped: out.capped,
       maxRecipients: out.maxRecipients,
       sent: out.sent,
+      targetPath: out.targetPath,
+      links: out.links,
+      whatsappOverflow: out.whatsappOverflow,
+      whatsappMaxPerBlast: out.whatsappMaxPerBlast,
     });
   } catch (err) {
     return next(err);
   }
 }
 
-module.exports = { listSubscriptions, sendOffer };
+module.exports = { listSubscriptions, listCampaignTargets, listCampaignLinks, sendOffer };

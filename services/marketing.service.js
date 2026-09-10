@@ -29,37 +29,72 @@
 
 const User = require('../models/User');
 const Subscription = require('../models/Subscription');
+const env = require('../config/env');
 const { tierOf } = require('../utils/subscriptionTier');
+const { publicAppBaseUrl } = require('../utils/inviteToken');
 const notificationSvc = require('./notification.service');
 const pushSvc = require('./push.service');
 const smsSvc = require('./sms.service');
 const waSvc = require('./whatsapp.service');
+const campaignLinks = require('./campaignLink.service');
 
 // A deviceTokens entry with one of these platforms was registered by the
 // Capacitor shell (services/nativePush.js sends Capacitor.getPlatform()), so
 // its presence means the native app is installed on a real device. 'web' comes
-// from services/fcmService.js — a browser tab or an installed PWA, which we
-// deliberately do NOT count as "app installed".
+// from services/fcmService.js — a browser tab or an installed PWA.
 const NATIVE_PLATFORMS = ['android', 'ios'];
 
+// appClients kinds that mean the app is on the device rather than in a tab.
+// See models/User.js → appClients.
+const INSTALLED_KINDS = ['native', 'pwa'];
+
+// The two independent ways a user can prove they have the app. Kept as one
+// array because every place that asks "is it installed?" — the row, the
+// filter, and the headline count — has to ask it identically, and they
+// previously disagreed the moment one was edited.
+//
+// The appClients clause is the one that actually works: deviceTokens only
+// exists for users who accepted the notification prompt, so on its own it
+// reported installed users as not installed. deviceTokens stays in the OR as
+// the fallback for everyone who installed before the app-open heartbeat
+// shipped and has not opened it since.
+const INSTALLED_CLAUSES = [
+  { appClients: { $elemMatch: { kind: { $in: INSTALLED_KINDS } } } },
+  { appClients: { $elemMatch: { platform: { $in: NATIVE_PLATFORMS } } } },
+  { deviceTokens: { $elemMatch: { platform: { $in: NATIVE_PLATFORMS } } } },
+];
+
+const lower = (v) => String(v || '').toLowerCase();
+
 /**
- * Install state for one user, derived purely from registered push tokens.
+ * Install state for one user.
  *
- *   'native' → has an android/ios token: the app is installed
- *   'web'    → only browser tokens: reachable by push, but no app
- *   'none'   → no tokens at all
+ *   'native' → the Capacitor app on a phone (heartbeat or android/ios token)
+ *   'pwa'    → installed to the home screen / dock, but not the native app
+ *   'web'    → seen only in a browser tab, or push-reachable in one
+ *   'none'   → never seen, no push token
  *
- * Caveat the console surfaces to the admin: this only sees users who GRANTED
- * notification permission, so 'none' means "no push token", not proof that
- * the app is absent. It undercounts rather than overcounts, which is the safe
- * direction for a marketing decision.
+ * PRECEDENCE MATTERS: a user with the native app AND a desktop browser is
+ * 'native'. The question the console asks is "can I reach them in the app",
+ * and the answer is yes as soon as any one of their devices has it.
  */
 function installStateOf(user) {
+  const clients = Array.isArray(user?.appClients) ? user.appClients : [];
   const tokens = Array.isArray(user?.deviceTokens) ? user.deviceTokens : [];
-  if (!tokens.length) return 'none';
-  const hasNative = tokens.some((t) => NATIVE_PLATFORMS.includes(String(t?.platform || '').toLowerCase()));
-  return hasNative ? 'native' : 'web';
+
+  const nativeClient = clients.some(
+    (c) => lower(c?.kind) === 'native' || NATIVE_PLATFORMS.includes(lower(c?.platform)),
+  );
+  const nativeToken = tokens.some((t) => NATIVE_PLATFORMS.includes(lower(t?.platform)));
+  if (nativeClient || nativeToken) return 'native';
+
+  if (clients.some((c) => lower(c?.kind) === 'pwa')) return 'pwa';
+  if (clients.length || tokens.length) return 'web';
+  return 'none';
 }
+
+/** Does this install state count as "has the app"? */
+const isInstalled = (state) => state === 'native' || state === 'pwa';
 
 /** Consent flags for one user, defaulted to match the schema. */
 function consentOf(user) {
@@ -83,15 +118,18 @@ function consentOf(user) {
  */
 function buildAudienceFilter({ tier, installed, whatsapp, search }, { tierIds, paidIds }) {
   const filter = {};
+  // Both the install test and the search are $or clauses, and a Mongo query
+  // document has only ONE top-level $or — assigning them both would silently
+  // drop whichever was written first. They are collected into $and instead, so
+  // "installed users named Rahim" means both conditions rather than the last
+  // one to be set.
+  const and = [];
 
   if (tier === 'free') filter._id = { $nin: paidIds };
   else if (tier === 'plus' || tier === 'pro') filter._id = { $in: tierIds };
 
-  if (installed === 'true') {
-    filter.deviceTokens = { $elemMatch: { platform: { $in: NATIVE_PLATFORMS } } };
-  } else if (installed === 'false') {
-    filter.deviceTokens = { $not: { $elemMatch: { platform: { $in: NATIVE_PLATFORMS } } } };
-  }
+  if (installed === 'true') and.push({ $or: INSTALLED_CLAUSES });
+  else if (installed === 'false') and.push({ $nor: INSTALLED_CLAUSES });
 
   if (whatsapp === 'true') filter['preferences.notifications.whatsappOptIn'] = true;
   else if (whatsapp === 'false') filter['preferences.notifications.whatsappOptIn'] = { $ne: true };
@@ -100,9 +138,10 @@ function buildAudienceFilter({ tier, installed, whatsapp, search }, { tierIds, p
     // Escape regex metacharacters — an admin typing "+880" must not blow up
     // the query. Mirrors the same guard in admin.controller.js → listUsers.
     const rx = new RegExp(String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-    filter.$or = [{ name: rx }, { phone: rx }, { email: rx }];
+    and.push({ $or: [{ name: rx }, { phone: rx }, { email: rx }] });
   }
 
+  if (and.length) filter.$and = and;
   return filter;
 }
 
@@ -151,7 +190,7 @@ async function listAudience(q = {}) {
 
   const [users, total, reachable] = await Promise.all([
     User.find(filter)
-      .select('name phone email avatar roles createdAt lastLoginAt isBanned deviceTokens preferences')
+      .select('name phone email avatar roles createdAt lastLoginAt isBanned deviceTokens appClients preferences')
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
@@ -193,9 +232,16 @@ async function listAudience(q = {}) {
       trialEndsAt: sub?.trialEndsAt || null,
 
       // Reachability
-      appInstalled: install === 'native',
+      appInstalled: isInstalled(install),
       installState: install,
       deviceCount: Array.isArray(u.deviceTokens) ? u.deviceTokens.length : 0,
+      // When the app was last opened on any device — the honest answer to "is
+      // this person still using it", which a push token cannot give.
+      lastAppOpenAt: (Array.isArray(u.appClients) ? u.appClients : [])
+        .reduce((latest, c) => {
+          const seen = c?.lastSeenAt ? new Date(c.lastSeenAt) : null;
+          return seen && (!latest || seen > latest) ? seen : latest;
+        }, null),
       whatsappOptIn: consent.whatsappOptIn,
       marketingPush: consent.marketingPush,
       smsAlerts: consent.smsAlerts,
@@ -207,7 +253,7 @@ async function listAudience(q = {}) {
   // are on screen".
   const [allUsers, installedTotal, whatsappTotal] = await Promise.all([
     User.countDocuments({}),
-    User.countDocuments({ deviceTokens: { $elemMatch: { platform: { $in: NATIVE_PLATFORMS } } } }),
+    User.countDocuments({ $or: INSTALLED_CLAUSES }),
     User.countDocuments({ 'preferences.notifications.whatsappOptIn': true }),
   ]);
 
@@ -225,6 +271,40 @@ async function listAudience(q = {}) {
       appInstalled: installedTotal,
       whatsappOptIn: whatsappTotal,
     },
+    // What the CONSOLE cannot know on its own: which gateways this deployment
+    // can actually use. The composer previously offered a Meta template form
+    // unconditionally, so on an OpenWA deployment every WhatsApp blast was
+    // accepted, dispatched, and skipped for every single recipient.
+    channels: channelCapabilities(),
+  };
+}
+
+/**
+ * What each channel can do in THIS environment, for the composer to render.
+ *
+ * The WhatsApp answer is the one that matters. 'meta' is the only provider that
+ * can send an approved marketing TEMPLATE (the approved wording lives on Meta's
+ * servers and we only hold its name). 'openwa' drives your own number over
+ * WhatsApp Web, which can only send free TEXT — which is fine for marketing to
+ * people who opted in, and is why the composer offers a text mode at all.
+ */
+function channelCapabilities() {
+  const provider = (env.whatsapp && env.whatsapp.provider) || 'meta';
+  const waConfigured = waSvc.isConfigured();
+  return {
+    whatsapp: {
+      provider,
+      configured: waConfigured,
+      // Which composer form to show. 'template' → approved template name +
+      // positional variables; 'text' → a message body we write ourselves.
+      mode: provider === 'meta' ? 'template' : 'text',
+      // The throttle is per-message, not per-blast, so an admin needs to know
+      // the wall-clock cost before pressing send.
+      minGapMs: (env.whatsapp && env.whatsapp.minGapMs) || 0,
+      maxPerBlast: WHATSAPP_MAX_PER_BLAST,
+      maxPerDay: (env.whatsapp && env.whatsapp.maxPerDay) || 0,
+    },
+    sms: { configured: smsSvc.isConfigured() },
   };
 }
 
@@ -244,6 +324,34 @@ const MAX_RECIPIENTS = 5000;
 // open thousands of sockets at once and trip provider rate limits.
 const BATCH_SIZE = 20;
 
+// WhatsApp gets its own, much smaller ceiling, for a reason that has nothing to
+// do with the other channels: whatsapp.service funnels every send through a
+// deliberate throttle (a ~3 s gap plus jitter) because OpenWA drives a real
+// consumer WhatsApp account, and accounts get banned for LOOKING automated.
+//
+// That gap is per message, so the blast is serial: 60 recipients is ~3 minutes
+// of a single HTTP request being held open. Past that the request is likelier
+// to be killed by a proxy than to finish, and an admin who sees a timeout on a
+// send that actually went out will send it again.
+//
+// So a WhatsApp blast is capped here and the overflow is reported as skipped
+// with reason 'blast_cap' — narrow the filter and send the rest, rather than
+// have the console lie about what happened.
+const WHATSAPP_MAX_PER_BLAST = Math.max(
+  1,
+  Number(process.env.WHATSAPP_MAX_PER_BLAST || 60),
+);
+
+// The failure codes whatsapp.service is contracted to return. Anything else it
+// resolves with is a raw transport message, which must never become a tally
+// key — see the note at the WhatsApp delivery branch below.
+const WHATSAPP_REASONS = new Set([
+  'invalid_recipient',
+  'not_configured',
+  'template_unsupported',
+  'rate_limited',
+]);
+
 /** Replace {{name}} / {{tier}} placeholders in a composed message. */
 function renderTemplate(text, row) {
   return String(text || '')
@@ -255,14 +363,32 @@ function renderTemplate(text, row) {
  * Deliver one offer to one user across the requested channels.
  * Never throws — a per-user failure is recorded and the blast continues.
  */
-// Where a tapped offer should land. An upgrade promo is only actionable on the
-// plan page, so that is the default; `opts.url` lets a future campaign override
-// it. Must be a route that actually exists in the frontend router — App.jsx has
-// a catch-all that silently redirects unknown paths to '/', which is
-// indistinguishable from a broken notification.
+// Where a tapped offer lands when the admin did not choose. An upgrade promo is
+// only actionable on the plan page, so that is the default. Any destination
+// must be a route that actually exists in the frontend router — App.jsx has a
+// catch-all that silently redirects unknown paths to '/', which is
+// indistinguishable from a broken notification. utils/campaignTargets.js is
+// what enforces that; nothing reaches here unvalidated.
 const DEFAULT_OFFER_URL = '/subscription';
 
-async function deliverToUser(user, { channels, title, body, smsText, whatsapp, data, url }) {
+/**
+ * Append the campaign's link to an outgoing text message.
+ *
+ * SMS and WhatsApp have no tap target of their own — the message IS the text —
+ * so without this the recipient is told about an offer with no way to reach it.
+ * A blank line keeps WhatsApp's own preview card from swallowing the last line
+ * of copy.
+ */
+function withLink(text, link) {
+  const copy = String(text || '').trim();
+  if (!link) return copy;
+  if (!copy) return link;
+  // Already carries it (an admin who pasted the link into the body themselves)
+  // — don't send it twice.
+  return copy.includes(link) ? copy : `${copy}\n\n${link}`;
+}
+
+async function deliverToUser(user, { channels, title, body, smsText, whatsapp, data, url, links = {} }) {
   const uid = String(user._id);
   const consent = consentOf(user);
   const row = { name: user.name, tier: user.__tier || 'free' };
@@ -395,7 +521,10 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
       try {
         // sms.service throws on failure (unlike whatsapp.service) — catch so
         // one bad number never aborts the rest of the blast.
-        await smsSvc.sendSms(user.phone, renderTemplate(smsText || body, row));
+        await smsSvc.sendSms(
+          user.phone,
+          withLink(renderTemplate(smsText || body, row), links.sms),
+        );
         result.channels.sms = { ok: true };
       } catch (err) {
         // Both of sms.service's thrown codes are ACCOUNT-LEVEL faults that fail
@@ -419,37 +548,76 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
     }
   }
 
-  // ── WhatsApp: pre-approved template only. ───────────────────────────────
+  // ── WhatsApp: an approved template, or free text from our own number. ───
   if (channels.includes('whatsapp')) {
     if (!consent.whatsappOptIn) {
       result.channels.whatsapp = { ok: false, skipped: true, reason: 'not_opted_in' };
     } else if (!user.phone) {
       result.channels.whatsapp = { ok: false, skipped: true, reason: 'no_phone' };
+    } else if (user.__waCapped) {
+      // Past the per-blast ceiling — see WHATSAPP_MAX_PER_BLAST. Reported, not
+      // silently dropped, so the admin knows to send the remainder.
+      result.channels.whatsapp = { ok: false, skipped: true, reason: 'blast_cap' };
     } else {
-      // Meta rejects free-form text outside the 24-hour customer-service
-      // window, so a marketing blast MUST name an approved template. Body
-      // variables are positional ({{1}}, {{2}}… in the approved template).
-      const params = (whatsapp?.params || []).map((p) => ({
-        type: 'text',
-        text: renderTemplate(p, row),
-      }));
-      const res = await waSvc.sendWhatsAppMessage(user.phone, {
-        template: whatsapp.template,
-        languageCode: whatsapp.languageCode || 'en',
-        components: params.length ? [{ type: 'body', parameters: params }] : undefined,
-      });
+      // TWO WAYS TO SEND, and which one is legal depends on the provider.
+      //
+      //   'template' — Meta rejects free-form text outside the 24-hour
+      //     customer-service window, so a blast through the Cloud API MUST name
+      //     a template whose wording Meta already approved. Variables are
+      //     positional ({{1}}, {{2}}… in that approved template).
+      //   'text' — OpenWA sends from our own WhatsApp number over WhatsApp Web.
+      //     There are no templates to approve there (only their NAME ever
+      //     reaches us, which is why this used to skip every recipient), so the
+      //     copy is written in the composer and sent as text. The opt-in gate
+      //     above is what keeps this from being spam, and whatsapp.service's
+      //     throttle is what keeps the number from being banned for it.
+      const mode = whatsapp?.mode === 'text' ? 'text' : 'template';
+
+      let res;
+      if (mode === 'text') {
+        res = await waSvc.sendWhatsAppMessage(user.phone, {
+          body: withLink(renderTemplate(whatsapp?.body || body, row), links.whatsapp),
+        });
+      } else {
+        const params = (whatsapp?.params || []).map((p) => ({
+          type: 'text',
+          text: renderTemplate(p, row),
+        }));
+        res = await waSvc.sendWhatsAppMessage(user.phone, {
+          // Optional-chained: the controller guarantees a template name in this
+          // mode, but a programmatic caller that skipped it should get one
+          // clean 'whatsapp_failed' per recipient, not a TypeError thrown
+          // inside the batch.
+          template: whatsapp?.template,
+          languageCode: whatsapp?.languageCode || 'en',
+          components: params.length ? [{ type: 'body', parameters: params }] : undefined,
+        });
+      }
       // whatsapp.service reports an unconfigured provider as skipped, which the
       // console otherwise renders as "the user opted out" — so a WhatsApp
       // integration that was never set up looks like healthy consent filtering.
       // Keep it in the skipped bucket (nothing was charged, nothing failed) but
       // mark it as a config problem.
+      //
+      // `res.error` is NOT always a code. whatsapp.service returns one of the
+      // stable codes below for the cases it recognises, but a transport failure
+      // resolves with `error: err.message` — free text like
+      // "connect ECONNREFUSED 127.0.0.1:1", or an axios message carrying a URL.
+      // That value ends up as a KEY in the per-channel `reasons` tally, which is
+      // rendered in the console and written to the audit log, so an unbounded
+      // string there means one tally row per distinct error text and a reason
+      // the UI has no copy for. Collapse anything unrecognised to a single code
+      // and keep the original as `detail`.
+      const rawReason = res.error || 'whatsapp_failed';
+      const reason = WHATSAPP_REASONS.has(rawReason) ? rawReason : 'whatsapp_failed';
       result.channels.whatsapp = res.success
         ? { ok: true, messageId: res.messageId || null }
         : {
             ok: false,
             skipped: !!res.skipped,
-            reason: res.error || 'whatsapp_failed',
-            ...(res.error === 'not_configured' ? { configError: true } : {}),
+            reason,
+            ...(reason !== rawReason ? { detail: String(rawReason).slice(0, 200) } : {}),
+            ...(rawReason === 'not_configured' ? { configError: true } : {}),
           };
     }
   }
@@ -465,7 +633,10 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
  *   title      string    in-app / push heading
  *   body       string    in-app / push body
  *   smsText    string    SMS body (falls back to `body`)
- *   whatsapp   object    { template, languageCode, params[] }
+ *   whatsapp   object    { mode:'text'|'template', body?, template?, languageCode?, params[] }
+ *   targetPath string    in-app destination for the tap — PRE-VALIDATED by the
+ *                        controller against utils/campaignTargets.js
+ *   adminId    ObjectId  who sent it, recorded on the short links
  *   userIds    string[]  explicit recipients — wins over `filters`
  *   filters    object    same shape as listAudience's query
  * @returns {Promise<{sent:object, attempted:number, capped:boolean, results:object[]}>}
@@ -473,6 +644,7 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
 async function sendOffer(opts = {}) {
   const channels = (opts.channels || []).filter((c) => CHANNELS.includes(c));
   const { tierByUser, paidIds, byTier } = await loadTierIndex();
+  const targetPath = opts.targetPath || DEFAULT_OFFER_URL;
 
   let query;
   if (Array.isArray(opts.userIds) && opts.userIds.length) {
@@ -497,10 +669,46 @@ async function sendOffer(opts = {}) {
   const targets = capped ? recipients.slice(0, MAX_RECIPIENTS) : recipients;
   for (const u of targets) u.__tier = tierByUser.get(String(u._id)) || 'free';
 
+  // Everyone past the WhatsApp ceiling is flagged now rather than filtered out,
+  // so they still receive the OTHER channels of the same campaign and appear in
+  // the WhatsApp tally as skipped/'blast_cap' instead of vanishing.
+  const waOverflow = Math.max(0, targets.length - WHATSAPP_MAX_PER_BLAST);
+  if (channels.includes('whatsapp') && waOverflow > 0) {
+    for (const u of targets.slice(WHATSAPP_MAX_PER_BLAST)) u.__waCapped = true;
+  }
+
+  // ── Mint the trackable links, one per text channel ───────────────────────
+  // In-app and push don't need one: they navigate inside the app and their tap
+  // is already attributable. SMS and WhatsApp have nothing but the text, so the
+  // link IS the call to action — and its click count is the only evidence the
+  // campaign worked. A failed mint degrades to the full URL rather than
+  // stopping a send that is about to cost money.
+  const links = {};
+  for (const ch of ['sms', 'whatsapp']) {
+    if (!channels.includes(ch)) continue;
+    // A Meta template's wording is fixed on Meta's side, so there is nowhere to
+    // put our link — minting one would record a campaign link that was never
+    // sent and drag the click rate down with a phantom audience.
+    if (ch === 'whatsapp' && opts.whatsapp?.mode !== 'text') continue;
+    const audienceForChannel = ch === 'whatsapp'
+      ? Math.min(targets.length, WHATSAPP_MAX_PER_BLAST)
+      : targets.length;
+    const minted = await campaignLinks.mint({
+      targetPath,
+      campaign: opts.title || '',
+      channel: ch,
+      createdBy: opts.adminId || null,
+      audienceSize: audienceForChannel,
+    });
+    links[ch] = minted ? minted.url : `${publicAppBaseUrl()}${targetPath}`;
+  }
+
   const results = [];
   for (let i = 0; i < targets.length; i += BATCH_SIZE) {
     const batch = targets.slice(i, i + BATCH_SIZE);
-    const settled = await Promise.allSettled(batch.map((u) => deliverToUser(u, { ...opts, channels })));
+    const settled = await Promise.allSettled(
+      batch.map((u) => deliverToUser(u, { ...opts, channels, url: targetPath, links })),
+    );
     settled.forEach((s, idx) => {
       if (s.status === 'fulfilled') results.push(s.value);
       else {
@@ -543,18 +751,36 @@ async function sendOffer(opts = {}) {
     }
   }
 
-  return { sent, attempted: targets.length, capped, maxRecipients: MAX_RECIPIENTS, results };
+  return {
+    sent,
+    attempted: targets.length,
+    capped,
+    maxRecipients: MAX_RECIPIENTS,
+    // The destination and the links that carry it, echoed back so the console
+    // can show the admin exactly what recipients received — and so the audit
+    // log records the link that was actually sent, not the one we meant to.
+    targetPath,
+    links,
+    whatsappOverflow: channels.includes('whatsapp') ? waOverflow : 0,
+    whatsappMaxPerBlast: WHATSAPP_MAX_PER_BLAST,
+    results,
+  };
 }
 
 module.exports = {
   installStateOf,
+  isInstalled,
   consentOf,
   buildAudienceFilter,
   loadTierIndex,
   listAudience,
+  channelCapabilities,
   sendOffer,
   renderTemplate,
+  withLink,
   CHANNELS,
   MAX_RECIPIENTS,
   NATIVE_PLATFORMS,
+  INSTALLED_CLAUSES,
+  WHATSAPP_MAX_PER_BLAST,
 };
