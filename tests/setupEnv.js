@@ -15,6 +15,10 @@ process.env.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'test-refresh
 // Keep third-party integrations dark during tests: no SMS, no WhatsApp, no
 // Facebook posting, no cron. Each service no-ops when its key is absent.
 process.env.SMS_API_KEY = '';
+// OTP delivery is logged, never sent. config/env.js reads this at REQUIRE time,
+// so a test file setting it in beforeAll is already too late — the value has to
+// be in place before the first import, which is what this file is for.
+process.env.OTP_DEV_MODE = 'true';
 process.env.WHATSAPP_ACCESS_TOKEN = '';
 process.env.WHATSAPP_PHONE_NUMBER_ID = '';
 process.env.FACEBOOK_PAGE_ACCESS_TOKEN = '';

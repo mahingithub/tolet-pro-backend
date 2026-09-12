@@ -56,19 +56,40 @@ services:
       - key: FIREBASE_SERVICE_ACCOUNT_BASE64
         sync: false
 
-      # ── AI ledger/form scanner (controllers/aiScanController.js) ────────────
-      # Currently on Vertex AI so the scans bill against the Google Cloud $300
-      # credit instead of a metered AI Studio key. Paste the base64 of the
-      # service-account JSON — `base64 -i your-key.json` — NEVER the file
-      # itself; there is no key file in this repo by design.
+      # ── AI: scanner + chat assistant + voice ────────────────────────────────
+      # THREE features share one Google backend and one credential: the
+      # খাতা/ভর্তি ফরম scanner (controllers/aiScanController.js), the in-app
+      # assistant and its voice transcription (controllers/aiChatController.js).
+      # The backend is picked at BOOT from the environment — see
+      # services/aiProvider.js — so switching is an env change, never a code
+      # change.
+      #
+      # TODAY: Vertex AI, billing against the Google Cloud credit. Paste the
+      # base64 of the service-account JSON — `base64 -i your-key.json` — NEVER
+      # the file itself; there is no key file in this repo by design.
       - key: VERTEX_SERVICE_ACCOUNT_BASE64
         sync: false
-      # Optional overrides; controller defaults are to-let-pro-14e09 /
+      # Optional overrides; config/vertex.js defaults to to-let-pro-14e09 /
       # us-central1 / gemini-2.5-flash.
       #   VERTEX_PROJECT_ID   VERTEX_LOCATION   VERTEX_MODEL
       #
-      # Keep GEMINI_API_KEY set too: it is the fallback the moment the credit
-      # runs out and the toggle at the top of aiScanController.js flips back.
+      # WHEN THE CLOUD CREDIT RUNS OUT — the whole switch, in the dashboard:
+      #   1. Make sure GEMINI_API_KEY below holds a live AI Studio key. It must
+      #      look like `AIza…` (39 chars) — anything else 401s with
+      #      ACCESS_TOKEN_TYPE_UNSUPPORTED. New key: https://aistudio.google.com/apikey
+      #   2. Add  AI_PROVIDER=aistudio
+      #   3. Redeploy. All three features move together.
+      # To come back to Vertex, delete AI_PROVIDER (or set it to `vertex`).
+      #
+      # Optional: GEMINI_MODEL overrides the model on the AI Studio side only
+      # (defaults to gemini-2.5-flash).
+      #
+      # Verifying which backend a deploy came up on matters, because a dead
+      # credential is SILENT by design — the assistant answers with its friendly
+      # "we're busy right now" fallback rather than an error, which is exactly
+      # how a stale GEMINI_API_KEY went unnoticed before. Two ways to check:
+      #   • GET /healthz  →  "ai": "vertex" | "aistudio"
+      #   • the boot log line  `[ai] backend: …`  (carries project + model too)
       - key: GEMINI_API_KEY
         sync: false
       - key: CLOUDINARY_CLOUD_NAME

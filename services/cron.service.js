@@ -26,6 +26,7 @@ const whatsapp      = require('./whatsapp.service');
 const env           = require('../config/env');
 const { runRentReminders } = require('./rentReminder.service');
 const { runLeaseExpiryReminders } = require('./leaseExpiryReminder.service');
+const { runSoloDueReminders } = require('./soloDueReminder.service');
 const { resetMonthlyBoostCredits } = require('./boost.service');
 
 // Optional SMS fallback — absent in installs that don't ship the provider.
@@ -270,6 +271,10 @@ function startCronJobs() {
   const lateFeeSchedule  = TEST ? '* * * * *' : '0 0 * * *'; // every day, 00:00
   const reminderSchedule = TEST ? '* * * * *' : '0 9 * * *';  // every day, 09:00 — per-member rent nudges
   const leaseSchedule    = TEST ? '* * * * *' : '30 9 * * *'; // every day, 09:30 — lease-expiry warnings
+  // Every day, 10:00 — "your ধার is due tomorrow" to the borrower. Late enough
+  // in the morning to be a civil hour for a message about money, and spaced
+  // clear of the two rent sweeps above so the WhatsApp queue isn't contended.
+  const soloDueSchedule  = TEST ? '* * * * *' : '0 10 * * *';
   // 1st of the month, 00:05 — refill each Plus host's monthly search boost.
   // Runs a few minutes after the invoice job so the two don't contend.
   const boostResetSchedule = TEST ? '* * * * *' : '5 0 1 * *';
@@ -290,6 +295,10 @@ function startCronJobs() {
     runLeaseExpiryReminders().catch((e) => console.error('[cron] lease-expiry error:', e.message));
   }, { timezone: TZ });
 
+  cron.schedule(soloDueSchedule, () => {
+    runSoloDueReminders().catch((e) => console.error('[cron] solo-due error:', e.message));
+  }, { timezone: TZ });
+
   cron.schedule(boostResetSchedule, () => {
     resetMonthlyBoostCredits().catch((e) => console.error('[cron] boost-reset error:', e.message));
   }, { timezone: TZ });
@@ -297,7 +306,7 @@ function startCronJobs() {
   console.log(
     `[cron] started — invoices: "${invoiceSchedule}", late-fees: "${lateFeeSchedule}", ` +
     `reminders: "${reminderSchedule}", lease-expiry: "${leaseSchedule}", ` +
-    `boost-reset: "${boostResetSchedule}", TZ: ${TZ}` +
+    `solo-due: "${soloDueSchedule}", boost-reset: "${boostResetSchedule}", TZ: ${TZ}` +
     (TEST ? '  (TEST MODE: every minute)' : ''),
   );
 }
@@ -308,5 +317,6 @@ module.exports = {
   enforceLateFees,
   runRentReminders,
   runLeaseExpiryReminders,
+  runSoloDueReminders,
   resetMonthlyBoostCredits,
 };

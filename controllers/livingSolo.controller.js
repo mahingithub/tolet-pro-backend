@@ -75,12 +75,39 @@ function buildPerson(body = {}, existing = null) {
   };
 }
 
+// Nullable date field (dueDate): `undefined` means "not mentioned, keep what's
+// there", while an explicit null / '' means "there is no date on this any more".
+const optionalDate = (v, fallback = null) => {
+  if (v === undefined) return fallback;
+  if (v === null || v === '') return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const sameDay = (a, b) => {
+  if (!a || !b) return a === b || (!a && !b);
+  return new Date(a).getTime() === new Date(b).getTime();
+};
+
 function buildEntry(body = {}, existing = null) {
   const base = existing || {};
   const type = ENTRY_TYPES.includes(body.type) ? body.type : base.type || 'expense';
   const method = METHODS.includes(body.method) ? body.method : base.method || 'cash';
   // A plain খরচ / আয় has no friend attached; only the ধার-family types do.
   const personId = body.personId === undefined ? base.personId ?? null : str(body.personId, 40) || null;
+
+  // A repayment date only means anything on a ধার দিলাম. Anywhere else it is
+  // dropped rather than stored, so the reminder sweep can trust its own query
+  // instead of re-checking the type of every row it finds.
+  const dueDate = type === 'lend' ? optionalDate(body.dueDate, base.dueDate ?? null) : null;
+  const remind = dueDate ? (body.remind === undefined ? !!base.remind : !!body.remind) : false;
+
+  // Moving the date re-arms the reminder: a loan pushed from the 7th to the
+  // 20th is a new promise, and the borrower should hear about the date that is
+  // actually in force. Leaving reminderSentAt set would silence it forever.
+  const rescheduled = existing && !sameDay(dueDate, base.dueDate);
+  const reminderSentAt = rescheduled ? null : base.reminderSentAt ?? null;
+
   return {
     id: existing ? existing.id : clientId(body.id),
     type,
@@ -90,6 +117,9 @@ function buildEntry(body = {}, existing = null) {
     note: str(body.note ?? base.note ?? '', 300),
     method,
     date: body.date === undefined && base.date ? base.date : parseDate(body.date),
+    dueDate,
+    remind,
+    reminderSentAt,
     createdAt: base.createdAt || parseDate(body.createdAt),
     editedAt: existing ? new Date() : null,
     deletedAt: base.deletedAt || null,
@@ -124,6 +154,11 @@ function serialize(doc) {
       note: e.note || '',
       method: e.method,
       date: e.date,
+      dueDate: e.dueDate || null,
+      remind: !!e.remind,
+      // Sent back so the phone can show "মনে করিয়ে দেওয়া হয়েছে" instead of
+      // still promising a reminder that has already gone out.
+      reminderSentAt: e.reminderSentAt || null,
       createdAt: e.createdAt,
       editedAt: e.editedAt || null,
     })),
@@ -270,6 +305,10 @@ async function mergeSolo(req, res, next) {
       ...buildEntry(raw),
       editedAt: raw.editedAt ? parseDate(raw.editedAt) : null,
       deletedAt: raw.deletedAt ? parseDate(raw.deletedAt) : null,
+      // Carried across explicitly. buildEntry() has no `existing` to read here,
+      // so without this a merge would reset the flag to null and the borrower
+      // could be messaged a second time about the same loan.
+      reminderSentAt: raw.reminderSentAt ? parseDate(raw.reminderSentAt) : null,
     }));
 
     return commit(doc, req, res);

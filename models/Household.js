@@ -189,6 +189,24 @@ const HouseholdSchema = new mongoose.Schema(
       default: [],
     },
 
+    // ── settle-up reminders ─────────────────────────────────────────────────
+    // Who nudged whom, and when. This is a rate limit, not a feature log: one
+    // roommate can ask another for their share at most once a day, so a
+    // disagreement about money cannot turn the app into a way to needle
+    // somebody. Pruned to the last 24h + 200 rows in the reminder service.
+    reminderLog: {
+      type: [
+        {
+          _id: false,
+          from: { type: String, required: true }, // creditor member id
+          to: { type: String, required: true },   // debtor member id
+          amount: { type: Number, default: 0 },
+          at: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
+
     // Shared ledger data.
     expenses: { type: [ExpenseSchema], default: [] },
     bills: { type: [BillSchema], default: [] },

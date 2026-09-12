@@ -15,6 +15,7 @@ const ctl = require('../controllers/admin.controller');
 const usageCtl = require('../controllers/admin.usage.controller');
 const subCtl = require('../controllers/admin.subscription.controller');
 const teamCtl = require('../controllers/admin.team.controller');
+const providerCtl = require('../controllers/admin.provider.controller');
 const sellInterestCtl = require('../controllers/sellInterest.controller');
 const requireAdminAuth = require('../middleware/requireAdminAuth');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
@@ -79,6 +80,24 @@ router.post('/reports/:id/status',          ctl.updateReportStatus);
 router.get ('/properties',                  ctl.listAllProperties);
 router.post('/properties/:id/moderate',     ctl.moderateProperty);
 router.delete('/properties/:id',            ctl.deleteProperty);
+
+// ─── Service provider verification ─────────────────────────────────────────
+// The ONE point at which admin touches a provider. Identity is checked once,
+// the registration fee is confirmed once, and after that every order runs
+// provider↔tenant with nobody in between — nothing here is reachable per
+// transaction, which is what stops the marketplace being capped by the size of
+// the support team.
+//
+// NOTE the mount order: '/providers/stats' is declared BEFORE '/providers/:id',
+// or Express matches "stats" as an id and the queue header 404s.
+router.get ('/providers/stats',             providerCtl.getStats);
+router.get ('/providers',                   providerCtl.listProviders);
+router.get ('/providers/:id',               providerCtl.getProvider);
+router.post('/providers/:id/approve',       providerCtl.approve);
+router.post('/providers/:id/reject',        providerCtl.reject);
+router.post('/providers/:id/payment',       providerCtl.confirmPayment);
+router.post('/providers/:id/suspend',       providerCtl.suspend);
+router.post('/providers/:id/unsuspend',     providerCtl.unsuspend);
 
 // ─── Subscriptions + marketing ─────────────────────────────────────────────
 // The plan/reachability table and the multi-channel "special offer" blast.

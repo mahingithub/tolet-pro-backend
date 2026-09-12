@@ -9,6 +9,11 @@ const { phoneCore } = require('../utils/phone');
 // rent from someone else"). `role` stays for backward compatibility — it
 // always reflects whichever role is currently active in the UI. `roles[]`
 // is the canonical superset and is what the auth gates check.
+// Service providers are deliberately ABSENT from this list. A shopkeeper is
+// not a tenant and needs no rental account: he lives in a separate system with
+// his own identity (models/Merchant.js), his own login surface
+// (/api/merchant/auth) and his own token audience. To-Let Pro's roles describe
+// the rental relationship only — tenant ↔ landlord — plus the admin ranks.
 const ROLES = ['tenant', 'landlord', 'support_agent', 'moderator', 'super_admin'];
 
 // ─── SUB-SCHEMAS ────────────────────────────────────────────────────────────

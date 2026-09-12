@@ -11,17 +11,12 @@ const router = express.Router();
 // tenant data extracted by Gemini Vision.
 router.post('/scan-ledger', requireAuth, scanLedger);
 
-// Temp debug route: GET /api/ai/test-models
-router.get('/test-models', async (req, res) => {
-  try {
-    const { GoogleGenerativeAI } = require('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-    const data = await response.json();
-    return res.json({ models: data.models?.map(m => m.name) || data });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+// There used to be an unauthenticated GET /test-models here that listed the
+// models the AI Studio key could reach, with GEMINI_API_KEY in the query
+// string. It is gone: it was public, it leaked the key into any log or proxy
+// trace along the way, and since the scanner and the assistant both run on
+// Vertex (config/vertex.js) it only ever exercised the fallback backend, not
+// the live one. Which backend is actually serving requests is already reported
+// at boot by the `[ai-chat] assistant backend:` line in aiChatController.js.
 
 module.exports = router;

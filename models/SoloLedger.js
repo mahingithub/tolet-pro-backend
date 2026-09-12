@@ -68,6 +68,18 @@ const EntrySchema = new mongoose.Schema(
     note: { type: String, default: '', maxlength: 300 },
     method: { type: String, enum: METHODS, default: 'cash' },
     date: { type: Date, default: Date.now },
+
+    // ── the repayment promise (a `lend` only) ────────────────────────────────
+    // `dueDate` is the day the money was said to be coming back. `remind` is
+    // the lender's explicit permission to message the BORROWER about it — a
+    // third party who never signed up here — so it defaults to false and is
+    // only ever set by the person who lent the money ticking the switch next
+    // to that friend's phone number. `reminderSentAt` makes the send happen at
+    // most once per loan; see services/soloDueReminder.service.js.
+    dueDate: { type: Date, default: null },
+    remind: { type: Boolean, default: false },
+    reminderSentAt: { type: Date, default: null },
+
     createdAt: { type: Date, default: Date.now },
     editedAt: { type: Date, default: null },
     deletedAt: { type: Date, default: null },

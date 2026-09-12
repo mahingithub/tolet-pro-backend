@@ -41,6 +41,16 @@ const env = {
     .map((s) => s.trim())
     .filter(Boolean),
 
+  // Origins for the SEPARATE provider app (project/tolet-pro-provider — its
+  // own origin, e.g. https://provider.toletpro.rent). Its own env var for the
+  // same reason the admin console has one: three surfaces that can be locked
+  // down and rotated independently. Defaults to the provider dev server on
+  // :5175 (public app :5173, admin :5174).
+  providerCorsOrigins: (process.env.PROVIDER_CORS_ORIGINS || 'http://localhost:5175')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+
   mongoUri: process.env.MONGO_URI,
 
   // ─── Redis (cache + rate limiting + Socket.IO adapter) ───────────────────

@@ -1,31 +1,17 @@
-// Defensive import so this works across @google/generative-ai versions:
-// newer SDKs export `SchemaType`, older ones `FunctionDeclarationSchemaType`.
-// Both enums use the same lowercase string values, so the literal fallback is
-// safe if neither is present.
-const GenAI = require("@google/generative-ai");
-const { GoogleGenerativeAI } = GenAI;
-const SchemaType =
-	GenAI.SchemaType ||
-	GenAI.FunctionDeclarationSchemaType ||
-	{ OBJECT: "object", STRING: "string", NUMBER: "number", INTEGER: "integer", BOOLEAN: "boolean", ARRAY: "array" };
-
 const ApiError = require("../utils/ApiError");
 const Property = require("../models/Property");
 const AIGuide = require("../models/AIGuide");
 const searchService = require("../services/searchService");
 
-const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+// Which Google backend is live (Vertex AI or AI Studio), the SDK differences
+// between them, and the client itself — all decided in one place, from the
+// environment, for every AI feature in the app. See services/aiProvider.js.
+const {
+	AI_PROVIDER, USE_VERTEX, AI_MODEL, SchemaType, UNAVAILABLE_REASON,
+	getClient, responseText, toolCallsOf,
+} = require("../services/aiProvider");
 
-// Initialize Gemini client. It picks up GEMINI_API_KEY from the environment.
-// If the key is missing, this fails gracefully when a request is made.
-let ai = null;
-try {
-	if (process.env.GEMINI_API_KEY) {
-		ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-	}
-} catch (err) {
-	console.error("Failed to initialize GoogleGenerativeAI. Is GEMINI_API_KEY set?", err);
-}
+const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
 // ── Property-search tool ────────────────────────────────────────────────────
 // Enum values mirror models/Property.js EXACTLY so Gemini can only emit filters
@@ -258,13 +244,11 @@ OUTPUT LENGTH
 // @route   POST /api/ai-chat/ask
 // @access  Public (rate limited)
 exports.askGemini = asyncH(async (req, res) => {
-	if (!ai) {
-		// Lazy re-init in case the env var was set after boot.
-		if (process.env.GEMINI_API_KEY) {
-			ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-		} else {
-			return res.status(503).json({ message: "AI service is currently unavailable. (Missing API Key)" });
-		}
+	const client = getClient();
+	if (!client) {
+		return res.status(503).json({
+			message: `AI service is currently unavailable. (${UNAVAILABLE_REASON})`,
+		});
 	}
 
 	const { text, history, language } = req.body;
@@ -370,8 +354,8 @@ Video rules:
 	if (guides.length) functionDeclarations.push(suggestVideoGuideDecl);
 
 	try {
-		const model = ai.getGenerativeModel({
-			model: "gemini-2.5-flash",
+		const model = client.getGenerativeModel({
+			model: AI_MODEL,
 			systemInstruction,
 			tools: [{ functionDeclarations }],
 			generationConfig: { temperature: 0.6 },
@@ -380,6 +364,15 @@ Video rules:
 		const chat = model.startChat({ history: formattedHistory });
 		let result = await chat.sendMessage(userText);
 
+		// The answer is NOT always in the last turn. Gemini routinely writes its
+		// whole reply in the SAME turn it asks for tools — a how-to answer comes
+		// back as [text, suggest_video_guide], and the turns after it carry only
+		// the remaining tool calls and then nothing at all. Reading text off the
+		// final result alone threw that answer away and shipped the "উত্তরটি দিতে
+		// পারছি না" placeholder with a perfectly good button sitting under it.
+		// Keep the most recent turn that actually said something.
+		let answerText = responseText(result);
+
 		// Tool-calling loop. Gemini may ask to run search_properties; we execute
 		// it and feed the results back. Bounded to a few rounds for safety.
 		let properties = [];
@@ -387,9 +380,8 @@ Video rules:
 		let suggestedActionIds = [];
 		let rounds = 0;
 		while (rounds < 3) {
-			const calls =
-				typeof result.response.functionCalls === "function" ? result.response.functionCalls() : null;
-			if (!calls || !calls.length) break;
+			const calls = toolCallsOf(result);
+			if (!calls.length) break;
 
 			// Gemini can ask for more than one tool in a single turn (e.g. search
 			// AND suggest a video). Run them all and feed every result back together.
@@ -430,10 +422,15 @@ Video rules:
 				}
 			}
 			result = await chat.sendMessage(toolResponses);
+			// A later turn supersedes an earlier one — after a search, the summary
+			// written with the results in hand is the better answer — but an empty
+			// turn never overwrites a real one.
+			const turnText = responseText(result);
+			if (turnText.trim()) answerText = turnText;
 			rounds += 1;
 		}
 
-		const replyText = result.response.text() || "দুঃখিত, এই মুহূর্তে উত্তরটি দিতে পারছি না।";
+		const replyText = answerText.trim() || "দুঃখিত, এই মুহূর্তে উত্তরটি দিতে পারছি না।";
 
 		// Deterministic fallback: if Gemini did NOT attach a guide, match the
 		// admin-set keywords against the user's question ourselves. This is the
@@ -472,7 +469,10 @@ Video rules:
 
 		return res.status(200).json({ text: replyText, properties, videoGuide, actions });
 	} catch (error) {
-		console.error("Gemini API Error:", error);
+		// Name the backend: the reply below is the same friendly "we're busy"
+		// either way, so the log line is the only place that says whether it was
+		// Vertex auth or an AI Studio key that actually failed.
+		console.error(`[ai-chat] ${AI_PROVIDER} error:`, error);
 
 		// ── Graceful degradation (free-tier quota, model outage, any Gemini
 		// error). Instead of a 500 + generic "brain" apology, return a REAL
@@ -531,46 +531,104 @@ Video rules:
 
 // ── Voice transcription (Bengali speech-to-text) ────────────────────────────
 // Used by the assistant's mic on browsers WITHOUT the Web Speech API (iOS
-// Safari, Firefox): the client records a short clip and uploads it here; we hand
-// it to OpenAI Whisper, which accepts the formats browsers actually record
-// (webm/opus from Chrome, mp4/aac from Safari) directly — no transcoding. Whisper
-// has strong Bengali support. Requires OPENAI_API_KEY and Node 18+ (native
-// fetch / FormData / Blob). If you'd rather stay all-Google, swap this for
-// Google Cloud Speech-to-Text (needs a service-account credential instead).
+// Safari, Firefox): the client records a short clip and uploads it here, and the
+// text goes straight back into the same chat pipeline.
 //
+// This runs on Gemini through the SAME getClient() as the chat above, so the one
+// AI_PROVIDER switch moves voice and chat together — Vertex today, AI Studio the
+// day the Cloud credit runs out, with no second credential to remember. It
+// replaced OpenAI Whisper, which was a third vendor and a third key for a
+// feature both Gemini backends already do (and do in Bengali).
+
+// Gemini validates the mimeType against an allowlist BEFORE it looks at the
+// bytes, and rejects the whole request when the label isn't audio/* — the
+// application/octet-stream a MediaRecorder blob with no type produces is a hard
+// 400, not a bad transcript. The bytes themselves are content-sniffed, so the
+// label only has to be honest enough to pass; sniffing the container ourselves
+// is what makes it honest without transcoding (there is no ffmpeg on Render).
+//
+// Every label below is documented by BOTH backends, so the switch back to AI
+// Studio can't quietly break voice on one browser.
+function sniffAudioMime(buf, fallbackLabel = "") {
+	const ascii = (start, len) => buf.slice(start, start + len).toString("ascii");
+
+	if (buf.length >= 4) {
+		// EBML — WebM/Matroska. Chrome and Firefox default to webm/opus.
+		if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return "audio/webm";
+		if (ascii(0, 4) === "OggS") return "audio/ogg";   // Firefox ogg/opus
+		if (ascii(0, 4) === "fLaC") return "audio/flac";
+		if (ascii(0, 3) === "ID3") return "audio/mpeg";
+		if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return "audio/mpeg"; // bare MP3 frame
+	}
+	if (buf.length >= 12) {
+		if (ascii(0, 4) === "RIFF" && ascii(8, 4) === "WAVE") return "audio/wav";
+		if (ascii(0, 4) === "FORM" && ascii(8, 4).startsWith("AIF")) return "audio/aiff";
+		// ISO base media (mp4/m4a) — 'ftyp' sits at offset 4. iOS Safari records
+		// this one and reports it as audio/mp4; 'audio/m4a' is the spelling both
+		// backends document.
+		if (ascii(4, 4) === "ftyp") return "audio/m4a";
+	}
+
+	// Couldn't sniff it. Fall back to the browser's own label, minus any codec
+	// parameter (`audio/webm;codecs=opus`), but only if it is actually audio.
+	const base = String(fallbackLabel).split(";")[0].trim().toLowerCase();
+	if (base.startsWith("audio/")) return base === "audio/mp4" ? "audio/m4a" : base;
+	return "";
+}
+
+const TRANSCRIBE_PROMPT =
+	"Transcribe the speech in this audio clip to text, exactly as it was spoken.\n\n" +
+	"- The speaker is most likely speaking Bengali (বাংলা), and may mix in English words " +
+	"(Banglish) the way people actually talk. Write Bengali in Bengali script and keep the " +
+	"English words in English.\n" +
+	"- Transcribe, do NOT translate, answer, summarise or comment on what was said.\n" +
+	"- Return ONLY the transcript itself — no quotes, no labels, no explanation.\n" +
+	"- If there is no intelligible speech at all, return an empty response.";
+
 // @route   POST /api/ai-chat/transcribe   (multipart field: "audio")
-// @access  Public (rate limited)
+// @access  Private (rate limited)
 exports.transcribeAudio = asyncH(async (req, res) => {
-	if (!process.env.OPENAI_API_KEY) {
-		return res.status(503).json({ message: "Voice transcription is unavailable. (Missing API key)" });
+	const client = getClient();
+	if (!client) {
+		return res.status(503).json({
+			message: `Voice transcription is unavailable. (${UNAVAILABLE_REASON})`,
+		});
 	}
 	if (!req.file || !req.file.buffer || !req.file.buffer.length) {
 		throw ApiError.badRequest("Audio file is required");
 	}
 
-	try {
-		const form = new FormData();
-		const blob = new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" });
-		form.append("file", blob, req.file.originalname || "voice.webm");
-		form.append("model", "whisper-1");
-		form.append("language", "bn"); // Bengali
+	const mimeType = sniffAudioMime(req.file.buffer, req.file.mimetype);
+	if (!mimeType) {
+		// Neither the bytes nor the label say "audio". Answering here beats
+		// spending a model call to be told the same thing in a 400.
+		return res.status(400).json({ message: "Unsupported audio format. Please try recording again." });
+	}
 
-		const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-			method: "POST",
-			headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-			body: form,
+	try {
+		const model = client.getGenerativeModel({
+			model: AI_MODEL,
+			// Transcription is not a place for invention: take the likeliest words.
+			generationConfig: { temperature: 0 },
 		});
 
-		if (!r.ok) {
-			const errText = await r.text().catch(() => "");
-			console.error("Whisper transcription error:", r.status, errText);
-			return res.status(502).json({ message: "Transcription failed. Please try again." });
-		}
+		const result = await model.generateContent({
+			contents: [{
+				role: "user",
+				parts: [
+					{ text: TRANSCRIBE_PROMPT },
+					{ inlineData: { mimeType, data: req.file.buffer.toString("base64") } },
+				],
+			}],
+		});
 
-		const data = await r.json();
-		return res.status(200).json({ text: (data.text || "").trim() });
+		// Strip the quotes the model sometimes wraps a transcript in, and cap the
+		// length — this text is about to be sent as a chat message.
+		const text = responseText(result).trim().replace(/^["“”'`]+|["“”'`]+$/g, "").slice(0, 1000);
+
+		return res.status(200).json({ text });
 	} catch (error) {
-		console.error("Transcription request failed:", error);
-		return res.status(500).json({ message: "Transcription service error. Please try again later." });
+		console.error(`[ai-chat] ${AI_PROVIDER} transcription error:`, error);
+		return res.status(502).json({ message: "Transcription failed. Please try again." });
 	}
 });

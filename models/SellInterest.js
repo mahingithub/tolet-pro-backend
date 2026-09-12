@@ -33,14 +33,35 @@ const SellInterestSchema = new mongoose.Schema(
     // buyer demand later without a migration.
     kind: { type: String, enum: ['sell', 'buy', 'service'], default: 'sell', index: true },
 
-    // Where the click came from (e.g. 'add_property'), for future breakdowns.
+    // Where the click came from. Part of the dedupe key, NOT a mutable
+    // attribute: 'add_property' for the sell button, `service_<id>` for each
+    // ServicesPage category tile. config/serviceCategories.js maps the
+    // `service_*` values onto real category ids.
     source: { type: String, trim: true, default: 'add_property', maxlength: 60 },
 
-    // How many times this same person tapped the button (logged-in only).
+    // How many times this same person tapped THIS source (logged-in only).
     clickCount: { type: Number, default: 1, min: 1 },
   },
   { timestamps: true },
 );
+
+// ─── Dedupe key: one row per (person, kind, source) ──────────────────────────
+// Backs the upsert in sellInterest.controller.js and makes it race-safe — two
+// simultaneous taps can no longer land as two rows.
+//
+// `partialFilterExpression` is load-bearing, not an optimisation. A plain
+// unique index treats every missing/null `userId` as the same value, so the
+// FIRST guest to tap a category would be the only guest ever recorded for it
+// — silently capping anonymous demand at one. Restricting the index to rows
+// that actually carry an ObjectId leaves guests unindexed and uncapped, which
+// is exactly right: they have no identity to dedupe on.
+SellInterestSchema.index(
+  { userId: 1, kind: 1, source: 1 },
+  { unique: true, partialFilterExpression: { userId: { $type: 'objectId' } } },
+);
+
+// Backs the per-category $group in getStats.
+SellInterestSchema.index({ kind: 1, source: 1 });
 
 SellInterestSchema.set('toJSON', {
   virtuals: true,

@@ -39,6 +39,12 @@ router.patch('/household', ctrl.updateHousehold);
 router.post('/members', ctrl.addMember);
 router.delete('/members/:id', ctrl.removeMember);
 
+// ── settle-up reminders ────────────────────────────────────────────────────
+// "I paid, here is your share." The caller can only ever nudge somebody who
+// owes THEM — the debt is recomputed server-side, never taken from the body.
+router.get('/remind/:memberId/preview', ctrl.remindPreview);
+router.post('/remind/:memberId', ctrl.remindMember);
+
 // ── expenses ───────────────────────────────────────────────────────────────
 router.post('/expenses', ctrl.addExpense);
 router.patch('/expenses/:id', ctrl.updateExpense);

@@ -35,6 +35,9 @@ const REFRESH_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 // one never takes the other's session with it.
 const USER_COOKIE = 'refreshToken';
 const ADMIN_COOKIE = 'adminRefreshToken';
+// The provider app's own cookie. A third name for a third surface, so one
+// system's cookie can never be presented to another's refresh endpoint.
+const MERCHANT_COOKIE = 'merchantRefreshToken';
 
 /** First value of a possibly comma-joined proxy header. */
 const firstHeader = (raw) => String(raw || '').split(',')[0].trim();
@@ -157,4 +160,5 @@ module.exports = {
   REFRESH_COOKIE_MAX_AGE_MS,
   USER_COOKIE,
   ADMIN_COOKIE,
+  MERCHANT_COOKIE,
 };

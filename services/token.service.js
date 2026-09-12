@@ -10,6 +10,12 @@ const env = require('../config/env');
 // user token is useless against the admin API even if that user is an admin.
 const USER_AUDIENCE  = 'tolet-pro';
 const ADMIN_AUDIENCE = 'tolet-pro-admin';
+// Service providers are a SEPARATE SYSTEM, not a role on a To-Let Pro account.
+// A shopkeeper never needs a rental account, and a tenant's token must never
+// reach a merchant's shop — so merchants get their own audience, their own
+// identity collection (models/Merchant.js) and their own gate
+// (middleware/requireMerchantAuth). To-Let Pro's roles stay tenant↔landlord.
+const MERCHANT_AUDIENCE = 'tolet-pro-provider';
 const ISSUER         = 'tolet-pro-backend';
 
 /** Access token issued after successful login or signup verify. */
@@ -60,6 +66,42 @@ function verifyAdminToken(token) {
   // scope. Anything else is treated as a forged/misused token.
   if (decoded.scope !== 'admin') {
     const err = new Error('Not an admin token');
+    err.name = 'JsonWebTokenError';
+    throw err;
+  }
+  return decoded;
+}
+
+/**
+ * Merchant access token — a THIRD audience ('tolet-pro-provider') plus an
+ * explicit `scope: 'merchant'` claim.
+ *
+ * `sub` is a Merchant._id, NOT a User._id. The two collections have separate
+ * id spaces, so a token that somehow crossed audiences would still not resolve
+ * to anybody — which is the property worth having.
+ */
+function signMerchantToken(merchant, sessionId = null) {
+  return jwt.sign(
+    {
+      sub: merchant._id.toString(),
+      phone: merchant.phone,
+      sessionId,
+      scope: 'merchant',
+    },
+    env.jwtSecret,
+    { expiresIn: env.jwtExpiresIn, audience: MERCHANT_AUDIENCE, issuer: ISSUER },
+  );
+}
+
+function verifyMerchantToken(token) {
+  const decoded = jwt.verify(token, env.jwtSecret, {
+    audience: MERCHANT_AUDIENCE,
+    issuer: ISSUER,
+  });
+  // Defense in depth, exactly as for admin: a correctly-audienced token must
+  // still carry the scope.
+  if (decoded.scope !== 'merchant') {
+    const err = new Error('Not a merchant token');
     err.name = 'JsonWebTokenError';
     throw err;
   }
@@ -153,6 +195,8 @@ module.exports = {
   verifyAccessToken,
   signAdminToken,
   verifyAdminToken,
+  signMerchantToken,
+  verifyMerchantToken,
   signResetToken,
   verifyResetToken,
   sign2FATempToken,
@@ -160,4 +204,5 @@ module.exports = {
   isTokenStaleAfterPasswordChange,
   USER_AUDIENCE,
   ADMIN_AUDIENCE,
+  MERCHANT_AUDIENCE,
 };

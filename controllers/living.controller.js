@@ -22,6 +22,7 @@ const bcrypt = require('bcryptjs');
 const Household = require('../models/Household');
 const User = require('../models/User');
 const ApiError = require('../utils/ApiError');
+const { previewSettleUpReminder, sendSettleUpReminder } = require('../services/settleUpReminder.service');
 
 const { SPLIT_TYPES, BILL_TYPES, METHODS } = Household;
 
@@ -786,8 +787,51 @@ async function deleteDeposit(req, res, next) {
 // Every mutation goes out through `idempotent`, so a replayed offline write is
 // answered with the current wallet instead of being applied twice. getHousehold
 // is a plain read and needs no guard.
+// ═══════════════════════════ SETTLE-UP REMINDERS ═════════════════════════════
+/**
+ * "I paid, here's your share" — see services/settleUpReminder.service.js.
+ *
+ * Deliberately NOT wrapped in idempotent(): these do not mutate the ledger, and
+ * a replayed opId must never be answered with "sent" for a message that was
+ * refused by the daily cooldown. The cooldown IS the idempotency here.
+ *
+ * The amount is never read from the request. The caller names a roommate; the
+ * server recomputes the debt and refuses if it isn't owed to THEM.
+ */
+async function remindPreview(req, res, next) {
+  try {
+    const hh = await loadMine(req);
+    const meId = myMemberId(hh, req.user._id);
+    if (!meId) throw ApiError.forbidden('আপনি এই হাউসহোল্ডের সদস্য নন।', { code: 'not_a_member' });
+    const result = await previewSettleUpReminder({
+      household: hh, meMemberId: meId, toMemberId: String(req.params.memberId || ''),
+    });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function remindMember(req, res, next) {
+  try {
+    const hh = await loadMine(req);
+    const meId = myMemberId(hh, req.user._id);
+    if (!meId) throw ApiError.forbidden('আপনি এই হাউসহোল্ডের সদস্য নন।', { code: 'not_a_member' });
+    const result = await sendSettleUpReminder({
+      household: hh, meMemberId: meId, toMemberId: String(req.params.memberId || ''),
+    });
+    // A refusal is a real answer, not a server error: the UI shows "already
+    // reminded today" or "nothing owed" rather than a failure toast.
+    return res.status(result.ok ? 200 : 409).json(result);
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   getHousehold,
+  remindPreview,
+  remindMember,
   createHousehold: idempotent(createHousehold),
   joinHousehold: idempotent(joinHousehold),
   leaveHousehold: idempotent(leaveHousehold),

@@ -191,6 +191,15 @@ async function buildOverviewStats() {
       SellInterest.countDocuments({ kind: 'sell', userId: { $ne: null } }),
     ]);
 
+    // Distinct people who have shown interest in ANY service category.
+    async function serviceInterestPeople() {
+      const [accounts, guests] = await Promise.all([
+        SellInterest.distinct('userId', { kind: 'service', userId: { $ne: null } }),
+        SellInterest.countDocuments({ kind: 'service', userId: null }),
+      ]);
+      return accounts.length + guests;
+    }
+
     // "Pending moderation" surfaced on the overview is the sum of: tenant
     // KYC awaiting admin review + landlord KYC awaiting admin review.
     // (Listing moderation will be added once that flow exists; today
@@ -211,12 +220,19 @@ async function buildOverviewStats() {
       totalProperties,
       pendingModeration,
       // "Interested in selling" demand gauge (Coming Soon lead capture).
+      // Unaffected by the source re-key: 'add_property' is the only source the
+      // sell button records, so one person is still exactly one row.
       sellInterestTotal,
       sellInterestRegistered,
       sellInterestGuests: sellInterestTotal - sellInterestRegistered,
-      
-      // "Interested in services" tracking
-      serviceInterestTotal: await SellInterest.countDocuments({ kind: 'service' }),
+
+      // "Interested in services" tracking. NOT a document count: since
+      // SellInterest became keyed by (userId, kind, source), one person who
+      // taps three ServicesPage categories holds three rows, and counting rows
+      // would report them as three interested people. Distinct accounts plus
+      // guest rows (which have no identity to dedupe on) is the honest figure.
+      // The per-category split lives on GET /api/admin/sell-interest?kind=service.
+      serviceInterestTotal: await serviceInterestPeople(),
 
       // Revenue is wired up once the subscription / billing pipeline
       // exists. Until then we return 0 honestly rather than fake a number.

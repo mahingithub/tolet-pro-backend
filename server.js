@@ -155,10 +155,15 @@ const NATIVE_APP_ORIGINS = new Set([
 ]);
 
 // Allowed browser origins = public site (CORS_ORIGINS) + admin console
-// (ADMIN_CORS_ORIGINS). Both are credentialed. Keeping them in separate env
-// vars means the admin subdomain is allow-listed explicitly and can be
-// rotated/locked down without touching the public site config.
-const ALLOWED_WEB_ORIGINS = new Set([...env.corsOrigins, ...env.adminCorsOrigins]);
+// (ADMIN_CORS_ORIGINS) + provider app (PROVIDER_CORS_ORIGINS). All three are
+// credentialed. Keeping them in separate env vars means each surface is
+// allow-listed explicitly and can be rotated/locked down without touching the
+// others' config.
+const ALLOWED_WEB_ORIGINS = new Set([
+  ...env.corsOrigins,
+  ...env.adminCorsOrigins,
+  ...env.providerCorsOrigins,
+]);
 
 app.use(
   cors({
@@ -230,6 +235,11 @@ app.get('/healthz', async (_req, res) => {
     ok,
     db,
     redis,
+    // Which Google backend the chat assistant, its voice transcription and the
+    // খাতা scanner are all running on: 'vertex' (Cloud credit) or 'aistudio'
+    // (GEMINI_API_KEY). Just the name — the project id and region stay out of
+    // an unauthenticated endpoint; the boot log has the full label.
+    ai: require('./services/aiProvider').AI_PROVIDER,
     // WHY the cache is down, when it is. `redis: 'disconnected'` on its own
     // sent us hunting through Render logs for a cause that was rate-limited
     // out of them; this carries the error code and the fix. cache.diagnose()
@@ -276,6 +286,27 @@ app.use('/api/properties', rateLimiters.search, propertyRoutes);
 // Server-side Overpass (OpenStreetMap) proxy for property "Nearby places" —
 // browser can't call Overpass directly (CORS + 406). Global apiLimiter covers it.
 app.use('/api/geo',        require('./routes/geo.routes'));
+// Service category registry — the one definition read by provider onboarding,
+// the provider's listing editor AND the tenant services page. Public, static
+// per deploy, and served straight from a precomputed string with an ETag, so
+// the global apiLimiter is plenty.
+app.use('/api/services',   require('./routes/services.routes'));
+// The provider app's OWN sign-in surface. Separate from /api/auth (rental) and
+// /api/admin/auth (console): three surfaces, three token audiences, three
+// identity collections. A shopkeeper never needs a To-Let Pro account.
+app.use('/api/merchant/auth', rateLimiters.auth, require('./routes/merchant.auth.routes'));
+// তালি খাতা — the merchant's own credit book and daily cash page. WRITE
+// limiter: entries are small and frequent (he writes one per customer), and
+// the whole point is that it keeps working on a bad connection.
+app.use('/api/ledger',     rateLimiters.write, require('./routes/ledger.routes'));
+// The order loop, in two halves — tenant and merchant live in separate
+// identity systems, so they get separate surfaces behind separate gates.
+app.use('/api/service-requests',  rateLimiters.write, require('./routes/serviceRequest.routes'));
+app.use('/api/merchant/requests', rateLimiters.write, require('./routes/merchantRequest.routes'));
+// Provider self-service: registration, editing, open/closed. Authenticated and
+// scoped to the caller's own businesses. WRITE limiter — registration steps are
+// frequent but small, and this is a create endpoint on a public signup path.
+app.use('/api/providers',  rateLimiters.write, require('./routes/provider.routes'));
 // MEDIUM limiter on inquiry creation (spam-prone).
 app.use('/api/inquiries',  rateLimiters.write, inquiryRoutes);
 app.use('/api/visit-schedule', visitScheduleRoutes);
@@ -433,7 +464,13 @@ async function start() {
 
   server.listen(env.port, () => {
     console.log(`[server] listening on :${env.port} (${env.nodeEnv})`);
+    // All three surfaces, not just the public one. This line is what an
+    // operator reads when a browser call is failing CORS, and listing only
+    // CORS_ORIGINS made the admin and provider origins look un-allowed when
+    // they were fine.
     console.log(`[server] CORS origins: ${env.corsOrigins.join(', ')}`);
+    console.log(`[server] CORS admin:   ${env.adminCorsOrigins.join(', ')}`);
+    console.log(`[server] CORS provider:${env.providerCorsOrigins.join(', ')}`);
     console.log(`[server] cache: ${env.useRedis ? 'Redis enabled' : 'DISABLED (no REDIS_URL)'}`);
   });
 
