@@ -94,9 +94,30 @@ function publicAppBaseUrl() {
   ).replace(/\/+$/, '');
 }
 
+/**
+ * Where the PROVIDER app lives — a different origin from the tenant app, on its
+ * own subdomain.
+ *
+ * Falls back to the first allowed CORS origin rather than to a hardcoded host:
+ * PROVIDER_CORS_ORIGINS already has to be correct for the provider app to make
+ * a single request, so deriving from it means one fewer variable that can be
+ * set wrong in a way nothing notices until a courier opens a dead link.
+ */
+function providerAppBaseUrl() {
+  const explicit = process.env.PROVIDER_APP_URL;
+  if (explicit) return explicit.replace(/\/+$/, '');
+
+  const first = String(process.env.PROVIDER_CORS_ORIGINS || '')
+    .split(',')[0]
+    .trim();
+  return (first || 'https://provider.toletpro.rent').replace(/\/+$/, '');
+}
+
 /** The link a tenant opens. Kept in one place so QR and copy-link never drift. */
 function inviteUrl(token) {
   return `${publicAppBaseUrl()}/join/${token}`;
 }
 
-module.exports = { genToken, uniqueToken, inviteUrl, publicAppBaseUrl };
+module.exports = {
+  genToken, uniqueToken, inviteUrl, publicAppBaseUrl, providerAppBaseUrl,
+};

@@ -29,8 +29,11 @@
  * rule that stops a settled rent ledger being rewritten.
  */
 
+const crypto = require('crypto');
+
 const mongoose = require('mongoose');
 const { getCategory } = require('../config/serviceCategories');
+const { dhakaDayKey } = require('../utils/dhakaDay');
 
 // ─── LIFECYCLE ───────────────────────────────────────────────────────────────
 //   placed      tenant submitted; the provider has not answered yet
@@ -116,7 +119,23 @@ const ServiceRequestSchema = new mongoose.Schema(
   {
     // A short human code. A shopkeeper on the phone says "অর্ডার ৪৭২১" — he is
     // never going to read out an ObjectId.
-    code: { type: String, unique: true, index: true },
+    //
+    // Four digits is 9,000 values, so the SCOPE it has to be unique in decides
+    // whether the format survives. Globally and forever, 9,000 is a hard
+    // ceiling on the number of orders the platform may ever take, and it
+    // degrades long before that — at 4,500 lifetime orders every second insert
+    // collides. Scoped to one provider's own day it never saturates: even a
+    // shop taking 200 orders a day fills 2% of the space, and that is the only
+    // scope the code is ever spoken in anyway — "অর্ডার ৪৭২১" means today, in
+    // this shop. It is deliberately NOT a lookup key anywhere; it is read out
+    // loud and printed in the merchant's inbox, and nothing resolves an order
+    // from it.
+    code: { type: String, default: '' },
+
+    // 'YYYY-MM-DD' in Asia/Dhaka — the other half of the code's uniqueness
+    // scope, and Dhaka rather than UTC because a UTC day would roll at 6pm,
+    // mid-shift, handing a shopkeeper two code spaces in one evening.
+    codeDay: { type: String, default: '' },
 
     kind:     { type: String, enum: ['request', 'order'], required: true },
     category: { type: String, required: true, index: true },
@@ -187,7 +206,16 @@ const ServiceRequestSchema = new mongoose.Schema(
     // nothing, and with no admin in the transaction path ratings are a large
     // part of what keeps quality up.
     ratedAt:  { type: Date, default: null },
-    reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'Review', default: null },
+    // ProviderReview, NOT Review. models/Review.js is the tenant↔landlord
+    // model — its revieweeId refs User and its role enum is
+    // ['landlord','tenant'] — and a provider is not a User at all. This said
+    // 'Review' before ProviderReview existed, which would have populated
+    // against the wrong collection and quietly resolved to nothing.
+    reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'ProviderReview', default: null },
+    // The score, denormalised so a tenant's order list can show "আপনি ৪★
+    // দিয়েছেন" without a join. ProviderReview remains the source of truth;
+    // this is a copy, and ProviderReview.recomputeProvider never reads it.
+    rating:   { type: Number, default: null, min: 1, max: 5 },
 
     // The connection this order produced, so provider stats and the admin's
     // platform counts read one ledger rather than two.
@@ -218,6 +246,11 @@ ServiceRequestSchema.index({ category: 1, status: 1, createdAt: -1 });
 // Building density — the analytics that justify a provider's route.
 ServiceRequestSchema.index({ 'deliverTo.buildingId': 1, createdAt: -1 });
 
+// The spoken code's uniqueness scope: one shop, one Dhaka day. Existing rows
+// predate `codeDay` and index as null, which is safe precisely because the
+// codes they carry were globally unique under the old rule.
+ServiceRequestSchema.index({ providerId: 1, codeDay: 1, code: 1 }, { unique: true });
+
 // Idempotency. Partial, because `clientRequestId` is null for anything not
 // submitted through the retrying client — and a plain unique index would treat
 // every one of those nulls as the same value and allow exactly one such order
@@ -226,6 +259,68 @@ ServiceRequestSchema.index(
   { tenantId: 1, clientRequestId: 1 },
   { unique: true, partialFilterExpression: { clientRequestId: { $type: 'string' } } },
 );
+
+// ─── The spoken code ─────────────────────────────────────────────────────────
+
+// How many times to redraw before giving up. Five consecutive collisions needs
+// the shop's day to be dense enough that the format itself has stopped working,
+// which is worth failing loudly over rather than looping.
+const CODE_ATTEMPTS = 5;
+
+/** One draw: 1000–9999, never a leading zero, so it reads as four spoken digits. */
+function drawCode() {
+  return String(crypto.randomInt(1000, 10000));
+}
+
+/**
+ * Was this 11000 the spoken code colliding, or the idempotency key?
+ *
+ * The two mean opposite things. A duplicate `code` is a coincidence and the
+ * right answer is to draw again; a duplicate `clientRequestId` is the same tap
+ * arriving twice and the right answer is to hand back the original order.
+ * Retrying the second would create the duplicate order the index exists to
+ * prevent, so they must never be confused.
+ */
+function isDuplicateCodeError(err) {
+  if (!err || err.code !== 11000) return false;
+  const keys = Object.keys(err.keyPattern || err.keyValue || {});
+  // Older drivers omit keyPattern; the index name in the message carries it.
+  if (!keys.length) return /code/.test(String(err.message || ''));
+  return keys.includes('code');
+}
+
+/**
+ * Create an order, redrawing the spoken code if that shop already used it today.
+ *
+ * At four digits a collision is an ORDINARY event, not an astronomical one, so
+ * this loop is the difference between a code the shopkeeper can read out and a
+ * tenant whose order fails for a coincidence. Unretried, the 11000 reaches the
+ * error handler and the tenant is told "এই তথ্য আগে থেকেই রয়েছে।" — a 409 about
+ * an order nobody has placed before.
+ *
+ * The unique index is what makes the redraw correct; without the index,
+ * retrying would just be guessing.
+ *
+ * An explicitly supplied `code` is never redrawn — a caller that picked one
+ * wants that one, and silently substituting another would be worse than the
+ * error.
+ */
+ServiceRequestSchema.statics.createWithCode = async function createWithCode(payload) {
+  const drawn = !payload.code;
+  let lastErr;
+
+  for (let attempt = 0; attempt < CODE_ATTEMPTS; attempt += 1) {
+    try {
+      return await this.create({ ...payload });
+    } catch (err) {
+      if (!drawn || !isDuplicateCodeError(err)) throw err;   // not ours to retry
+      lastErr = err;
+    }
+  }
+
+  console.error(`[serviceRequest] ${CODE_ATTEMPTS} code collisions in a row for provider ${payload.providerId}`);
+  throw lastErr;
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -306,10 +401,15 @@ ServiceRequestSchema.pre('validate', function normalise(next) {
   }
 
   if (this.isNew) {
+    // The day half of the code's scope has to be fixed BEFORE the code is
+    // drawn, or the draw would be checked against the wrong day's space.
+    if (!this.codeDay) this.codeDay = dhakaDayKey();
     if (!this.code) {
-      // Short, spoken-aloud friendly, and collision-checked by the unique
-      // index — the caller retries on a duplicate.
-      this.code = String(Math.floor(1000 + Math.random() * 9000));
+      // Short and spoken-aloud friendly, unique within this shop's day, and
+      // enforced by the compound index. A collision here is ordinary and is
+      // redrawn by createWithCode() — which is the only way this model should
+      // be inserted.
+      this.code = this.constructor.drawCode();
     }
     if (!this.respondBy) {
       this.respondBy = new Date(Date.now() + RESPOND_WINDOW_MIN * 60_000);
@@ -332,6 +432,11 @@ ServiceRequestSchema.set('toJSON', {
     return ret;
   },
 });
+
+// A static so the pre-validate hook reaches it through `this.constructor`,
+// which is also the seam a test uses to force a collision.
+ServiceRequestSchema.statics.drawCode = drawCode;
+ServiceRequestSchema.statics.CODE_ATTEMPTS = CODE_ATTEMPTS;
 
 ServiceRequestSchema.statics.STATUSES = STATUSES;
 ServiceRequestSchema.statics.OPEN_STATUSES = OPEN_STATUSES;

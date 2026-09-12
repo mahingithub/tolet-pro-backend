@@ -266,6 +266,25 @@ const ProviderSchema = new mongoose.Schema(
     cancelCount:  { type: Number, default: 0 },
     noShowCount:  { type: Number, default: 0 },
     suspendedReason: { type: String, default: '', maxlength: 300 },
+
+    // ─── Sweep bookkeeping ───────────────────────────────────────────────────
+    // What the unattended sweeps in services/providerLifecycle.service.js have
+    // already done to this provider. Every one of them exists to make a sweep
+    // IDEMPOTENT: these jobs run on a timer, on a host that can restart
+    // mid-run, and Render's free tier sleeps through scheduled minutes and
+    // then fires two runs close together. Without a marker to filter on, the
+    // second run sends the same shopkeeper the same message again.
+    //
+    // `expiryWarnedFor` holds the THRESHOLD already sent (30, then 7) rather
+    // than a timestamp: a plain "warnedAt" can only ever deliver one of the
+    // two notices, because the 7-day sweep would see the 30-day stamp and skip.
+    lifecycle: {
+      expiryWarnedFor: { type: Number, default: null },
+      expiryWarnedAt:  { type: Date, default: null },
+      priceNudgedAt:   { type: Date, default: null },
+      suspendedAt:     { type: Date, default: null },
+      expiredAt:       { type: Date, default: null },
+    },
   },
   {
     timestamps: true,

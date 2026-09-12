@@ -16,6 +16,8 @@ const usageCtl = require('../controllers/admin.usage.controller');
 const subCtl = require('../controllers/admin.subscription.controller');
 const teamCtl = require('../controllers/admin.team.controller');
 const providerCtl = require('../controllers/admin.provider.controller');
+const marketplaceCtl = require('../controllers/admin.marketplace.controller');
+const rateCtl = require('../controllers/admin.regulatedRate.controller');
 const sellInterestCtl = require('../controllers/sellInterest.controller');
 const requireAdminAuth = require('../middleware/requireAdminAuth');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
@@ -91,6 +93,13 @@ router.delete('/properties/:id',            ctl.deleteProperty);
 // NOTE the mount order: '/providers/stats' is declared BEFORE '/providers/:id',
 // or Express matches "stats" as an id and the queue header 404s.
 router.get ('/providers/stats',             providerCtl.getStats);
+// Marketplace monitoring — কত প্রোভাইডার × কত ইউজার × কত সংযোগ.
+//
+// Separate from the queue above, and not under '/providers', because it is not
+// about any provider: it reads the ContactEvent ledger to answer whether supply
+// and demand ever meet. Admin gave up sitting in the middle of every
+// transaction on purpose; this is how we still know the thing works.
+router.get ('/marketplace',                 marketplaceCtl.getMarketplace);
 router.get ('/providers',                   providerCtl.listProviders);
 router.get ('/providers/:id',               providerCtl.getProvider);
 router.post('/providers/:id/approve',       providerCtl.approve);
@@ -98,6 +107,23 @@ router.post('/providers/:id/reject',        providerCtl.reject);
 router.post('/providers/:id/payment',       providerCtl.confirmPayment);
 router.post('/providers/:id/suspend',       providerCtl.suspend);
 router.post('/providers/:id/unsuspend',     providerCtl.unsuspend);
+
+// ─── Published price ceilings (BERC / BTRC) ────────────────────────────────
+// BERC re-announces the LPG maximum monthly, so the number cannot live in a
+// config file — it would go wrong on OUR release cycle rather than the
+// regulator's. An admin types the circular in here when it lands.
+//
+// A cap is a MAXIMUM, not a price: entering one never rewrites anybody's
+// prices and never hides a shop for selling below it. See
+// services/priceCompliance.service.js.
+//
+// The two literal sub-paths are declared first, for the same reason as
+// '/providers/stats' above.
+router.get ('/regulated-rates/flagged',     rateCtl.listFlagged);
+router.get ('/regulated-rates/history',     rateCtl.history);
+router.post('/regulated-rates/check',       rateCtl.runCheck);
+router.get ('/regulated-rates',             rateCtl.list);
+router.post('/regulated-rates',             rateCtl.upsert);
 
 // ─── Subscriptions + marketing ─────────────────────────────────────────────
 // The plan/reachability table and the multi-channel "special offer" blast.

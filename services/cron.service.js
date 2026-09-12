@@ -28,6 +28,10 @@ const { runRentReminders } = require('./rentReminder.service');
 const { runLeaseExpiryReminders } = require('./leaseExpiryReminder.service');
 const { runSoloDueReminders } = require('./soloDueReminder.service');
 const { resetMonthlyBoostCredits } = require('./boost.service');
+const {
+  runProviderLifecycle, expireStaleRequests, nudgeStalePrices,
+} = require('./providerLifecycle.service');
+const { runPriceCompliance } = require('./priceCompliance.service');
 
 // Optional SMS fallback — absent in installs that don't ship the provider.
 let sms = null;
@@ -278,6 +282,25 @@ function startCronJobs() {
   // 1st of the month, 00:05 — refill each Plus host's monthly search boost.
   // Runs a few minutes after the invoice job so the two don't contend.
   const boostResetSchedule = TEST ? '* * * * *' : '5 0 1 * *';
+  // EVERY FIVE MINUTES, and it has to be. A provider gets 30 minutes to answer
+  // an order; a sweep that ran hourly would leave a tenant waiting up to an
+  // hour and a half before being told nobody was coming, which is worse than
+  // never having offered the button. Nothing else in this file is time-critical
+  // in that way, which is why it gets its own cadence.
+  const requestExpirySchedule = TEST ? '* * * * *' : '*/5 * * * *';
+  // Every day, 11:00 — the slower half: suspensions, lapsed registrations and
+  // renewal warnings. Deliberately a civil hour, because each one of these
+  // sends a shopkeeper a message about his livelihood.
+  const lifecycleSchedule = TEST ? '* * * * *' : '0 11 * * *';
+  // Mondays, 11:30 — "your price list is out of date". Weekly, then gated again
+  // by a 14-day per-provider cooldown inside the sweep: a grocery clock runs
+  // every 7 days, and a weekly message is how a number gets blocked.
+  const priceNudgeSchedule = TEST ? '* * * * *' : '30 11 * * 1';
+  // Every day, 12:00 — compare regulated rows against the ceilings on file.
+  // Daily rather than weekly because BERC's circular takes effect on a date
+  // of its choosing, and the flag should appear that day rather than up to a
+  // week later. The nudge behind it has its own 14-day per-provider cooldown.
+  const priceCapSchedule = TEST ? '* * * * *' : '0 12 * * *';
 
   cron.schedule(invoiceSchedule, () => {
     generateMonthlyInvoices().catch((e) => console.error('[cron] invoice error:', e.message));
@@ -303,10 +326,28 @@ function startCronJobs() {
     resetMonthlyBoostCredits().catch((e) => console.error('[cron] boost-reset error:', e.message));
   }, { timezone: TZ });
 
+  cron.schedule(requestExpirySchedule, () => {
+    expireStaleRequests().catch((e) => console.error('[cron] request-expiry error:', e.message));
+  }, { timezone: TZ });
+
+  cron.schedule(lifecycleSchedule, () => {
+    runProviderLifecycle().catch((e) => console.error('[cron] provider-lifecycle error:', e.message));
+  }, { timezone: TZ });
+
+  cron.schedule(priceNudgeSchedule, () => {
+    nudgeStalePrices().catch((e) => console.error('[cron] price-nudge error:', e.message));
+  }, { timezone: TZ });
+
+  cron.schedule(priceCapSchedule, () => {
+    runPriceCompliance().catch((e) => console.error('[cron] price-cap error:', e.message));
+  }, { timezone: TZ });
+
   console.log(
     `[cron] started — invoices: "${invoiceSchedule}", late-fees: "${lateFeeSchedule}", ` +
     `reminders: "${reminderSchedule}", lease-expiry: "${leaseSchedule}", ` +
-    `solo-due: "${soloDueSchedule}", boost-reset: "${boostResetSchedule}", TZ: ${TZ}` +
+    `solo-due: "${soloDueSchedule}", boost-reset: "${boostResetSchedule}", ` +
+    `request-expiry: "${requestExpirySchedule}", provider-lifecycle: "${lifecycleSchedule}", ` +
+    `price-nudge: "${priceNudgeSchedule}", price-cap: "${priceCapSchedule}", TZ: ${TZ}` +
     (TEST ? '  (TEST MODE: every minute)' : ''),
   );
 }
@@ -319,4 +360,8 @@ module.exports = {
   runLeaseExpiryReminders,
   runSoloDueReminders,
   resetMonthlyBoostCredits,
+  runProviderLifecycle,
+  expireStaleRequests,
+  nudgeStalePrices,
+  runPriceCompliance,
 };

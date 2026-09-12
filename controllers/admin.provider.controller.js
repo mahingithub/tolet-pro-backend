@@ -54,6 +54,23 @@ function pickAdminProvider(p) {
   const category = getCategory(p.category);
   const coords = p.geo && Array.isArray(p.geo.coordinates) ? p.geo.coordinates : [];
 
+  // Over-cap rows carry a raw row KEY ('kg_12'), which is a database detail and
+  // not something to put in front of a reviewer. Resolved against the registry
+  // here so the console renders '১২ কেজি' without having to fetch the category
+  // definition of every provider in the list.
+  const capField = category?.price?.regulated?.field;
+  const capRows = (p.priceCompliance?.overCapRows || []).map((r) => {
+    const field = category?.providerFields?.find((f) => f.key === (r.field || capField));
+    const row = field?.rows?.find((x) => x.key === r.row);
+    return {
+      field: r.field,
+      row: r.row,
+      price: r.price,
+      cap: r.cap,
+      label: row ? { bn: row.bn, en: row.en } : null,
+    };
+  });
+
   return {
     id: String(p._id),
     ownerMerchantId: String(p.ownerMerchantId),
@@ -86,6 +103,13 @@ function pickAdminProvider(p) {
 
     openNow: p.openNow,
     pricesUpdatedAt: p.pricesUpdatedAt,
+    // Rows found above a published government ceiling. Advisory — a cap is a
+    // MAXIMUM and most flags are a stale price list — but the reviewer
+    // looking at this provider is exactly who should see it.
+    priceCompliance: {
+      checkedAt: p.priceCompliance?.checkedAt || null,
+      overCapRows: capRows,
+    },
     ratingAvg: p.ratingAvg,
     ratingCount: p.ratingCount,
     stats: p.stats,

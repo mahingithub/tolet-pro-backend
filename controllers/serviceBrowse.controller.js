@@ -34,6 +34,7 @@
 
 const Provider = require('../models/Provider');
 const ApiError = require('../utils/ApiError');
+const origins = require('../services/thanaCentroid.service');
 const { getCategory, freshnessState } = require('../config/serviceCategories');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -209,19 +210,25 @@ exports.nearby = asyncH(async (req, res) => {
   const baseQuery = { status: 'active' };
   if (category) baseQuery.category = category;
 
-  // ── No coordinates: fall back to the thana the tenant told us ─────────────
-  //
-  // This path CANNOT sort by distance — there is nothing to measure from.
-  // Property.gps is nullable and Booking.propertyId is too, so a real share of
-  // tenants land here. Closing that gap needs thana centroids in
-  // scripts/generate-bd-geo.mjs (the dataset is currently {id, en, bn} with no
-  // coordinates); until those exist this returns rank order and says so via
-  // `sortedByDistance: false` rather than pretending.
-  if (!point) {
-    if (!thana) {
-      throw ApiError.badRequest('অবস্থান বা থানা দিন।', { code: 'location_required' });
-    }
+  if (!point && !thana) {
+    throw ApiError.badRequest('অবস্থান বা থানা দিন।', { code: 'location_required' });
+  }
 
+  // ── Where is this search being made FROM? ─────────────────────────────────
+  //
+  // Property.gps is nullable and Booking.propertyId is too, so a real share of
+  // tenants arrive with a thana name and nothing else. resolveUserOrigin turns
+  // that name into a point when we hold enough verified pins in the thana to
+  // derive one honestly, and returns `source: 'thana_name'` when we do not.
+  //
+  // The upazila dataset the app ships has no coordinates — only districts do,
+  // and a district centroid is 10-30 km out, which against a 2 km hyperlocal
+  // radius would order shops confidently and wrongly. See
+  // services/thanaCentroid.service.js.
+  const origin = await origins.resolveUserOrigin({ point, thana });
+
+  // ── Still no point: rank order, and say so rather than pretending ─────────
+  if (!origin.lat) {
     const rows = await Provider.find({
       ...baseQuery,
       $or: [{ thana }, { 'coverage.thanas': thana }],
@@ -233,7 +240,7 @@ exports.nearby = asyncH(async (req, res) => {
     return res.json({
       providers: rows.map((d) => toPublicProvider(d)),
       sortedByDistance: false,
-      origin: { thana },
+      origin,
       count: rows.length,
     });
   }
@@ -267,7 +274,9 @@ exports.nearby = asyncH(async (req, res) => {
   return res.json({
     providers: rows.map((d) => toPublicProvider(d)),
     sortedByDistance: true,
-    origin: { ...point, thana: thana || undefined },
+    // `origin.source` says whether this was a GPS fix or a neighbourhood
+    // guess. The client must not print "৪০০ মিটার দূরে" off a centroid.
+    origin,
     radiusM,
     count: rows.length,
   });
@@ -287,8 +296,12 @@ exports.nearbyCategories = asyncH(async (req, res) => {
     throw ApiError.badRequest('অবস্থান বা থানা দিন।', { code: 'location_required' });
   }
 
+  // Same origin resolution as /nearby, so the tile grid and the list it opens
+  // into never disagree about where the tenant is standing.
+  const origin = await origins.resolveUserOrigin({ point, thana });
+
   let rows;
-  if (point) {
+  if (origin && origin.lat) {
     const radiusM = Math.min(
       MAX_RADIUS_M,
       Math.max(500, Number.parseInt(req.query.radius, 10) || DEFAULT_RADIUS_M),
@@ -296,7 +309,7 @@ exports.nearbyCategories = asyncH(async (req, res) => {
     rows = await Provider.aggregate([
       {
         $geoNear: {
-          near: { type: 'Point', coordinates: [point.lng, point.lat] },
+          near: { type: 'Point', coordinates: [origin.lng, origin.lat] },
           distanceField: 'distanceM',
           maxDistance: radiusM,
           query: { status: 'active' },
@@ -331,7 +344,7 @@ exports.nearbyCategories = asyncH(async (req, res) => {
     .filter(Boolean)
     .sort((a, b) => b.count - a.count);
 
-  return res.json({ categories, count: categories.length });
+  return res.json({ categories, count: categories.length, origin });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

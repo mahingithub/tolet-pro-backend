@@ -36,7 +36,17 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 // inflate a provider's order count without ordering anything.
 const CLIENT_KINDS = ['view', 'call_tel'];
 
+// `all` is null on purpose — "no window" rather than "some number of days".
+// Read it with a key check, NEVER with `RANGES[x] ?? 30`: `??` fires on null
+// as well as undefined, so `?range=all` silently came back as 30 days and a
+// shopkeeper asking for his lifetime numbers was shown last month's.
 const RANGES = { '7d': 7, '30d': 30, '90d': 90, all: null };
+const DEFAULT_RANGE = '30d';
+
+function resolveRange(raw) {
+  const key = String(raw || '');
+  return Object.prototype.hasOwnProperty.call(RANGES, key) ? key : DEFAULT_RANGE;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/services/contact   { providerId, kind, thana?, area?, distanceKm? }
@@ -94,7 +104,8 @@ exports.providerStats = asyncH(async (req, res) => {
     throw ApiError.notFound('প্রোভাইডার পাওয়া যায়নি।', { code: 'provider_not_found' });
   }
 
-  const days = RANGES[req.query.range] ?? 30;
+  const range = resolveRange(req.query.range);
+  const days = RANGES[range];
   const since = days ? new Date(Date.now() - days * 86_400_000) : new Date(0);
   const match = { providerId: provider._id, createdAt: { $gte: since } };
 
@@ -157,7 +168,10 @@ exports.providerStats = asyncH(async (req, res) => {
   );
 
   return res.json({
-    range: req.query.range || '30d',
+    // The range that was actually APPLIED, not the one that was asked for —
+    // a typo'd value falls back to 30 days and the client must be able to see
+    // that it did.
+    range,
     // `views` is a COUNT. There is deliberately no list of viewers anywhere in
     // this payload — see the header note.
     views: kindMap.view?.people || 0,

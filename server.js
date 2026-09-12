@@ -303,6 +303,15 @@ app.use('/api/ledger',     rateLimiters.write, require('./routes/ledger.routes')
 // identity systems, so they get separate surfaces behind separate gates.
 app.use('/api/service-requests',  rateLimiters.write, require('./routes/serviceRequest.routes'));
 app.use('/api/merchant/requests', rateLimiters.write, require('./routes/merchantRequest.routes'));
+// The shopkeeper's own devices. Push is the FIRST rung of his notification
+// ladder now — free and instant — with WhatsApp as the fallback when it reached
+// no device at all, and SMS behind that.
+app.use('/api/merchant/push',     rateLimiters.write, require('./routes/merchantPush.routes'));
+// The COURIER's surface: no login, token in the URL. The only unauthenticated
+// write path in the marketplace, and the rate limiter matters more here than
+// anywhere else because of it — see routes/delivery.routes.js for why the trade
+// is acceptable.
+app.use('/api/delivery',          rateLimiters.write, require('./routes/delivery.routes'));
 // Provider self-service: registration, editing, open/closed. Authenticated and
 // scoped to the caller's own businesses. WRITE limiter — registration steps are
 // frequent but small, and this is a create endpoint on a public signup path.

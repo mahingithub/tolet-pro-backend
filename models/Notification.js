@@ -46,6 +46,10 @@ const NotificationSchema = new mongoose.Schema(
         // Sent to the LANDLORD ('… has completed onboarding for room 203'), and
         // back to the TENANT when the landlord approves or declines the claim.
         'tenant_onboarding',
+        // The service marketplace, TENANT side only. A merchant has no row in
+        // this collection — he is not a User and never will be — so his half of
+        // the loop goes out over WhatsApp/SMS from serviceRequestNotify.
+        'service_request',
       ],
       required: true,
     },

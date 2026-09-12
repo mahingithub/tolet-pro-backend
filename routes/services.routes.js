@@ -54,6 +54,7 @@ const {
 
 const browse = require('../controllers/serviceBrowse.controller');
 const contact = require('../controllers/contactEvent.controller');
+const reviews = require('../controllers/providerReview.controller');
 const optionalAuth = require('../middleware/optionalAuth');
 
 const router = express.Router();
@@ -75,6 +76,9 @@ const router = express.Router();
 router.get('/nearby/categories', browse.nearbyCategories);
 router.get('/nearby', browse.nearby);
 router.get('/providers/:id', browse.getProvider);
+// Public on purpose, like the listing itself: a review nobody can read
+// before deciding to call is a review that does no work.
+router.get('/providers/:id/reviews', reviews.listForProvider);
 
 // Record that somebody opened a card or tapped ফোন করুন. optionalAuth: a guest
 // browsing is real demand, they simply cannot be deduped. Never 4xx's on a bad

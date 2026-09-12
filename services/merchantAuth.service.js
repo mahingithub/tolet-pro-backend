@@ -104,7 +104,15 @@ async function refresh(rawToken, { device, ipAddress } = {}) {
   }
 
   const hash = hashToken(rawToken);
-  const merchant = await Merchant.findOne({ 'sessions.refreshHash': hash }).select('+sessions');
+  // BOTH parts of the select are required. `sessions` is select:false on the
+  // schema AND `refreshHash` is select:false inside the subdocument, so
+  // `.select('+sessions')` alone loads the array with every `refreshHash`
+  // undefined — the find() below then matches nothing and this endpoint
+  // answers 401 for every token it ever issued. The query above still finds
+  // the right document, which is what made the bug look like a bad token
+  // rather than a bad projection.
+  const merchant = await Merchant.findOne({ 'sessions.refreshHash': hash })
+    .select('+sessions +sessions.refreshHash');
   if (!merchant) {
     throw ApiError.unauthorized('Refresh token অবৈধ।', { code: 'invalid_refresh_token' });
   }
@@ -188,7 +196,10 @@ async function verifySignup({ phone, otp }, { device, ipAddress } = {}) {
     throw ApiError.unauthorized('কোডটি সঠিক নয়।', { code: 'bad_otp' });
   }
 
-  const merchant = await Merchant.findOne({ phone });
+  // `+sessions.refreshHash` for the same reason as in refresh(): addSession
+  // can rewrite the whole array, and an array rewritten from a projection that
+  // omitted the hashes would silently reset every other device's token to ''.
+  const merchant = await Merchant.findOne({ phone }).select('+sessions +sessions.refreshHash');
   if (!merchant) {
     throw ApiError.badRequest('আগে রেজিস্ট্রেশন শুরু করুন।', { code: 'no_signup_started' });
   }
@@ -214,7 +225,7 @@ async function verifySignup({ phone, otp }, { device, ipAddress } = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function login({ phone, password, device, ipAddress }) {
   const merchant = await Merchant.findOne({ phone })
-    .select('+password +loginAttempts +lockUntil +sessions');
+    .select('+password +loginAttempts +lockUntil +sessions +sessions.refreshHash');
 
   // Constant-ish timing: hash against a dummy so "no such account" and "wrong
   // password" cannot be told apart by how long the answer takes.
@@ -267,8 +278,12 @@ async function login({ phone, password, device, ipAddress }) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function logout(merchant, sessionId) {
   if (!sessionId) return;
-  merchant.sessions = merchant.sessions.filter((s) => s.sessionId !== sessionId);
-  await merchant.save();
+  // An atomic `$pull`, NOT filter-then-save. `req.merchant` comes from
+  // requireMerchantAuth, which loads `sessions` without the select:false
+  // `refreshHash` inside it — so reassigning the whole array and saving it
+  // would write every REMAINING session back with an empty hash and silently
+  // sign the shopkeeper out of all his other devices.
+  await Merchant.updateOne({ _id: merchant._id }, { $pull: { sessions: { sessionId } } });
 }
 
 module.exports = {
