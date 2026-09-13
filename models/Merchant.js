@@ -83,6 +83,17 @@ const MerchantSchema = new mongoose.Schema(
 
     language: { type: String, enum: ['bn', 'en'], default: 'bn' },
 
+    // ─── The kill switch for automated খাতা reminders ────────────────────────
+    // NOT a second consent gate — consent is per customer
+    // (LedgerParty.reminder.auto, default false), and nothing sends until he
+    // sets it there. This exists so that when one customer complains, the
+    // shopkeeper can stop ALL of it in one tap instead of hunting through
+    // however many pages he has switched on.
+    //
+    // Defaults true for that reason: a kill switch that has to be armed before
+    // it can be used is not a kill switch.
+    khataAutoReminders: { type: Boolean, default: true },
+
     // Push tokens for the order ping. The notification ladder (push → socket →
     // call/SMS) is what actually saves an order, so this is not optional
     // plumbing.

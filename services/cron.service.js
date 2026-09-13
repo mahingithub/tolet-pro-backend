@@ -27,6 +27,7 @@ const env           = require('../config/env');
 const { runRentReminders } = require('./rentReminder.service');
 const { runLeaseExpiryReminders } = require('./leaseExpiryReminder.service');
 const { runSoloDueReminders } = require('./soloDueReminder.service');
+const { runKhataReminders } = require('./khataReminder.service');
 const { resetMonthlyBoostCredits } = require('./boost.service');
 const {
   runProviderLifecycle, expireStaleRequests, nudgeStalePrices,
@@ -301,6 +302,13 @@ function startCronJobs() {
   // of its choosing, and the flag should appear that day rather than up to a
   // week later. The nudge behind it has its own 14-day per-provider cooldown.
   const priceCapSchedule = TEST ? '* * * * *' : '0 12 * * *';
+  // Every day, 10:30 — খাতা "আপনার বাকি আছে" nudges. A civil hour on purpose:
+  // the recipient is somebody's customer, not our user, and a money message
+  // from an unknown number at 7am reads as a threat. Daily rather than weekly
+  // because the seven-day gap is enforced per customer inside the sweep, so a
+  // daily run simply catches each one on the day it becomes due rather than
+  // making everybody wait for Monday.
+  const khataReminderSchedule = TEST ? '* * * * *' : '30 10 * * *';
 
   cron.schedule(invoiceSchedule, () => {
     generateMonthlyInvoices().catch((e) => console.error('[cron] invoice error:', e.message));
@@ -342,12 +350,17 @@ function startCronJobs() {
     runPriceCompliance().catch((e) => console.error('[cron] price-cap error:', e.message));
   }, { timezone: TZ });
 
+  cron.schedule(khataReminderSchedule, () => {
+    runKhataReminders().catch((e) => console.error('[cron] khata-reminder error:', e.message));
+  }, { timezone: TZ });
+
   console.log(
     `[cron] started — invoices: "${invoiceSchedule}", late-fees: "${lateFeeSchedule}", ` +
     `reminders: "${reminderSchedule}", lease-expiry: "${leaseSchedule}", ` +
     `solo-due: "${soloDueSchedule}", boost-reset: "${boostResetSchedule}", ` +
     `request-expiry: "${requestExpirySchedule}", provider-lifecycle: "${lifecycleSchedule}", ` +
-    `price-nudge: "${priceNudgeSchedule}", price-cap: "${priceCapSchedule}", TZ: ${TZ}` +
+    `price-nudge: "${priceNudgeSchedule}", price-cap: "${priceCapSchedule}", ` +
+    `khata-reminder: "${khataReminderSchedule}", TZ: ${TZ}` +
     (TEST ? '  (TEST MODE: every minute)' : ''),
   );
 }

@@ -7,8 +7,9 @@
  *
  *   বাকির খাতা  (has a party)   credit  = দিলাম — he owes more
  *                               payment = পেলাম — he owes less
- *   দৈনিক হিসাব (no party)      sale    = বিক্রি
- *                               expense = খরচ
+ *   দৈনিক হিসাব (no party)      sale     = বিক্রি
+ *                               expense  = খরচ
+ *                               purchase = ক্রয় (মাল তোলা)
  *
  * `kind` is the whole distinction. A `credit`/`payment` line moves a party's
  * balance; a `sale`/`expense` line moves only the day's totals. Keeping them in
@@ -33,10 +34,45 @@
 
 const mongoose = require('mongoose');
 
-// credit / payment always carry a party; sale / expense never do.
-const KINDS = ['credit', 'payment', 'sale', 'expense'];
+// credit / payment always carry a party; the cash kinds never do.
+const KINDS = ['credit', 'payment', 'sale', 'expense', 'purchase'];
 const PARTY_KINDS = ['credit', 'payment'];
-const CASH_KINDS = ['sale', 'expense'];
+const CASH_KINDS = ['sale', 'expense', 'purchase'];
+
+/**
+ * ─── WHY ক্রয় IS NOT JUST ANOTHER খরচ ────────────────────────────────────────
+ * Both are money leaving the shop, so one kind would have been less code. They
+ * answer different questions though, and merging them destroys the only one
+ * that matters:
+ *
+ *   খরচ (expense)  — rent, electricity, tea, the boy's wages. Gone.
+ *   ক্রয় (purchase) — stock bought to sell again. Still in the shop.
+ *
+ * বিক্রি − ক্রয় is what the shop earns on what it sells; খরচ is what it costs
+ * to keep the doors open. Added together they become one meaningless number,
+ * and a shopkeeper who stocked up heavily cannot tell a bad month from a big
+ * delivery.
+ */
+
+/**
+ * Where the money moved. Only meaningful for kinds that move money at all —
+ * বিক্রি, খরচ, ক্রয় and পেলাম. দিলাম is goods leaving on credit with no cash
+ * either way, so it carries no account.
+ *
+ * This is the half of "Tally" that a shopkeeper actually asks for: not debit
+ * and credit columns, but "বিকাশে কত আছে".
+ */
+const ACCOUNTS = ['cash', 'bkash', 'bank'];
+const ACCOUNT_KINDS = ['sale', 'expense', 'purchase', 'payment'];
+
+/** +1 = money came in, −1 = money went out, 0 = no cash moved. */
+const CASH_DIRECTION = {
+  sale: 1,
+  payment: 1,
+  expense: -1,
+  purchase: -1,
+  credit: 0,
+};
 
 const LedgerEntrySchema = new mongoose.Schema(
   {
@@ -60,6 +96,15 @@ const LedgerEntrySchema = new mongoose.Schema(
     amount: { type: Number, required: true, min: 1, max: 10_000_000 },
 
     note: { type: String, trim: true, default: '', maxlength: 300 },
+
+    // Which pocket. Defaults to cash because that is what a counter sale is
+    // unless he says otherwise, and because every entry written before this
+    // field existed was cash.
+    account: {
+      type: String,
+      enum: ACCOUNTS,
+      default: 'cash',
+    },
 
     // When it HAPPENED, which is not when it was synced. A shopkeeper entering
     // yesterday's sales this morning must see them under yesterday.
@@ -156,6 +201,15 @@ LedgerEntrySchema.set('toJSON', {
   },
 });
 
+/** What this line does to the account it names. Voided lines move nothing. */
+LedgerEntrySchema.methods.cashDelta = function cashDelta() {
+  if (this.voidedAt) return 0;
+  return (CASH_DIRECTION[this.kind] || 0) * this.amount;
+};
+
+LedgerEntrySchema.statics.ACCOUNTS = ACCOUNTS;
+LedgerEntrySchema.statics.ACCOUNT_KINDS = ACCOUNT_KINDS;
+LedgerEntrySchema.statics.CASH_DIRECTION = CASH_DIRECTION;
 LedgerEntrySchema.statics.KINDS = KINDS;
 LedgerEntrySchema.statics.PARTY_KINDS = PARTY_KINDS;
 LedgerEntrySchema.statics.CASH_KINDS = CASH_KINDS;
@@ -163,6 +217,9 @@ LedgerEntrySchema.statics.dhakaDayKey = dhakaDayKey;
 
 module.exports = mongoose.model('LedgerEntry', LedgerEntrySchema);
 module.exports.KINDS = KINDS;
+module.exports.ACCOUNTS = ACCOUNTS;
+module.exports.ACCOUNT_KINDS = ACCOUNT_KINDS;
+module.exports.CASH_DIRECTION = CASH_DIRECTION;
 module.exports.PARTY_KINDS = PARTY_KINDS;
 module.exports.CASH_KINDS = CASH_KINDS;
 module.exports.dhakaDayKey = dhakaDayKey;

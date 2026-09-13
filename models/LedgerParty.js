@@ -76,7 +76,41 @@ const LedgerPartySchema = new mongoose.Schema(
     // Getting this wrong does not annoy a user — it makes the platform the
     // thing that harassed somebody's customer on their behalf.
     reminder: {
+      // "The merchant may tap Remind for this person." A human decides each
+      // send, and is standing there when it happens.
       optIn:      { type: Boolean, default: false },
+
+      // ─── SEPARATE CONSENT, AND IT HAS TO BE ──────────────────────────────
+      // "…and he may also let the server do it unattended, forever."
+      //
+      // That is a different promise from the one above, so it is a different
+      // flag. Reusing `optIn` would have been one line less code and would
+      // have silently signed up every customer already on file for weekly
+      // automated messages — people who agreed to nothing of the sort, on
+      // phones nobody asked, because a developer reused a boolean.
+      //
+      // Defaults false. Nothing sends itself until the merchant says so for
+      // that specific person.
+      auto:       { type: Boolean, default: false },
+
+      // Shared by the manual button and the sweep on purpose: the customer
+      // does not care which one caused the message, only how often his phone
+      // buzzes. One clock, one cooldown.
+      lastSentAt: { type: Date, default: null },
+      sentCount:  { type: Number, default: 0 },
+    },
+
+    // ─── Statement sends, counted SEPARATELY from reminders ──────────────────
+    // They share `reminder.optIn` — one consent, given once by the merchant on
+    // his customer's behalf — but not the clock.
+    //
+    // A reminder is pushed at somebody ("you owe money"), so it is rationed
+    // hard. A statement is nearly always PULLED: the customer is standing at
+    // the counter asking what he owes, and the shopkeeper sends the page rather
+    // than reading it out. Sharing one timestamp would mean that answering that
+    // question locks the reminder out for a week, or that last Tuesday's
+    // reminder stops him answering it at all.
+    statement: {
       lastSentAt: { type: Date, default: null },
       sentCount:  { type: Number, default: 0 },
     },

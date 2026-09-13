@@ -21,6 +21,28 @@ process.env.SMS_API_KEY = '';
 process.env.OTP_DEV_MODE = 'true';
 process.env.WHATSAPP_ACCESS_TOKEN = '';
 process.env.WHATSAPP_PHONE_NUMBER_ID = '';
+// ─── The OpenWA gateway, blanked for the same reason ─────────────────────────
+// These were missed when the provider moved from Meta to a self-hosted OpenWA
+// gateway, and only the Meta credentials above were being cleared. On a
+// developer's own machine `.env` sets WHATSAPP_PROVIDER=openwa and
+// OPENWA_API_URL defaults to http://localhost:2785 — so every reminder test was
+// making a REAL HTTP call to the gateway running on that machine, waiting out a
+// 15-second axios timeout or collecting a 409 "session not ready", and pacing
+// itself against the send throttle's minimum gap between messages.
+//
+// That is why the suite was slow and intermittently blew its 60s per-test
+// timeout on tests that do no network work of their own: the stall was left
+// over from whichever reminder suite ran before them.
+//
+// Blanking the credentials makes isConfigured() false, so a send returns
+// `{ success: false, skipped: true }` immediately. The OUTCOME every existing
+// test asserts on is unchanged — the send still does not happen — it just stops
+// costing fifteen seconds and stops depending on whether the developer happens
+// to have WhatsApp running.
+process.env.WHATSAPP_PROVIDER = 'meta';
+process.env.OPENWA_API_URL = '';
+process.env.OPENWA_API_KEY = '';
+process.env.OPENWA_SESSION_ID = '';
 process.env.FACEBOOK_PAGE_ACCESS_TOKEN = '';
 process.env.FACEBOOK_PAGE_ID = '';
 process.env.CRON_TEST = '';

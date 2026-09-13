@@ -307,6 +307,10 @@ app.use('/api/merchant/requests', rateLimiters.write, require('./routes/merchant
 // ladder now — free and instant — with WhatsApp as the fallback when it reached
 // no device at all, and SMS behind that.
 app.use('/api/merchant/push',     rateLimiters.write, require('./routes/merchantPush.routes'));
+// The provider's own signed-upload endpoint. NOT /api/upload — that one is
+// guarded by the rental surface's requireAuth, which rejects a merchant token
+// as `invalid_token` and signs the shopkeeper out mid-registration.
+app.use('/api/merchant/upload',   rateLimiters.upload, require('./routes/merchant.upload.routes'));
 // The COURIER's surface: no login, token in the URL. The only unauthenticated
 // write path in the marketplace, and the rate limiter matters more here than
 // anywhere else because of it — see routes/delivery.routes.js for why the trade

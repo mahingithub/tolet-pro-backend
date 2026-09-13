@@ -10,10 +10,10 @@ const env = require('../config/env');
  * Multi-dimensional abuse detection and enforcement for OTP operations.
  * 
  * THRESHOLDS (per 10-minute window, counted per IP+PHONE pair):
- * - Warning: 3
- * - Delay:   5  (2-second delay; 5 seconds once past the CAPTCHA mark)
- * - CAPTCHA: 7  (dormant unless OTP_CAPTCHA_ENABLED — see config/env.js)
- * - Block:  10  (hard block for 30 minutes)
+ * - Warning: 2
+ * - Delay:   3  (2-second delay; 5 seconds once past the CAPTCHA mark)
+ * - CAPTCHA: 4  (dormant unless OTP_CAPTCHA_ENABLED — see config/env.js)
+ * - Block:   5  (hard block for 30 minutes)
  *
  * Counted against `pressure` = requests + failed verifications, so guessing at
  * codes escalates on the same ladder as asking for them.
@@ -32,15 +32,15 @@ const env = require('../config/env');
  * of the number rather than of whoever asked. It is the harder limit and it
  * runs FIRST in both rental callers.
  *
- * A consequence worth stating plainly rather than discovering later: with that
- * quota in front, no single number can reach 6 requests in 15 minutes, so the
- * CAPTCHA (7) and BLOCK (10) rungs of THIS ladder are not reachable through
- * the rental signup and reset endpoints as currently configured. They are a
- * backstop — for callers not covered by the quota, for a raised quota, and for
- * the failed-verification pressure that the quota does not count at all.
+ * The two are sized so that THIS ladder bites first. Every rung sits inside the
+ * quota's budget of 5, so a single requester working one number meets the
+ * graduated response — warn, slow, stop — and the quota only speaks when this
+ * ladder structurally cannot: when the same victim is hit from many addresses
+ * at once, which is exactly the case a per-(ip, phone) counter cannot see.
  *
- * The two lower rungs do fire, and earn their place: `delayMs` is applied by
- * the caller, which shapes a script's traffic well before the quota's hard stop.
+ * They also measure different things, which is why both stay. This one counts
+ * failed verifications as pressure; the quota counts only requests. This one
+ * blocks a requester; the quota protects a number.
  *
  * ─── WHY THE IP AND DEVICE DIMENSIONS ONLY FLAG ──────────────────────────────
  * `sameIpCount` / `sameDeviceCount` below set `flaggedForReview` and never
@@ -52,12 +52,32 @@ const env = require('../config/env');
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-// Thresholds for enforcement escalation
+/**
+ * Thresholds for enforcement escalation.
+ *
+ * ─── SIZED TO BITE BEFORE services/otpQuota.service.js ───────────────────────
+ * These used to be 3 / 5 / 7 / 10, which put the top two rungs out of reach:
+ * the per-phone quota caps a number at 5 requests per 15 minutes and runs
+ * first, so nothing ever counted past 5 and both CAPTCHA and BLOCK were
+ * decorative.
+ *
+ * The whole ladder now fits inside that budget, so a single requester hitting
+ * one number meets the graduated response — warn, slow down, stop — instead of
+ * sailing to the quota's flat refusal. The quota stays as the backstop it was
+ * meant to be: it is keyed on the NUMBER and ignores the requester, so it still
+ * catches what this ladder structurally cannot — the same victim being hit from
+ * many addresses at once.
+ *
+ * The cost, stated so it is not discovered in a support message: a shopkeeper
+ * in a bad-signal area now gets four codes rather than five before he is shut
+ * out, and the shut-out is this ladder's 30 minutes rather than the quota's 15.
+ * COOLDOWNS.BLOCK is the knob for that.
+ */
 const THRESHOLDS = {
-  WARNING: 3,
-  DELAY: 5,
-  CAPTCHA: 7,
-  BLOCK: 10,
+  WARNING: 2,
+  DELAY: 3,
+  CAPTCHA: 4,
+  BLOCK: 5,
 };
 
 // Cooldown periods (milliseconds)

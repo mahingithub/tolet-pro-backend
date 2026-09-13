@@ -99,6 +99,7 @@ exports.summary = asyncH(async (req, res) => {
         dayKey: today,
         sale: byKind.sale || 0,
         expense: byKind.expense || 0,
+        purchase: byKind.purchase || 0,
         credit: byKind.credit || 0,
         payment: byKind.payment || 0,
       },
@@ -177,6 +178,21 @@ exports.updateParty = asyncH(async (req, res) => {
   // withdraw. It is never implied by having a phone number on file.
   if (typeof req.body?.reminderOptIn === 'boolean') {
     party.reminder.optIn = req.body.reminderOptIn;
+    // Withdrawing consent withdraws ALL of it. Leaving `auto` armed under a
+    // revoked opt-in would mean the server kept messaging somebody the
+    // shopkeeper had just told us to stop messaging.
+    if (!req.body.reminderOptIn) party.reminder.auto = false;
+  }
+  // A SEPARATE switch: "the server may send these unattended, on a schedule".
+  // Refused unless the manual consent is already on, so automation can never
+  // be the first thing anybody agrees to.
+  if (typeof req.body?.reminderAuto === 'boolean') {
+    if (req.body.reminderAuto && !party.reminder.optIn) {
+      throw ApiError.badRequest('আগে রিমাইন্ডারের অনুমতি চালু করুন।', {
+        code: 'reminder_not_opted_in',
+      });
+    }
+    party.reminder.auto = req.body.reminderAuto;
   }
 
   await party.save();
@@ -230,6 +246,22 @@ exports.createEntry = asyncH(async (req, res) => {
     throw ApiError.badRequest('তারিখ সঠিক নয়।', { code: 'bad_date' });
   }
 
+  // Which pocket the money moved through. Rejected rather than ignored on a
+  // দিলাম: that line moves no cash at all, so an account on it would be a
+  // number filed against a pocket nothing ever entered or left.
+  let account = 'cash';
+  if (body.account !== undefined && body.account !== null && body.account !== '') {
+    if (!LedgerEntry.ACCOUNTS.includes(body.account)) {
+      throw ApiError.badRequest('অ্যাকাউন্ট সঠিক নয়।', { code: 'bad_account' });
+    }
+    if (!LedgerEntry.ACCOUNT_KINDS.includes(kind)) {
+      throw ApiError.badRequest('এই ধরনের এন্ট্রিতে নগদ/বিকাশ/ব্যাংক লাগে না।', {
+        code: 'account_not_allowed',
+      });
+    }
+    account = body.account;
+  }
+
   let entry;
   try {
     entry = await LedgerEntry.create({
@@ -241,6 +273,7 @@ exports.createEntry = asyncH(async (req, res) => {
       note: String(body.note || '').trim(),
       at,
       dayKey: LedgerEntry.dhakaDayKey(at),
+      account,
       source: ['manual', 'scan', 'order'].includes(body.source) ? body.source : 'manual',
       clientEntryId,
     });
@@ -402,3 +435,462 @@ exports.remind = asyncH(async (req, res) => {
 
 exports.canRemind = canRemind;
 exports.REMINDER_COOLDOWN_DAYS = REMINDER_COOLDOWN_DAYS;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Statements and reports — the read side
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Everything below is READ-ONLY and computed on the server, deliberately.
+ *
+ * A running balance that the phone works out for itself is a running balance
+ * that disagrees with the shopkeeper's when one of them has an entry the other
+ * has not synced yet — and the moment a customer is shown a statement, a
+ * disagreement is an argument in the shop. The write path stays offline-first
+ * and untouched; the numbers anybody is asked to BELIEVE are recomputed here
+ * from the lines.
+ */
+
+/** 'YYYY-MM-DD' or nothing. Rejects anything else rather than guessing. */
+function dayKeyOrNull(value) {
+  const s = String(value || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+/** N days back from today, Dhaka-local, as a dayKey. */
+function daysAgoKey(n) {
+  return LedgerEntry.dhakaDayKey(new Date(Date.now() - n * 86_400_000));
+}
+
+/**
+ * Resolve ?from= &to= into a closed dayKey range, defaulting to this month so
+ * far. Both ends are INCLUSIVE, which is what "১ থেকে ৩১ তারিখ" means to
+ * everyone who is not a programmer.
+ */
+function resolveRange(query) {
+  const today = LedgerEntry.dhakaDayKey();
+  const to = dayKeyOrNull(query.to) || today;
+  const from = dayKeyOrNull(query.from) || `${today.slice(0, 7)}-01`;
+  if (from > to) {
+    throw ApiError.badRequest('শুরুর তারিখ শেষ তারিখের পরে হতে পারে না।', {
+      code: 'bad_range',
+    });
+  }
+  return { from, to };
+}
+
+/**
+ * GET /api/ledger/parties/:id/statement?from=&to=
+ *
+ * The page a shopkeeper turns his phone around to show a customer. Opening
+ * balance, every line in the period with the balance AFTER it, and the closing
+ * balance — which is the Tally habit the paper book already has and the app
+ * did not: the party page showed lines and one final number, so "কত ছিল, কত
+ * দিলাম, এখন কত" could not be read off it.
+ *
+ * Voided lines stay in the list, struck through, contributing nothing. A
+ * statement that quietly omits a cancelled entry is a statement whose totals
+ * cannot be checked against the paper it replaced.
+ */
+/**
+ * Opening balance, every line in the period with the balance AFTER it, closing
+ * balance and the period totals.
+ *
+ * Shared by the screen and by the WhatsApp message ON PURPOSE. The number a
+ * customer reads on the shopkeeper's phone and the number that arrives on his
+ * own must come from the same arithmetic — two implementations of "the running
+ * total" is two chances to disagree, in front of the one person who will
+ * notice.
+ */
+async function buildStatement(party, from, to) {
+  const [openingRows, lines] = await Promise.all([
+    // Everything before the window, netted. `credit` adds to what he owes,
+    // `payment` takes away — the same rule as LedgerEntry.balanceDelta(), which
+    // this must not be allowed to drift from.
+    LedgerEntry.aggregate([
+      { $match: { partyId: party._id, voidedAt: null, dayKey: { $lt: from } } },
+      {
+        $group: {
+          _id: null,
+          opening: {
+            $sum: {
+              $cond: [{ $eq: ['$kind', 'credit'] }, '$amount', { $multiply: ['$amount', -1] }],
+            },
+          },
+        },
+      },
+    ]),
+    // Oldest FIRST here, unlike the party page: a running balance only reads
+    // correctly downwards.
+    LedgerEntry.find({ partyId: party._id, dayKey: { $gte: from, $lte: to } })
+      .sort({ at: 1, _id: 1 })
+      .limit(1000),
+  ]);
+
+  const opening = openingRows[0]?.opening || 0;
+
+  let running = opening;
+  let totalCredit = 0;
+  let totalPayment = 0;
+
+  const rows = lines.map((e) => {
+    const delta = e.balanceDelta();
+    running += delta;
+    if (!e.voidedAt) {
+      if (e.kind === 'credit') totalCredit += e.amount;
+      if (e.kind === 'payment') totalPayment += e.amount;
+    }
+    return { ...e.toJSON(), delta, balanceAfter: running };
+  });
+
+  return {
+    range: { from, to },
+    opening,
+    closing: running,
+    totals: { credit: totalCredit, payment: totalPayment },
+    entries: rows,
+  };
+}
+
+exports.partyStatement = asyncH(async (req, res) => {
+  const party = await loadParty(req.params.id, req.merchant);
+  const { from, to } = resolveRange(req.query);
+  const statement = await buildStatement(party, from, to);
+  return res.json({ party: party.toJSON(), ...statement });
+});
+
+/**
+ * GET /api/ledger/report?from=&to=
+ *
+ * The month-end page. What came in, what went out, what is still owed, and —
+ * the number a shopkeeper actually checks against the tin box — how much cash
+ * the book says should be there.
+ *
+ * CASH IS NOT PROFIT, and the split matters:
+ *   বিক্রি (sale)     cash in    — goods out, money in
+ *   পেলাম (payment)   cash in    — an old debt collected
+ *   খরচ (expense)     cash out
+ *   দিলাম (credit)    NO CASH    — goods left the shop, money did not arrive
+ *
+ * Netting দিলাম into the cash line is the single easiest way to make a
+ * shopkeeper think he has money he does not have, so it is kept out and
+ * reported separately as what it is: a debt he is owed.
+ */
+exports.report = asyncH(async (req, res) => {
+  const merchantId = req.merchant._id;
+  const { from, to } = resolveRange(req.query);
+
+  const [byKind, byDay, openingRows, topDebtors, byAccount] = await Promise.all([
+    LedgerEntry.aggregate([
+      { $match: { merchantId, voidedAt: null, dayKey: { $gte: from, $lte: to } } },
+      { $group: { _id: '$kind', total: { $sum: '$amount' }, count: { $sum: 1 } } },
+    ]),
+    // One row per day, so the client can draw the period without a second call.
+    LedgerEntry.aggregate([
+      { $match: { merchantId, voidedAt: null, dayKey: { $gte: from, $lte: to } } },
+      {
+        $group: {
+          _id: { day: '$dayKey', kind: '$kind' },
+          total: { $sum: '$amount' },
+        },
+      },
+      { $sort: { '_id.day': 1 } },
+    ]),
+    // What the whole book was owed before the window opened.
+    LedgerEntry.aggregate([
+      {
+        $match: {
+          merchantId, voidedAt: null, partyId: { $ne: null }, dayKey: { $lt: from },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          opening: {
+            $sum: {
+              $cond: [{ $eq: ['$kind', 'credit'] }, '$amount', { $multiply: ['$amount', -1] }],
+            },
+          },
+        },
+      },
+    ]),
+    LedgerParty.find({ merchantId, archivedAt: null, balance: { $gt: 0 } })
+      .sort({ balance: -1 })
+      .limit(5),
+    // ALL TIME, not the period. "বিকাশে কত আছে" is a question about right now;
+    // answering it with one month's movement would report a pocket as empty
+    // because nothing happened to it since the 1st.
+    LedgerEntry.aggregate([
+      { $match: { merchantId, voidedAt: null, kind: { $in: ['sale', 'payment', 'expense', 'purchase'] } } },
+      {
+        $group: {
+          _id: '$account',
+          in: { $sum: { $cond: [{ $in: ['$kind', ['sale', 'payment']] }, '$amount', 0] } },
+          out: { $sum: { $cond: [{ $in: ['$kind', ['expense', 'purchase']] }, '$amount', 0] } },
+        },
+      },
+    ]),
+  ]);
+
+  const k = Object.fromEntries(byKind.map((r) => [r._id, r.total]));
+  const counts = Object.fromEntries(byKind.map((r) => [r._id, r.count]));
+  const sale = k.sale || 0;
+  const expense = k.expense || 0;
+  const purchase = k.purchase || 0;
+  const credit = k.credit || 0;
+  const payment = k.payment || 0;
+
+  const openingReceivable = openingRows[0]?.opening || 0;
+
+  // Collapse the per-(day, kind) rows into one row per day.
+  const days = {};
+  byDay.forEach(({ _id, total }) => {
+    const row = days[_id.day] || (days[_id.day] = {
+      dayKey: _id.day, sale: 0, expense: 0, purchase: 0, credit: 0, payment: 0,
+    });
+    row[_id.kind] = total;
+  });
+
+  return res.json({
+    range: { from, to },
+    totals: {
+      sale, expense, purchase, credit, payment, counts,
+      cashIn: sale + payment,
+      cashOut: expense + purchase,
+      netCash: sale + payment - expense - purchase,
+      /**
+       * বিক্রি − ক্রয় − খরচ over the period.
+       *
+       * An ESTIMATE, and the screen has to keep saying so. It is not profit in
+       * the accounting sense because stock does not sell in the month it is
+       * bought: a shopkeeper who filled his shelves on the 28th shows a
+       * terrible month, and one who sold down old stock without restocking
+       * shows a wonderful one. Over a quarter it converges; over a week it can
+       * be nonsense.
+       *
+       * Reported anyway because the alternative is what the app did before,
+       * which was to offer no answer at all to "লাভ কত হলো" — and a rough
+       * answer he can sanity-check beats a shopkeeper guessing.
+       */
+      margin: sale - purchase - expense,
+    },
+    /**
+     * Balance per pocket, according to the book. Not a bank statement: it is
+     * only as right as what he wrote down, which is exactly why it is worth
+     * showing — the gap between this and the real বিকাশ balance is how he finds
+     * the entry he forgot.
+     */
+    accounts: LedgerEntry.ACCOUNTS.map((id) => {
+      const row = byAccount.find((a) => (a._id || 'cash') === id);
+      return {
+        id,
+        in: row?.in || 0,
+        out: row?.out || 0,
+        balance: (row?.in || 0) - (row?.out || 0),
+      };
+    }),
+    receivable: {
+      opening: openingReceivable,
+      // Rebuilt from the lines rather than read off LedgerParty.balance, so a
+      // period that ends in the past reports what was true THEN.
+      closing: openingReceivable + credit - payment,
+      given: credit,
+      collected: payment,
+    },
+    days: Object.values(days),
+    topDebtors: topDebtors.map((p) => p.toJSON()),
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sending a statement to the customer
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * A statement may be sent at most this often. Far shorter than the reminder
+ * cooldown because the two messages are not the same kind of thing: a reminder
+ * is pushed AT somebody, a statement is nearly always asked for by the person
+ * standing at the counter. A week-long lock on answering "আমার কত বাকি?" would
+ * simply send him back to reading it out loud.
+ */
+const STATEMENT_COOLDOWN_HOURS = 24;
+
+/** Longest line list a WhatsApp text can carry before it stops being readable. */
+const STATEMENT_MAX_LINES = 25;
+
+const BN_DIGITS = '০১২৩৪৫৬৭৮৯';
+/** Latin digits → Bengali. The recipient is a shopkeeper's customer, not a dev. */
+const bnNum = (v) => String(v).replace(/\d/g, (d) => BN_DIGITS[Number(d)]);
+const taka = (v) => `৳${bnNum(Math.abs(Math.round(v)))}`;
+
+const bnDay = (iso) => new Date(iso).toLocaleDateString('bn-BD', {
+  timeZone: 'Asia/Dhaka', day: 'numeric', month: 'short',
+});
+
+/**
+ * May this party be sent a statement right now?
+ *
+ * Shares `reminder.optIn` with reminders — one consent, given once — but
+ * deliberately NOT the "must owe something" rule. A statement on a settled
+ * account is a receipt, and "আপনার হিসাব মিটে গেছে" is the single best message
+ * a customer can get from a shop. Refusing to send it would be refusing the
+ * only message here that is unambiguously good news.
+ */
+function canSendStatement(party) {
+  if (!party.phone) return { ok: false, reason: 'no_phone' };
+  if (!party.reminder?.optIn) return { ok: false, reason: 'not_opted_in' };
+
+  const last = party.statement?.lastSentAt;
+  if (last) {
+    const hours = (Date.now() - new Date(last).getTime()) / 3_600_000;
+    if (hours < STATEMENT_COOLDOWN_HOURS) return { ok: false, reason: 'too_soon' };
+  }
+  return { ok: true };
+}
+
+/**
+ * The message, written from the CUSTOMER'S side of the counter.
+ *
+ * This is the part that is easy to get quietly, badly wrong. Everything in the
+ * app reads from the shopkeeper's view — `balance > 0` means "আপনি পাবেন", and
+ * a line is "দিলাম" because he gave the goods. Send those words to the customer
+ * unchanged and every one of them is inverted: the customer is told he will
+ * RECEIVE the money he in fact owes, about goods he is told he gave away.
+ *
+ * So the whole message is flipped once, here, where it can be checked:
+ *
+ *   credit  (দিলাম, shop→customer)   → "বাকি"  — what he took on credit
+ *   payment (পেলাম, customer→shop)   → "জমা"   — what he paid in
+ *   balance > 0                      → "আপনার বাকি"
+ *   balance < 0                      → "আপনি বেশি জমা দিয়েছেন"
+ */
+function buildStatementMessage({ shopName, party, statement }) {
+  const { opening, closing, totals, entries, range } = statement;
+
+  const standingLine = (value, prefix) => {
+    if (value > 0) return `${prefix}: ${taka(value)} (বাকি)`;
+    if (value < 0) return `${prefix}: ${taka(value)} (জমা বেশি)`;
+    return `${prefix}: ${taka(0)}`;
+  };
+
+  const lines = [];
+  lines.push(`*${shopName}*`);
+  lines.push(`হিসাবের বিবরণী — ${party.name}`);
+  lines.push(`${bnDay(`${range.from}T06:00:00Z`)} – ${bnDay(`${range.to}T06:00:00Z`)}`);
+  lines.push('');
+  lines.push(standingLine(opening, 'আগের জের'));
+  lines.push('——————————');
+
+  // Too many lines to read on a phone. Show the most recent ones and carry the
+  // balance INTO them, so the column still adds up instead of starting from a
+  // number the reader cannot account for.
+  const shown = entries.slice(-STATEMENT_MAX_LINES);
+  const hidden = entries.length - shown.length;
+  if (hidden > 0) {
+    const carried = shown.length ? shown[0].balanceAfter - shown[0].delta : opening;
+    lines.push(`(আগের ${bnNum(hidden)}টি লাইন বাদ)`);
+    lines.push(standingLine(carried, 'চলতি জের'));
+    lines.push('——————————');
+  }
+
+  shown.forEach((e) => {
+    const what = e.kind === 'credit' ? 'বাকি' : 'জমা';
+    const struck = e.voidedAt ? ' (বাতিল)' : '';
+    const note = e.note ? ` — ${e.note}` : '';
+    lines.push(`${bnDay(e.at)}  ${what} ${taka(e.amount)}${struck}${note}`);
+  });
+
+  lines.push('——————————');
+  lines.push(`মোট বাকি নিয়েছেন: ${taka(totals.credit)}`);
+  lines.push(`মোট জমা দিয়েছেন: ${taka(totals.payment)}`);
+  lines.push('');
+
+  if (closing > 0) {
+    lines.push(`*এখন আপনার বাকি: ${taka(closing)}*`);
+  } else if (closing < 0) {
+    lines.push(`*আপনি ${taka(closing)} বেশি জমা দিয়েছেন।*`);
+  } else {
+    lines.push('*আপনার হিসাব মিটে গেছে। ধন্যবাদ।*');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * POST /api/ledger/parties/:id/statement/send
+ *
+ * ─── WHATSAPP ONLY, NO SMS FALLBACK ──────────────────────────────────────────
+ * `remind` falls back to SMS because a reminder is one short sentence. A
+ * statement is twenty lines, which is several SMS segments — each one billed,
+ * to send a wall of text to somebody who did not ask for it in that form. When
+ * WhatsApp cannot deliver, the honest answer is to say so: the shopkeeper is
+ * standing next to the customer and can simply turn the phone around, which is
+ * what the on-screen statement is for.
+ */
+exports.sendStatement = asyncH(async (req, res) => {
+  const party = await loadParty(req.params.id, req.merchant);
+
+  const gate = canSendStatement(party);
+  if (!gate.ok) {
+    const messages = {
+      no_phone: 'এই ব্যক্তির ফোন নম্বর নেই।',
+      not_opted_in: 'বার্তা পাঠানোর অনুমতি দেওয়া নেই।',
+      too_soon: 'আজ একবার পাঠানো হয়েছে। আগামীকাল আবার পাঠাতে পারবেন।',
+    };
+    throw ApiError.badRequest(messages[gate.reason] || 'পাঠানো যাবে না।', {
+      code: `statement_${gate.reason}`,
+    });
+  }
+
+  const { from, to } = resolveRange(req.body || {});
+  const statement = await buildStatement(party, from, to);
+
+  const body = buildStatementMessage({
+    shopName: req.merchant.name || 'দোকান',
+    party,
+    statement,
+  });
+
+  const result = await whatsapp.sendWhatsAppMessage(party.phone, { body });
+  if (!result?.success) {
+    throw ApiError.badRequest(
+      'হোয়াটসঅ্যাপে পাঠানো গেল না। আপাতত স্ক্রিনে দেখিয়ে দিন।',
+      { code: 'send_failed' },
+    );
+  }
+
+  // Stamped only on a send that actually happened, so a gateway that was down
+  // does not start the cooldown and lock him out of trying again.
+  await LedgerParty.updateOne({ _id: party._id }, {
+    $set: { 'statement.lastSentAt': new Date() },
+    $inc: { 'statement.sentCount': 1 },
+  });
+
+  return res.json({
+    sent: true,
+    channel: 'whatsapp',
+    range: statement.range,
+    lines: statement.entries.length,
+  });
+});
+
+exports.canSendStatement = canSendStatement;
+exports.buildStatementMessage = buildStatementMessage;
+exports.STATEMENT_COOLDOWN_HOURS = STATEMENT_COOLDOWN_HOURS;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/ledger/settings — the shop-wide switches
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Currently one switch: the kill for automated খাতা reminders.
+ *
+ * It is not a consent gate — consent lives per customer and defaults off, so
+ * nothing sends until he arms it there. This is the thing he reaches for when
+ * one customer complains and he wants ALL of it to stop now, without hunting
+ * through however many pages he switched on.
+ */
+exports.updateSettings = asyncH(async (req, res) => {
+  if (typeof req.body?.autoReminders === 'boolean') {
+    req.merchant.khataAutoReminders = req.body.autoReminders;
+    await req.merchant.save();
+  }
+  return res.json({ merchant: req.merchant.toJSON() });
+});

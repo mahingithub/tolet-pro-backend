@@ -76,3 +76,8 @@ verify-*.js
 .bench/
 scripts/bench-*.js
 bench-*.js
+
+# Journals written by scripts/reclassify-purchases.js — one file per applied
+# run, holding the entry ids it moved so --undo can put them back. Machine- and
+# run-specific, and they name real ledger rows, so they stay out of the repo.
+.migrations/
