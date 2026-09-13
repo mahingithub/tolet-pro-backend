@@ -7,15 +7,24 @@
  * rental app) and /api/admin/auth (the console): three surfaces, three token
  * audiences, three identity collections.
  *
- *   POST /signup/start    { name, phone, password }  → sends an OTP
- *   POST /signup/verify   { phone, otp }             → creates the session
- *   POST /login           { phone, password }
- *   POST /refresh         rotates the httpOnly merchantRefreshToken cookie
+ *   POST /signup/start     { name, phone, password }       → sends an OTP
+ *   POST /signup/verify    { phone, otp }                  → creates the session
+ *   POST /login            { phone, password }
+ *   POST /forgot-password  { phone }                       → sends an OTP
+ *   POST /reset-password   { phone, otp, password }        → sets the password
+ *   POST /refresh          rotates the httpOnly merchantRefreshToken cookie
  *   GET  /me
  *   POST /logout
  *
- * There is deliberately no password-reset here yet — it needs the same OTP
- * flow and is worth doing properly rather than as an afterthought.
+ * Everything here is rate-limited at the mount point (server.js →
+ * rateLimiters.auth), which is what bounds guessing at a six-digit code
+ * alongside its 5-minute TTL and single use.
+ *
+ * The two routes that SEND a message — /signup/start and /forgot-password —
+ * carry a second, per-PHONE cap on top of that (services/otpQuota.service.js).
+ * The mount-point limiter keys on the requester, which protects the server;
+ * this one keys on the number, which is what protects the stranger whose
+ * handset an attacker is trying to bury and the SMS bill that pays for it.
  */
 
 const express = require('express');
@@ -60,6 +69,28 @@ router.post('/signup/verify', asyncH(async (req, res) => {
 router.post('/login', asyncH(async (req, res) => {
   const out = await svc.login({ ...(req.body || {}), ...ctx(req) });
   return res.json(issue(res, req, out));
+}));
+
+/**
+ * POST /forgot-password
+ *
+ * Answers identically for a registered and an unregistered number — see the
+ * service for why this one endpoint does not answer honestly.
+ */
+router.post('/forgot-password', asyncH(async (req, res) => {
+  const out = await svc.forgotPassword(req.body || {});
+  return res.json(out);
+}));
+
+/**
+ * POST /reset-password
+ *
+ * No session is issued and no cookie is set: the reset signs every device out,
+ * and the shopkeeper logs back in with the password he just chose.
+ */
+router.post('/reset-password', asyncH(async (req, res) => {
+  const out = await svc.resetPassword(req.body || {});
+  return res.json(out);
 }));
 
 /**

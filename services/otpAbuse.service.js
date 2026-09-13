@@ -2,25 +2,53 @@
 
 const OtpAttempt = require('../models/OtpAttempt');
 const ApiError = require('../utils/ApiError');
+const env = require('../config/env');
 
 /**
  * OTP Abuse Protection Service
  * ═══════════════════════════════════════════════════════════════════════════
  * Multi-dimensional abuse detection and enforcement for OTP operations.
  * 
- * THRESHOLDS (per 10-minute window):
- * - Warning: 3 requests
- * - Delay: 5 requests (add 2-second delay)
- * - CAPTCHA: 7 requests (require CAPTCHA verification)
- * - Block: 10 requests (hard block for 30 minutes)
- * 
+ * THRESHOLDS (per 10-minute window, counted per IP+PHONE pair):
+ * - Warning: 3
+ * - Delay:   5  (2-second delay; 5 seconds once past the CAPTCHA mark)
+ * - CAPTCHA: 7  (dormant unless OTP_CAPTCHA_ENABLED — see config/env.js)
+ * - Block:  10  (hard block for 30 minutes)
+ *
+ * Counted against `pressure` = requests + failed verifications, so guessing at
+ * codes escalates on the same ladder as asking for them.
+ *
  * DIMENSIONS TRACKED:
  * 1. IP Address - primary defense
  * 2. Phone Number - victim protection
  * 3. Device Fingerprint - sophisticated attack detection
- * 
+ *
  * PROGRESSIVE ENFORCEMENT:
  * Level 0 (none) → Level 1 (warning) → Level 2 (delay) → Level 3 (CAPTCHA) → Level 4 (blocked)
+ *
+ * ─── HOW THIS RELATES TO services/otpQuota.service.js ────────────────────────
+ * That one caps OTP requests per PHONE NUMBER (5 per 15 minutes) and ignores
+ * the requester entirely, because SMS bombing and the SMS bill are properties
+ * of the number rather than of whoever asked. It is the harder limit and it
+ * runs FIRST in both rental callers.
+ *
+ * A consequence worth stating plainly rather than discovering later: with that
+ * quota in front, no single number can reach 6 requests in 15 minutes, so the
+ * CAPTCHA (7) and BLOCK (10) rungs of THIS ladder are not reachable through
+ * the rental signup and reset endpoints as currently configured. They are a
+ * backstop — for callers not covered by the quota, for a raised quota, and for
+ * the failed-verification pressure that the quota does not count at all.
+ *
+ * The two lower rungs do fire, and earn their place: `delayMs` is applied by
+ * the caller, which shapes a script's traffic well before the quota's hard stop.
+ *
+ * ─── WHY THE IP AND DEVICE DIMENSIONS ONLY FLAG ──────────────────────────────
+ * `sameIpCount` / `sameDeviceCount` below set `flaggedForReview` and never
+ * refuse anything, and that restraint is deliberate — do not "finish" it into a
+ * block. Mobile Bangladesh sits behind carrier-grade NAT: one address can front
+ * an entire city. An IP seen requesting codes for a dozen different numbers in
+ * ten minutes is the normal appearance of a busy carrier, not an attacker, and
+ * blocking on it would take out every real user sharing that address.
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
@@ -103,89 +131,139 @@ async function checkOtpRequest({ phoneNumber, ipAddress, req, captchaToken }) {
   
   if (attempt.blockedUntil && attempt.blockedUntil > now) {
     const minutesLeft = Math.ceil((attempt.blockedUntil - now) / 60000);
+    // `blockedUntil` is an absolute instant and depends on the caller's clock
+    // being right; `retryAfterSeconds` is a duration and does not. It is also
+    // what middleware/errorHandler.js reads to set the `Retry-After` header on
+    // a 429, which is the form every generic HTTP client understands.
+    const retryAfterSeconds = Math.max(1, Math.ceil((attempt.blockedUntil - now) / 1000));
     throw ApiError.tooMany(
       `অনেক বেশি চেষ্টা। ${minutesLeft} মিনিট পরে আবার চেষ্টা করুন।`,
       {
         code: 'otp_blocked',
-        blockedUntil: attempt.blockedUntil,
-        enforcementLevel: 'blocked',
+        // UNDER `details`. ApiError's constructor destructures exactly
+        // `{ code, details }` (utils/ApiError.js) and errorHandler forwards
+        // exactly those two — anything passed as a sibling of `code` is
+        // accepted without complaint and then never reaches the client. These
+        // three throws had carried `blockedUntil` and `enforcementLevel` as
+        // siblings since they were written, so the "enforcement status
+        // returned to the client for UX adaptation" this file's header
+        // promises has never actually left the building.
+        details: {
+          blockedUntil: attempt.blockedUntil,
+          enforcementLevel: 'blocked',
+          retryAfterSeconds,
+        },
       }
     );
   }
-  
-  // ═══ VERIFY CAPTCHA IF REQUIRED ════════════════════════════════════════════
-  
-  if (attempt.requiresCaptcha && !captchaToken) {
-    throw ApiError.badRequest('CAPTCHA যাচাই প্রয়োজন।', {
-      code: 'captcha_required',
-      enforcementLevel: 'captcha',
-    });
-  }
-  
-  if (attempt.requiresCaptcha && captchaToken) {
-    const captchaValid = await verifyCaptcha(captchaToken, ipAddress);
-    if (!captchaValid) {
-      throw ApiError.badRequest('CAPTCHA যাচাই ব্যর্থ হয়েছে।', {
-        code: 'captcha_invalid',
-      });
-    }
-    // CAPTCHA passed - reset enforcement level
-    attempt.enforcementLevel = 'none';
-    attempt.requiresCaptcha = false;
-    attempt.requestCount = 0;
-  }
-  
-  // ═══ INCREMENT COUNTER AND DETERMINE ENFORCEMENT ═══════════════════════════
-  
+
+  // ═══ COUNT FIRST, GATE AFTERWARDS ══════════════════════════════════════════
+  //
+  // The increment used to sit BELOW the CAPTCHA gate, and that single ordering
+  // was what made the top of this ladder unreachable. Once `requiresCaptcha`
+  // was set at seven, every later request threw on the way IN and never
+  // counted, so `requestCount` froze three short of BLOCK and the hard block
+  // was dead code — along with the active-block branch above, which reads a
+  // `blockedUntil` that nothing was left to write.
+  //
+  // A refused request still has to count. Somebody being turned away is still
+  // somebody knocking, and free retries are precisely what escalation exists to
+  // take away. Everything below therefore persists the row before it throws.
   attempt.requestCount += 1;
   attempt.lastRequestAt = now;
-  
+
+  // Bad codes push on the SAME ladder as requests. Spraying OTP requests and
+  // guessing at the codes they produce are one problem wearing two hats, and
+  // scoring them apart let either one sit forever just under the other's
+  // threshold. This is also what keeps `recordFailedVerification` meaningful
+  // now that the tier is derived from a count rather than from a stored flag.
+  const pressure = attempt.requestCount + (attempt.failedVerifications || 0);
+
   let enforcementLevel = 'none';
   let delayMs = 0;
   let requiresCaptcha = false;
   let message = null;
-  
-  if (attempt.requestCount >= THRESHOLDS.BLOCK) {
-    // LEVEL 4: HARD BLOCK
+
+  // ─── LEVEL 4: HARD BLOCK ──────────────────────────────────────────────────
+  if (pressure >= THRESHOLDS.BLOCK) {
     enforcementLevel = 'blocked';
     attempt.enforcementLevel = 'blocked';
     attempt.blockedUntil = new Date(now.getTime() + COOLDOWNS.BLOCK);
+    // The challenge is moot once the door is shut; leaving it set would send
+    // the next request to `captcha_required` instead of to the block.
+    attempt.requiresCaptcha = false;
     attempt.flaggedForReview = true;
     attempt.abusePattern = detectAbusePattern(attempt);
     await attempt.save();
-    
+
     throw ApiError.tooMany(
       'অনেক বেশি চেষ্টা। ৩০ মিনিট পরে আবার চেষ্টা করুন।',
       {
         code: 'otp_blocked',
-        blockedUntil: attempt.blockedUntil,
-        enforcementLevel: 'blocked',
+        details: {
+          blockedUntil: attempt.blockedUntil,
+          enforcementLevel: 'blocked',
+          retryAfterSeconds: COOLDOWNS.BLOCK / 1000,
+        },
       }
     );
-    
-  } else if (attempt.requestCount >= THRESHOLDS.CAPTCHA) {
-    // LEVEL 3: REQUIRE CAPTCHA
+  }
+
+  // ─── LEVEL 3: CAPTCHA ─────────────────────────────────────────────────────
+  // Dormant unless OTP_CAPTCHA_ENABLED is on. Nothing in this repo can answer
+  // a challenge yet — no frontend sends a token and `verifyCaptcha` is a stub —
+  // so demanding one would be a wall rather than a rung. See config/env.js.
+  if (pressure >= THRESHOLDS.CAPTCHA && env.otpCaptchaEnabled) {
     enforcementLevel = 'captcha';
     requiresCaptcha = true;
     delayMs = COOLDOWNS.CAPTCHA;
     message = 'CAPTCHA যাচাই প্রয়োজন।';
     attempt.enforcementLevel = 'captcha';
     attempt.requiresCaptcha = true;
-    
-  } else if (attempt.requestCount >= THRESHOLDS.DELAY) {
-    // LEVEL 2: ADD DELAY
+
+    if (!captchaToken) {
+      await attempt.save();
+      throw ApiError.badRequest('CAPTCHA যাচাই প্রয়োজন।', {
+        code: 'captcha_required',
+        details: { enforcementLevel: 'captcha' },
+      });
+    }
+
+    if (!await verifyCaptcha(captchaToken, ipAddress)) {
+      await attempt.save();
+      throw ApiError.badRequest('CAPTCHA যাচাই ব্যর্থ হয়েছে।', {
+        code: 'captcha_invalid',
+        details: { enforcementLevel: 'captcha' },
+      });
+    }
+
+    // Solved — and it buys exactly ONE request through, not a fresh budget.
+    //
+    // This used to set `requestCount = 0`, which handed anyone who could answer
+    // a challenge an unlimited supply of OTPs: solve, spend the whole allowance,
+    // solve again. With a stub that accepts any string it was not even a
+    // challenge, just a reset button. The count now survives the solve, so the
+    // ceiling at BLOCK is real no matter how many challenges are answered.
+    requiresCaptcha = false;
+    attempt.requiresCaptcha = false;
+
+  // ─── LEVEL 2: DELAY ───────────────────────────────────────────────────────
+  // The CAPTCHA band falls through to here while the rung is dormant, and gets
+  // the longer of the two waits. Slowing a script down is worth having even
+  // when there is nothing to make it prove it is human.
+  } else if (pressure >= THRESHOLDS.DELAY) {
     enforcementLevel = 'delay';
-    delayMs = COOLDOWNS.DELAY;
+    delayMs = pressure >= THRESHOLDS.CAPTCHA ? COOLDOWNS.CAPTCHA : COOLDOWNS.DELAY;
     message = 'একটু অপেক্ষা করুন...';
     attempt.enforcementLevel = 'delay';
-    
-  } else if (attempt.requestCount >= THRESHOLDS.WARNING) {
-    // LEVEL 1: WARNING
+
+  // ─── LEVEL 1: WARNING ─────────────────────────────────────────────────────
+  } else if (pressure >= THRESHOLDS.WARNING) {
     enforcementLevel = 'warning';
     message = 'অনেক বার OTP চেয়েছেন।';
     attempt.enforcementLevel = 'warning';
   }
-  
+
   // ═══ CROSS-DIMENSIONAL ABUSE DETECTION ═════════════════════════════════════
   
   // Check if same IP is targeting multiple phones (phone enumeration)
@@ -233,7 +311,10 @@ async function checkOtpRequest({ phoneNumber, ipAddress, req, captchaToken }) {
     requiresCaptcha,
     delayMs,
     message,
-    remainingAttempts: Math.max(0, THRESHOLDS.BLOCK - attempt.requestCount),
+    // Counted off the same `pressure` the ladder is tiered on, not off
+    // `requestCount` alone — otherwise a caller who had burned most of the
+    // budget on bad codes was told it still had room right up until the block.
+    remainingAttempts: Math.max(0, THRESHOLDS.BLOCK - pressure),
   };
 }
 
@@ -251,13 +332,18 @@ async function recordFailedVerification({ phoneNumber, ipAddress }) {
   
   if (attempt) {
     attempt.failedVerifications += 1;
-    
-    // Too many failed verifications → trigger CAPTCHA
+
+    // Counting IS the contribution. This used to set `requiresCaptcha` and an
+    // `enforcementLevel` of its own, which is no longer meaningful: the level
+    // is derived in checkOtpRequest from `pressure` — requests plus failed
+    // verifications — so a tier written here would be recomputed on the next
+    // call anyway, and a stored challenge flag would name a rung the ladder no
+    // longer reads. The increment above is what actually escalates now, and it
+    // escalates all the way to the block rather than stopping at a CAPTCHA.
     if (attempt.failedVerifications >= 3) {
-      attempt.requiresCaptcha = true;
-      attempt.enforcementLevel = 'captcha';
+      attempt.flaggedForReview = true;
     }
-    
+
     await attempt.save();
   }
 }

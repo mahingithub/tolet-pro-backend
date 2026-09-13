@@ -34,7 +34,7 @@ function pickPublicUser(u) {
   // the NID (does the name match? does the workplace look real? is the
   // emergency contact a real Bangladesh number? etc), so we expose every
   // field a reviewer plausibly needs in one payload. Sensitive auth-only
-  // fields (password, firebaseUid, loginAttempts) are already stripped by
+  // fields (password, loginAttempts, lockUntil) are already stripped by
   // the schema's toJSON transform.
   const j = u.toJSON ? u.toJSON() : u;
   const tp = j.tenantProfile || {};

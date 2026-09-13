@@ -174,9 +174,16 @@ async function claimForRotation(oldToken, { ipAddress = null } = {}) {
   // IMMEDIATE SECURITY RESPONSE
   await handleTokenReuse(existing);
 
+  // No `details`. `securityEvent: true` used to sit here as a sibling of
+  // `code`, where ApiError dropped it silently — and it is better gone than
+  // forwarded. It carried nothing a client acts on: both interceptors that
+  // handle this case (tolet-pro-frontend/src/utils/fetchInterceptor.js and
+  // tolet-pro-admin/src/services/apiClient.js) branch on `code` alone, and
+  // neither mentions the flag. Its only other reading is as a marker for the
+  // server-side record — which line 166 above already writes, with the
+  // userId, familyId and IP that a response must never carry.
   throw ApiError.forbidden('নিরাপত্তা সতর্কতা: সন্দেহজনক কার্যকলাপ শনাক্ত হয়েছে। আবার লগইন করুন।', {
     code: 'token_reuse_detected',
-    securityEvent: true,
   });
 }
 

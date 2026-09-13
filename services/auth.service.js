@@ -5,6 +5,8 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const SignupIntent = require('../models/SignupIntent');
 const Otp = require('../models/Otp');
+// Per-PHONE cap, shared with the provider app on purpose. See models/OtpQuota.js.
+const otpQuota = require('./otpQuota.service');
 const ApiError = require('../utils/ApiError');
 const env = require('../config/env');
 const smsService = require('./sms.service');
@@ -102,6 +104,13 @@ async function deliverOtp(phone, otp) {
  * - Returns enforcement status to client for UX adaptation
  */
 async function startSignup({ name, phone, password, role }, req) {
+  // ═══ PER-PHONE QUOTA ══════════════════════════════════════════════════════
+  // The cap the abuse service below does NOT apply: its counter is keyed on
+  // the (ip, phone) pair, so rotating addresses resets it and the number keeps
+  // receiving messages. This one cannot be reset by changing where you ask
+  // from. See models/OtpQuota.js.
+  await otpQuota.consume(phone);
+
   // ═══ ABUSE PROTECTION CHECK ═══════════════════════════════════════════════
   const abuseCheck = await otpAbuseService.checkOtpRequest({
     phoneNumber: phone,
@@ -399,7 +408,15 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
  */
 async function forgotPassword({ phoneNumber }, req) {
   const phone = phoneNumber;
-  
+
+  // ═══ PER-PHONE QUOTA ══════════════════════════════════════════════════════
+  // Deliberately OUTSIDE the try below, so a spent quota answers 429 instead of
+  // being swallowed into the constant `{ ok: true }`. That does not reopen the
+  // enumeration hole this function is careful about: the count is incremented
+  // before any User lookup, so it is identical for a number with an account and
+  // one without, and the 429 says nothing about which this is.
+  await otpQuota.consume(phone);
+
   // ═══ ABUSE PROTECTION CHECK ═══════════════════════════════════════════════
   // Check abuse even before verifying account exists (prevents enumeration)
   try {

@@ -234,12 +234,28 @@ const env = {
   // SMS credits or a verified gateway account. MUST be false for real users.
   otpDevMode: process.env.OTP_DEV_MODE === 'true',
 
+  // The CAPTCHA rung of the OTP enforcement ladder (services/otpAbuse.service.js).
+  //
+  // OFF by default, and that is not timidity — it is that nothing can currently
+  // answer the challenge. No frontend in this repo sends a `captchaToken`, and
+  // `verifyCaptcha` is a stub that accepts any string it is given. Switching
+  // this on before a real provider is wired up would turn the rung into a wall:
+  // a shopkeeper whose SMS never arrived would be asked for a CAPTCHA that his
+  // app cannot render and can never satisfy.
+  //
+  // Turn it on in the same change that integrates Turnstile/reCAPTCHA on both
+  // the backend and the two frontends — not before.
+  otpCaptchaEnabled: process.env.OTP_CAPTCHA_ENABLED === 'true',
+
   cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
   cloudinaryApiKey: process.env.CLOUDINARY_API_KEY || '',
   cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET || '',
 
   signupIntentTtlMin: Number(process.env.SIGNUP_INTENT_TTL_MIN || 15),
-  resetOtpTtlMin: Number(process.env.RESET_OTP_TTL_MIN || 10),
+  // No resetOtpTtlMin here: reset codes expire on the TTL index of the
+  // collection that holds them (Otp and MerchantOtp, 5 minutes each), not on a
+  // configurable value. The old setting fed services/otp.service.js, which is
+  // gone — see models/Otp.js for the live rental flow.
   loginMaxAttempts: Number(process.env.LOGIN_MAX_ATTEMPTS || 5),
   loginLockMinutes: Number(process.env.LOGIN_LOCK_MINUTES || 15),
 };

@@ -451,8 +451,10 @@ const UserSchema = new mongoose.Schema(
     // Brute-force protection
     loginAttempts: { type: Number, default: 0, select: false },
     lockUntil:     { type: Date,   default: null, select: false },
-    // Linked Firebase UID after OTP verification.
-    firebaseUid:   { type: String, default: null, index: true, select: false },
+    // No firebaseUid. Phone verification has been ours since models/Otp.js
+    // replaced Firebase Phone Auth — the field was never written by any code
+    // path that survived that change. firebase-admin remains a dependency for
+    // FCM push only (services/firebaseAdmin.js), never for identity.
 
     // ─── 2FA / Google Authenticator ──────────────────────────────────────
     // TOTP secret for Google Authenticator. Only populated after the admin
@@ -626,7 +628,6 @@ UserSchema.set('toJSON', {
     delete ret.password;
     delete ret.loginAttempts;
     delete ret.lockUntil;
-    delete ret.firebaseUid;
     // We expose `id` via the virtual but suppress the internal `_id` copy.
     delete ret._id;
     return ret;
