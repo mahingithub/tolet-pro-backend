@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const SignupIntent = require('../models/SignupIntent');
 const Otp = require('../models/Otp');
+const firebasePhoneAuth = require('./firebasePhoneAuth.service');
 // Per-PHONE cap, shared with the provider app on purpose. See models/OtpQuota.js.
 const otpQuota = require('./otpQuota.service');
 const ApiError = require('../utils/ApiError');
@@ -14,11 +15,11 @@ const tokenService = require('./token.service');
 const refreshTokenService = require('./refreshToken.service');
 const otpAbuseService = require('./otpAbuse.service');
 const loginHistoryService = require('./loginHistory.service');
+const { mobileCountryOf } = require('../utils/phoneCountries');
 
-const GENERIC_LOGIN_ERROR = 'ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে।';
-// Combined, non-specific OTP failure message — mirrors GENERIC_LOGIN_ERROR so
-// we never reveal WHICH part failed (matches the product's "phone number or
-// OTP is wrong" wording). Used by both signup-verify and password-reset.
+// Combined, non-specific OTP failure message — never reveals WHICH part failed
+// (matches the product's "phone number or OTP is wrong" wording). Used by both
+// signup-verify and password-reset.
 const GENERIC_OTP_ERROR = 'ফোন নম্বর বা OTP ভুল হয়েছে। আবার চেষ্টা করুন।';
 
 // Roles allowed to authenticate against the SEPARATE admin console. Kept in
@@ -49,6 +50,44 @@ function addSession(user, { device = 'Unknown device', ipAddress = '0.0.0.0' } =
   return sessionId;
 }
 
+// ─── Which channel proves a phone number ───────────────────────────────────
+/**
+ * Bangladesh keeps the code OUR server texts through sms.net.bd. It is the
+ * app's main market, a local gateway costs a small fraction of Firebase's
+ * +880 rate ($0.17 per SMS on Identity Platform's 2026 table), and it keeps
+ * working whatever happens to the Google Cloud billing account.
+ *
+ * Every other supported country (utils/phoneCountries.js) verifies through
+ * Firebase Phone Authentication: the server issues a one-use challenge, the
+ * client asks Firebase for the SMS, and the resulting ID token is checked here.
+ * The validators have already refused any number outside the list.
+ */
+function otpChannel(phone) {
+  return mobileCountryOf(phone)?.iso === 'BD' ? 'sms' : 'firebase';
+}
+
+/**
+ * The per-phone quota and the requester abuse check, shared by both channels.
+ *
+ * The quota is the cap the abuse service does NOT apply: its counter is keyed
+ * on the (ip, phone) pair, so rotating addresses resets it and the number
+ * keeps receiving messages. This one cannot be reset by changing where you
+ * ask from. See models/OtpQuota.js.
+ */
+async function applyOtpLimits(phone, req) {
+  await otpQuota.consume(phone);
+  const abuseCheck = await otpAbuseService.checkOtpRequest({
+    phoneNumber: phone,
+    ipAddress: req.ip || '0.0.0.0',
+    req,
+    captchaToken: req.body?.captchaToken,
+  });
+  if (abuseCheck.delayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, abuseCheck.delayMs));
+  }
+  return abuseCheck;
+}
+
 /**
  * Generates a 6-digit, zero-padded numeric OTP (e.g. "004271").
  */
@@ -65,17 +104,16 @@ async function issueOtp(phone) {
   await Otp.findOneAndUpdate(
     { phoneNumber: phone },
     { phoneNumber: phone, otp, createdAt: new Date() },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
+    { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   return otp;
 }
 
 /**
- * Delivers an OTP to the user. Normally this texts the code via sms.net.bd.
- * When OTP_DEV_MODE=true it SKIPS the gateway and writes the code to the
- * server log instead — so the full signup/reset flow can be tested without SMS
- * credits or a verified gateway account. The code is never returned to the
- * client, only logged.
+ * Texts a Bangladeshi OTP via sms.net.bd. When OTP_DEV_MODE=true it SKIPS the
+ * gateway and writes the code to the server log instead — so the full
+ * signup/reset flow can be tested without SMS credits. The code is never
+ * returned to the client, only logged.
  */
 async function deliverOtp(phone, otp) {
   if (env.otpDevMode) {
@@ -85,46 +123,46 @@ async function deliverOtp(phone, otp) {
   await smsService.sendOtp(phone, otp);
 }
 
+/** Check a server-texted code. A missing record means it never existed or its TTL reaped it. */
+async function checkSmsOtp({ phoneNumber, otp }, req) {
+  const record = await Otp.findOne({ phoneNumber });
+  if (!record || record.otp !== String(otp)) {
+    await otpAbuseService.recordFailedVerification({
+      phoneNumber,
+      ipAddress: req.ip || '0.0.0.0',
+    });
+    throw ApiError.badRequest(GENERIC_OTP_ERROR, { code: 'otp_invalid' });
+  }
+}
+
+/** Redeem a Firebase phone proof against its one-use server challenge. */
+async function consumePhoneChallenge(payload, purpose, req) {
+  try {
+    return await firebasePhoneAuth.consumeChallenge({ ...payload, purpose });
+  } catch (err) {
+    if (err.status === 401) {
+      await otpAbuseService.recordFailedVerification({
+        phoneNumber: payload.phoneNumber,
+        ipAddress: req.ip || '0.0.0.0',
+      });
+    }
+    throw err;
+  }
+}
+
 /**
- * Step 1 of signup: persist (name, hashedPassword, role) as a SignupIntent
- * keyed by phone so we can finalize after the OTP is verified. We deliberately
- * do NOT create a real User yet — the user must prove control of the phone
- * first.
- *
- * Then generate a 6-digit OTP, store it in the Otp collection, and deliver it
- * via sms.net.bd. If SMS delivery fails we surface the error so the client can
- * retry (the SignupIntent + Otp are already saved and will simply be
- * overwritten / TTL-expire).
+ * Step 1 of signup: hold (name, hashedPassword, role) until the phone is
+ * proved, then start that proof — a texted OTP for Bangladesh, a Firebase
+ * challenge everywhere else. No real User is created yet.
  *
  * If a verified account already exists for this phone, we refuse with 409.
- * 
- * OTP ABUSE PROTECTION:
- * - Checks IP + phone + device fingerprint before sending
- * - Progressive enforcement: warning → delay → CAPTCHA → block
- * - Returns enforcement status to client for UX adaptation
  */
 async function startSignup({ name, phone, password, role }, req) {
-  // ═══ PER-PHONE QUOTA ══════════════════════════════════════════════════════
-  // The cap the abuse service below does NOT apply: its counter is keyed on
-  // the (ip, phone) pair, so rotating addresses resets it and the number keeps
-  // receiving messages. This one cannot be reset by changing where you ask
-  // from. See models/OtpQuota.js.
-  await otpQuota.consume(phone);
+  const channel = otpChannel(phone);
+  // Fail before spending the quota when Firebase credentials are missing.
+  if (channel === 'firebase') firebasePhoneAuth.getAuth();
+  const abuseCheck = await applyOtpLimits(phone, req);
 
-  // ═══ ABUSE PROTECTION CHECK ═══════════════════════════════════════════════
-  const abuseCheck = await otpAbuseService.checkOtpRequest({
-    phoneNumber: phone,
-    ipAddress: req.ip || '0.0.0.0',
-    req,
-    captchaToken: req.body.captchaToken,
-  });
-  
-  // Apply delay if required (rate limiting)
-  if (abuseCheck.delayMs > 0) {
-    await new Promise(resolve => setTimeout(resolve, abuseCheck.delayMs));
-  }
-  
-  // ═══ EXISTING ACCOUNT CHECK ═══════════════════════════════════════════════
   const existing = await User.findOne({ phone });
   if (existing && existing.phoneVerified) {
     throw ApiError.conflict('এই নম্বরে অ্যাকাউন্ট ইতিমধ্যেই রয়েছে। লগইন করুন।', {
@@ -132,73 +170,60 @@ async function startSignup({ name, phone, password, role }, req) {
     });
   }
 
-  const passwordHash = await bcrypt.hash(password, env.bcryptRounds);
+  const signup = {
+    name,
+    passwordHash: await bcrypt.hash(password, env.bcryptRounds),
+    role: role || 'tenant',
+  };
+  const limits = {
+    enforcementLevel: abuseCheck.enforcementLevel,
+    requiresCaptcha: abuseCheck.requiresCaptcha,
+  };
+
+  if (channel === 'firebase') {
+    const challenge = await firebasePhoneAuth.createChallenge({ phone, purpose: 'signup', signup });
+    return { ok: true, ...challenge, ...limits };
+  }
+
   const expiresAt = new Date(Date.now() + env.signupIntentTtlMin * 60_000);
   await SignupIntent.findOneAndUpdate(
     { phone },
-    { name, phone, passwordHash, role: role || 'tenant', expiresAt },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
+    { ...signup, phone, expiresAt },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
   );
-
-  // Generate + persist a fresh OTP, then deliver it (SMS, or console in dev).
-  const otp = await issueOtp(phone);
-  await deliverOtp(phone, otp);
-
-  return {
-    ok: true,
-    expiresAt,
-    // Return abuse protection status to client for UX adaptation
-    enforcementLevel: abuseCheck.enforcementLevel,
-    requiresCaptcha: abuseCheck.requiresCaptcha,
-    message: abuseCheck.message,
-  };
+  await deliverOtp(phone, await issueOtp(phone));
+  return { ok: true, provider: 'sms', expiresAt, ...limits };
 }
 
 /**
- * Step 2 of signup: verify the OTP the user received via SMS, look up the
- * matching SignupIntent, create/finalize the User, mark phoneVerified, open a
- * session, and issue an access token. On success the SignupIntent and the Otp
- * document are both deleted.
- * 
- * OTP ABUSE PROTECTION:
- * - Records failed verification attempts
- * - Triggers CAPTCHA requirement after repeated failures
+ * Step 2 of signup: check the proof, create/finalize the User, mark
+ * phoneVerified, open a session, and issue an access token.
  */
-async function verifySignup({ phoneNumber, otp }, req) {
-  const phone = phoneNumber;
+async function verifySignup(payload, req) {
+  const phone = payload.phoneNumber;
+  const channel = otpChannel(phone);
 
-  // 1. Verify the OTP. A missing record means it never existed or the 5-minute
-  //    TTL already reaped it → treat both as "invalid/expired".
-  const record = await Otp.findOne({ phoneNumber: phone });
-  if (!record || record.otp !== String(otp)) {
-    // Record failed verification for abuse tracking
-    await otpAbuseService.recordFailedVerification({
-      phoneNumber: phone,
-      ipAddress: req.ip || '0.0.0.0',
-    });
-    
-    throw ApiError.badRequest(GENERIC_OTP_ERROR, {
-      code: 'otp_invalid',
-    });
+  let intent;
+  if (channel === 'firebase') {
+    intent = (await consumePhoneChallenge(payload, 'signup', req)).signup;
+  } else {
+    await checkSmsOtp(payload, req);
+    intent = await SignupIntent.findOne({ phone });
   }
-
-  // 2. Find the pending signup details.
-  const intent = await SignupIntent.findOne({ phone });
-  if (!intent) {
-    throw ApiError.badRequest('সাইনআপ সেশন মেয়াদ শেষ হয়েছে। আবার শুরু করুন।', {
-      code: 'signup_intent_missing',
-    });
+  if (!intent?.name || !intent.passwordHash) {
+    throw ApiError.badRequest('সাইনআপ সেশন মেয়াদ শেষ হয়েছে। আবার শুরু করুন।', { code: 'signup_intent_missing' });
   }
+  const clearSmsState = channel === 'sms'
+    ? () => Promise.all([SignupIntent.deleteOne({ phone }), Otp.deleteOne({ phoneNumber: phone })])
+    : async () => {};
 
   let user = await User.findOne({ phone });
   if (user && user.phoneVerified) {
-    // Edge case: account already exists. Bail rather than overwriting. Clean up
-    // the temporary records and tell the client to log in.
-    await SignupIntent.deleteOne({ phone });
-    await Otp.deleteOne({ phoneNumber: phone });
-    throw ApiError.conflict('এই নম্বরে অ্যাকাউন্ট আগে থেকেই রয়েছে। লগইন করুন।', {
-      code: 'account_exists',
-    });
+    await clearSmsState();
+    throw ApiError.conflict('এই নম্বরে অ্যাকাউন্ট আগে থেকেই রয়েছে। লগইন করুন।', { code: 'account_exists' });
+  }
+  if (user?.isBanned) {
+    throw ApiError.forbidden('আপনার অ্যাকাউন্ট স্থগিত।', { code: 'account_banned' });
   }
   if (!user) {
     user = new User({
@@ -217,15 +242,13 @@ async function verifySignup({ phoneNumber, otp }, req) {
     user.phoneVerified = true;
     user.passwordChangedAt = new Date();
   }
-
-  const sessionId = addSession(user, { device: 'New Device', ipAddress: '0.0.0.0' });
-
+  const sessionId = addSession(user, {
+    device: req.headers?.['user-agent'] || 'New Device',
+    ipAddress: req.ip || '0.0.0.0',
+  });
   await user.save();
-  await SignupIntent.deleteOne({ phone });
-  await Otp.deleteOne({ phoneNumber: phone });
-
-  const token = tokenService.signAccessToken(user, sessionId);
-  return { token, user };
+  await clearSmsState();
+  return { token: tokenService.signAccessToken(user, sessionId), user };
 }
 
 /**
@@ -235,7 +258,7 @@ async function verifySignup({ phoneNumber, otp }, req) {
  */
 async function login({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
   const mockReq = { ip: ipAddress, headers: { 'user-agent': device } };
-  
+
   // OOM guard: trim any legacy-bloated sessions array in the DB BEFORE we load
   // the document. A doc that accumulated thousands of sessions under the old
   // (pre-cap) code could otherwise blow up memory the moment findOne pulls it
@@ -255,7 +278,7 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
       loginHistoryService.recordFailedLogin,
       mockReq, phone, !user ? 'user_not_found' : 'user_not_verified', { loginType: 'password' }
     );
-    throw ApiError.unauthorized(!user ? 'এই নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।' : 'অ্যাকাউন্টটি ভেরিফাইড নয়।', { code: !user ? 'user_not_found' : 'user_not_verified' });
+    throw ApiError.unauthorized(!user ? 'এই নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।' : 'অ্যাকাউন্টটি ভেরিফাইড নয়।', { code: !user ? 'user_not_found' : 'user_not_verified' });
   }
   if (user.isLocked) {
     await loginHistoryService.safeLog(
@@ -307,7 +330,7 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
  */
 async function adminLogin({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
   const mockReq = { ip: ipAddress, headers: { 'user-agent': device } };
-  
+
   // OOM guard mirrors login(): trim any legacy-bloated sessions before load.
   await User.updateOne(
     { phone },
@@ -321,7 +344,7 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
       loginHistoryService.recordFailedLogin,
       mockReq, phone, !user ? 'admin_not_found' : 'admin_not_verified', { loginType: 'password_admin' }
     );
-    throw ApiError.unauthorized(!user ? 'এই নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।' : 'অ্যাকাউন্টটি ভেরিফাইড নয়।', { code: !user ? 'admin_not_found' : 'admin_not_verified' });
+    throw ApiError.unauthorized(!user ? 'এই নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।' : 'অ্যাকাউন্টটি ভেরিফাইড নয়।', { code: !user ? 'admin_not_found' : 'admin_not_verified' });
   }
   if (user.isLocked) {
     await loginHistoryService.safeLog(
@@ -380,8 +403,8 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
     // Don't update lastLoginAt or create session yet — those happen after 2FA verification
     await user.save();
     const tempToken = tokenService.sign2FATempToken(user);
-    return { 
-      requires2FA: true, 
+    return {
+      requires2FA: true,
       tempToken,
       message: 'Google Authenticator OTP প্রয়োজন।'
     };
@@ -397,107 +420,87 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
 }
 
 /**
- * Forgot password — step 1. If a verified account exists for this phone, we
- * issue a fresh OTP and deliver it via sms.net.bd. We ALWAYS resolve
- * successfully (and swallow SMS errors) so the endpoint can return a constant
- * response and never leak whether the account exists.
- * 
- * OTP ABUSE PROTECTION:
- * - Checks IP + phone + device fingerprint before sending
- * - Progressive enforcement: warning → delay → CAPTCHA → block
+ * Forgot password — step 1. The response is the same whether or not the
+ * account exists, so this endpoint can never be used to ask "is this number
+ * on To-Let Pro?".
+ *
+ * Bangladesh: a code is texted only when a verified account exists, and SMS
+ * failures are swallowed (a surfaced failure would leak existence via error or
+ * timing). The quota is consumed OUTSIDE the try, so a spent quota answers 429
+ * — identical for a number with an account and one without.
+ *
+ * Abroad: a Firebase challenge is issued for any listed number, and the client
+ * requests the SMS. Existence is only checked once the phone is proved.
  */
 async function forgotPassword({ phoneNumber }, req) {
   const phone = phoneNumber;
 
-  // ═══ PER-PHONE QUOTA ══════════════════════════════════════════════════════
-  // Deliberately OUTSIDE the try below, so a spent quota answers 429 instead of
-  // being swallowed into the constant `{ ok: true }`. That does not reopen the
-  // enumeration hole this function is careful about: the count is incremented
-  // before any User lookup, so it is identical for a number with an account and
-  // one without, and the 429 says nothing about which this is.
-  await otpQuota.consume(phone);
+  if (otpChannel(phone) === 'firebase') {
+    firebasePhoneAuth.getAuth();
+    const abuseCheck = await applyOtpLimits(phone, req);
+    return {
+      ok: true,
+      ...await firebasePhoneAuth.createChallenge({ phone, purpose: 'reset' }),
+      enforcementLevel: abuseCheck.enforcementLevel,
+      requiresCaptcha: abuseCheck.requiresCaptcha,
+    };
+  }
 
-  // ═══ ABUSE PROTECTION CHECK ═══════════════════════════════════════════════
-  // Check abuse even before verifying account exists (prevents enumeration)
+  await otpQuota.consume(phone);
   try {
     const abuseCheck = await otpAbuseService.checkOtpRequest({
       phoneNumber: phone,
       ipAddress: req.ip || '0.0.0.0',
       req,
-      captchaToken: req.body.captchaToken,
+      captchaToken: req.body?.captchaToken,
     });
-    
-    // Apply delay if required (rate limiting)
     if (abuseCheck.delayMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, abuseCheck.delayMs));
+      await new Promise((resolve) => setTimeout(resolve, abuseCheck.delayMs));
     }
   } catch (err) {
-    // If abuse check fails, still return success to prevent enumeration
-    // But don't actually send OTP
-    return { ok: true, blocked: true };
+    // Still answer success so a blocked request reveals nothing — but send nothing.
+    return { ok: true, provider: 'sms', blocked: true };
   }
-  
-  const user = await User.findOne({ phone });
 
+  const user = await User.findOne({ phone });
   if (user && user.phoneVerified) {
     const otp = await issueOtp(phone);
     try {
       await deliverOtp(phone, otp);
     } catch (err) {
-      // Never surface delivery failures here — doing so would leak account
-      // existence via error/timing. Log for ops visibility instead.
       console.error('[auth] forgot-password OTP delivery failed:', err.message);
     }
   }
-
-  return { ok: true };
+  return { ok: true, provider: 'sms' };
 }
 
 /**
- * Forgot password — step 2. Verify the OTP against the Otp collection, then
- * set the new password. Bumps `passwordChangedAt` (which invalidates any
- * previously-issued access tokens via the requireAuth check) and clears any
- * account lock. Deletes the Otp document on success.
- * 
- * OTP ABUSE PROTECTION:
- * - Records failed verification attempts
+ * Forgot password — step 2. A valid proof (texted OTP or Firebase token)
+ * authorizes one password reset: bumps `passwordChangedAt`, revokes every
+ * session, and clears any account lock.
  */
-async function resetPassword({ phoneNumber, otp, newPassword }, req) {
-  const phone = phoneNumber;
-
-  const record = await Otp.findOne({ phoneNumber: phone });
-  if (!record || record.otp !== String(otp)) {
-    // Record failed verification for abuse tracking
-    await otpAbuseService.recordFailedVerification({
-      phoneNumber: phone,
-      ipAddress: req.ip || '0.0.0.0',
-    });
-    
-    throw ApiError.badRequest(GENERIC_OTP_ERROR, {
-      code: 'otp_invalid',
-    });
+async function resetPassword(payload, req) {
+  const { phoneNumber: phone, newPassword } = payload;
+  const channel = otpChannel(phone);
+  if (channel === 'firebase') {
+    await consumePhoneChallenge(payload, 'reset', req);
+  } else {
+    await checkSmsOtp(payload, req);
   }
 
   const user = await User.findOne({ phone }).select('+password');
   if (!user || !user.phoneVerified) {
-    // The OTP matched a real record but the account is gone/unverified — an
-    // edge case (e.g. account deleted mid-flow). Clean up and refuse.
-    await Otp.deleteOne({ phoneNumber: phone });
+    if (channel === 'sms') await Otp.deleteOne({ phoneNumber: phone });
     throw ApiError.notFound('এই নম্বরে অ্যাকাউন্ট পাওয়া যায়নি।', { code: 'user_not_found' });
   }
-
   user.password = await bcrypt.hash(newPassword, env.bcryptRounds);
   user.passwordChangedAt = new Date();
-  
-  // Revoke ALL active sessions for this user (both old JWT sessions array and new refresh tokens)
   user.sessions = [];
   await refreshTokenService.revokeAllUserTokens(user._id);
-  
   user.loginAttempts = 0;
   user.lockUntil = null;
   await user.save();
-
-  await Otp.deleteOne({ phoneNumber: phone });
+  if (channel === 'sms') await Otp.deleteOne({ phoneNumber: phone });
   return { ok: true };
 }
 
@@ -509,4 +512,5 @@ module.exports = {
   forgotPassword,
   resetPassword,
   addSession,
+  otpChannel,
 };

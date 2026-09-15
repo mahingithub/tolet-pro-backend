@@ -29,6 +29,7 @@
  */
 
 const mongoose = require('mongoose');
+const { normalizePhone } = require('../utils/phone');
 
 // Mirrors ENTRY_TYPES in the frontend's components/living/soloConfig.jsx. A
 // lend / borrow / repayment moves cash and a person's balance but is NEVER
@@ -42,7 +43,7 @@ const PersonSchema = new mongoose.Schema(
     id: { type: String, required: true, maxlength: 40 },
     name: { type: String, trim: true, default: 'Friend', maxlength: 60 },
     color: { type: String, default: '#64748b', maxlength: 20 },
-    phone: { type: String, default: '', maxlength: 24 },
+    phone: { type: String, default: '', maxlength: 24, set: (value) => normalizePhone(value) || value },
     note: { type: String, default: '', maxlength: 300 },
     createdAt: { type: Date, default: Date.now },
     editedAt: { type: Date, default: null },

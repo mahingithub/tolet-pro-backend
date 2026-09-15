@@ -32,18 +32,20 @@ const uploadLandlordVerificationFields = multer({
 
 const router = express.Router();
 
-// ─── Signup (OTP via sms.net.bd) ────────────────────────────────────────────
-// signup/start  → hashes password, saves SignupIntent, texts a 6-digit OTP.
-// signup/verify → { phoneNumber, otp }; finalizes the User + logs in.
+// ─── Signup (texted OTP in Bangladesh, Firebase phone proof abroad) ────────
+// signup/start  → holds the signup intent; BD: texts a 6-digit OTP via
+//                 sms.net.bd; abroad: returns a Firebase challenge id.
+// signup/verify → { phoneNumber, otp } or { phoneNumber, verificationId,
+//                 firebaseIdToken }; finalizes the User + logs in.
 router.post('/signup/start', rl.signup, validate(v.signupStart), ctl.signupStart);
 router.post('/signup/verify', rl.signup, validate(v.signupVerify), ctl.signupVerify);
 
 // ─── Login (no OTP) ─────────────────────────────────────────────────────────
 router.post('/login', rl.login, validate(v.login), ctl.login);
 
-// ─── Forgot password (OTP via sms.net.bd) ───────────────────────────────────
-// forgot-password → { phoneNumber }; texts an OTP (constant response).
-// reset-password  → { phoneNumber, otp, newPassword }; verifies OTP + resets.
+// ─── Forgot password (same two channels as signup) ─────────────────────────
+// forgot-password → constant response for existing/unknown accounts.
+// reset-password  → the OTP or Firebase proof + newPassword.
 router.post('/forgot-password', rl.sendOtp, validate(v.forgotPassword), ctl.forgotPassword);
 router.post('/reset-password', rl.reset, validate(v.resetPassword), ctl.resetPassword);
 

@@ -14,7 +14,7 @@
  */
 
 const mongoose = require('mongoose');
-const { phoneCore } = require('../utils/phone');
+const { phoneCore, normalizePhone } = require('../utils/phone');
 
 // Payment entry sub-schema — validates what goes into ledger.<monthKey>.
 const LedgerEntrySchema = new mongoose.Schema(
@@ -78,7 +78,7 @@ const TenantProfileSchema = new mongoose.Schema(
     emergencyName:     { type: String, trim: true, default: '', maxlength: 100 },
     emergencyRelation: { type: String, trim: true, default: '', maxlength: 60 },
     emergencyAddress:  { type: String, trim: true, default: '', maxlength: 300 },
-    emergencyPhone:    { type: String, trim: true, default: '', maxlength: 20 },
+    emergencyPhone:    { type: String, trim: true, default: '', maxlength: 20, set: (v) => normalizePhone(v) || v },
 
     // The landlord's own snapshot of the tenant, taken at intake. TEMPORARY BY
     // DESIGN: the moment this person joins with the booking's invite code, their
@@ -106,11 +106,10 @@ const MemberSchema = new mongoose.Schema(
   {
     userId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     name:     { type: String, trim: true, default: '', maxlength: 100 },
-    phone:    { type: String, trim: true, default: '', maxlength: 20 },
-    // Last 10 digits of `phone`, written by the hook on BookingSchema. This is
-    // what "is this occupant me?" matches on — the landlord typed one format
-    // at intake and the occupant signed up in another. See utils/phone.js.
-    phoneCore: { type: String, default: '', maxlength: 10 },
+    phone:    { type: String, trim: true, default: '', maxlength: 20, set: (v) => normalizePhone(v) || v },
+    // Complete E.164 identity, derived from phone. Country codes are never
+    // discarded when linking occupants to registered accounts.
+    phoneCore: { type: String, default: '', maxlength: 16 },
     avatar:   { type: String, default: '', maxlength: 512 },
 
     // What this person rents: whole flat / a room / a single seat (hostel).
@@ -241,9 +240,9 @@ const BookingSchema = new mongoose.Schema(
     floorNumber: { type: String, trim: true, default: '', maxlength: 40 },
     roomNumber:  { type: String, trim: true, default: '', maxlength: 40 },
     tenant:      { type: String, trim: true, default: '', maxlength: 100 },
-    tenantPhone: { type: String, trim: true, default: '', maxlength: 20 },
+    tenantPhone: { type: String, trim: true, default: '', maxlength: 20, set: (v) => normalizePhone(v) || v },
     // Comparison key for tenantPhone — see the members[].phoneCore note above.
-    tenantPhoneCore: { type: String, default: '', maxlength: 10 },
+    tenantPhoneCore: { type: String, default: '', maxlength: 16 },
     // How many people will live in the unit (prefilled from the tenant's
     // family-members count when the profile is linked).
     tenantsCount: { type: Number, default: 1, min: 1, max: 50 },
@@ -353,13 +352,62 @@ const BookingSchema = new mongoose.Schema(
 // no matter which path wrote the row.
 BookingSchema.pre('validate', function derivePhoneCores(next) {
   this.tenantPhoneCore = phoneCore(this.tenantPhone);
+  if (this.tenantPhoneCore) this.tenantPhone = this.tenantPhoneCore;
   if (Array.isArray(this.members)) {
     this.members.forEach((m) => {
-      if (m) m.phoneCore = phoneCore(m.phone);
+      if (m) {
+        m.phoneCore = phoneCore(m.phone);
+        if (m.phoneCore) m.phone = m.phoneCore;
+      }
     });
   }
   next();
 });
+
+// Query updates bypass document validation. Keep keys aligned for direct,
+// positional and whole-array phone updates as well as upserted members.
+function derivePhoneCoresOnUpdate(next) {
+  const update = this.getUpdate() || {};
+  const canonicalMember = (member) => {
+    if (!member || typeof member !== 'object') return member;
+    if (typeof member.toObject === 'function') member = member.toObject();
+    const canonical = phoneCore(member.phone);
+    return { ...member, phone: canonical || member.phone, phoneCore: canonical };
+  };
+  for (const set of [update, update.$set, update.$setOnInsert]) {
+    if (!set || Array.isArray(set)) continue;
+    for (const key of Object.keys(set)) {
+      if (key === 'tenantPhone' || /^members\.[^.]+\.phone$/.test(key)) {
+        const canonical = phoneCore(set[key]);
+        if (canonical) set[key] = canonical;
+        set[key === 'tenantPhone' ? 'tenantPhoneCore' : `${key}Core`] = canonical;
+      }
+      if (key === 'members' && Array.isArray(set[key])) {
+        set[key] = set[key].map(canonicalMember);
+      } else if (/^members\.[^.]+$/.test(key)) {
+        set[key] = canonicalMember(set[key]);
+      }
+    }
+  }
+  for (const operator of [update.$push, update.$addToSet]) {
+    if (!operator || !operator.members) continue;
+    if (Array.isArray(operator.members.$each)) {
+      operator.members.$each = operator.members.$each.map(canonicalMember);
+    } else {
+      operator.members = canonicalMember(operator.members);
+    }
+  }
+  for (const key of Object.keys(update.$unset || {})) {
+    if (key === 'tenantPhone' || /^members\.[^.]+\.phone$/.test(key)) {
+      update.$unset[key === 'tenantPhone' ? 'tenantPhoneCore' : `${key}Core`] = '';
+    }
+  }
+  this.setUpdate(update);
+  next();
+}
+BookingSchema.pre('findOneAndUpdate', derivePhoneCoresOnUpdate);
+BookingSchema.pre('updateOne', derivePhoneCoresOnUpdate);
+BookingSchema.pre('updateMany', derivePhoneCoresOnUpdate);
 
 BookingSchema.set('toJSON', {
   virtuals: true,
@@ -410,33 +458,15 @@ BookingSchema.index({ propertyId: 1, status: 1 });
 // An $or costs whatever its worst branch costs: one unindexed branch and Mongo
 // gives up on all four and scans. All four are indexed here for that reason.
 //
-// The phone indexes are the ones that were missing. They are also only half a
-// fix: tenancy.service matches phones with a `/<last-10-digits>$/` regex, and a
-// suffix regex cannot seek in a b-tree — it can only scan every key. The index
-// caps the damage at an index scan instead of a collection scan; removing the
-// scan needs a normalised phone column, which is written up as a schema change
-// rather than smuggled in here.
 BookingSchema.index({ 'members.userId': 1, status: 1 });
 BookingSchema.index({ tenantId: 1, status: 1 });
 
-// The phone branches. These index the NORMALISED columns, not the raw ones —
-// that is the whole point. A raw-phone index can only be read with a suffix
-// regex, which scans every key; an index on the 10-digit core is an equality
-// seek. Measured on the 3k-user seed: 3,001 keys examined → 2.
+// Complete E.164 comparison keys retain the existing index names.
 BookingSchema.index({ 'members.phoneCore': 1 });
 BookingSchema.index({ tenantPhoneCore: 1 });
 
-// TRANSITIONAL — delete these two once migrations/2026-09-06-phone-core.js has
-// run everywhere.
-//
-// listTenantBookings ORs the normalised branches together with the raw ones so
-// a booking written before phoneCore existed still reaches its tenant. An $or
-// costs whatever its WORST branch costs, so leaving the raw columns unindexed
-// would have made the normalised branches pointless — the query would scan
-// anyway. Measured: 8,000 rows examined without these, 20 with them.
-//
-// They are cheap to carry and expensive to omit: the failure mode without them
-// is not slowness, it is a tenant not seeing the home they live in.
+// Raw phone indexes support exact identities and anchored legacy-format
+// fallback until all old rows have been canonicalized.
 BookingSchema.index({ 'members.phone': 1 });
 BookingSchema.index({ tenantPhone: 1 });
 

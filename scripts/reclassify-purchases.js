@@ -57,7 +57,7 @@ const fs = require('fs');
 const path = require('path');
 const mongoose = require('mongoose');
 
-const { phoneCore } = require('../utils/phone');
+const { phoneCore, legacyPhoneRegex } = require('../utils/phone');
 
 const MONGO_URI = process.env.MONGODB_URI
   || process.env.MONGO_URI
@@ -109,9 +109,8 @@ async function connect() {
  * two of the three country-code digits put back. It matched nothing, so the
  * script said "no merchant" for a number that was in the database all along.
  *
- * utils/phone.js already owns this question for the whole app — the last ten
- * digits are the subscriber, everything before them is formatting. Reusing it
- * covers all of these at once:
+ * utils/phone.js compares complete E.164 identities, accepting only explicit
+ * legacy Bangladesh formats when no country code is supplied:
  *
  *   +8801711111111   8801711111111   01711111111
  *   1711111111       01711-111111    +88 01711 111111
@@ -130,9 +129,8 @@ async function resolveMerchant(Merchant, value) {
     process.exit(1);
   }
 
-  // A suffix regex cannot use an index, which would matter in a request path
-  // and does not here: one lookup, once, on a human's command.
-  const matches = await Merchant.find({ phone: new RegExp(`${core}$`) })
+  // Match the complete number, including its country code.
+  const matches = await Merchant.find({ phone: legacyPhoneRegex(core) })
     .select('name phone')
     .limit(2)
     .lean();

@@ -67,10 +67,7 @@ const Submission = require('../models/RentPaymentSubmission');
 const log = (...a) => console.log(...a);
 const vlog = (...a) => { if (VERBOSE) console.log(...a); };
 
-function phoneCore(p) {
-  const d = String(p || '').replace(/\D/g, '');
-  return d.length >= 10 ? d.slice(-10) : '';
-}
+const { phoneCore } = require('../utils/phone');
 
 /** Money terms for an occupant, applying the same "blank means the unit's" rule the app uses. */
 function termsFor(booking, member) {

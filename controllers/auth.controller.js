@@ -9,9 +9,14 @@ const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
 exports.signupStart = asyncH(async (req, res) => {
   const out = await authService.startSignup(req.body, req);
+  const firebase = out.provider === 'firebase';
   res.status(202).json({
-    code: 'OTP_SENT_SUCCESS',
-    message: 'OTP sent. Please check your phone.',
+    // Bangladesh: our server already texted the code. Abroad: the client now
+    // asks Firebase for the SMS, bound to `verificationId`.
+    code: firebase ? 'FIREBASE_PHONE_READY' : 'OTP_SENT_SUCCESS',
+    message: firebase ? 'Continue with Firebase phone verification.' : 'OTP sent. Please check your phone.',
+    provider: out.provider,
+    verificationId: out.verificationId,
     expiresAt: out.expiresAt,
     // Include abuse protection status for client-side handling
     enforcementLevel: out.enforcementLevel,
@@ -20,7 +25,8 @@ exports.signupStart = asyncH(async (req, res) => {
 });
 
 exports.signupVerify = asyncH(async (req, res) => {
-  // Body is now { phoneNumber, otp } (validated + normalised by the validator).
+  // A texted OTP (Bangladesh) or a Firebase ID token bound to its one-use
+  // challenge (abroad) — either is verified server-side before an account exists.
   const { token, user } = await authService.verifySignup(req.body, req);
   
   // Issue refresh token for the session
@@ -43,7 +49,10 @@ exports.signupVerify = asyncH(async (req, res) => {
     // Record login in history
     await loginHistory.safeLog(
       loginHistory.recordSuccessfulLogin,
-      req, user, sessionId, { loginType: 'signup' }
+      req, user, sessionId, {
+        loginType: 'otp',
+        metadata: { provider: authService.otpChannel(user.phone), action: 'signup' },
+      }
     );
   }
   
@@ -93,18 +102,21 @@ exports.login = asyncH(async (req, res) => {
   });
 });
 
-// ─── Forgot password (OTP via sms.net.bd) ───────────────────────────────────
-// Step 1: request an OTP. Body: { phoneNumber, captchaToken? }.
+// Step 1: Bangladesh — text a code if the account exists; abroad — issue a
+// Firebase challenge. Constant per channel: never reveals whether the account exists.
 exports.forgotPassword = asyncH(async (req, res) => {
-  await authService.forgotPassword(req.body, req);
-  // Constant response — never reveal whether the account exists.
+  const out = await authService.forgotPassword(req.body, req);
+  const firebase = out.provider === 'firebase';
   res.status(202).json({
-    code: 'FORGOT_OTP_SENT',
-    message: 'If the account exists, an OTP has been sent.',
+    code: firebase ? 'FIREBASE_PHONE_READY' : 'FORGOT_OTP_SENT',
+    message: firebase ? 'Continue with Firebase phone verification.' : 'If the account exists, an OTP has been sent.',
+    provider: out.provider,
+    verificationId: out.verificationId,
+    expiresAt: out.expiresAt,
   });
 });
 
-// Step 2: verify OTP + set the new password. Body: { phoneNumber, otp, newPassword }.
+// Step 2: verify the OTP or Firebase proof and set the new password.
 exports.resetPassword = asyncH(async (req, res) => {
   await authService.resetPassword(req.body, req);
   res.json({

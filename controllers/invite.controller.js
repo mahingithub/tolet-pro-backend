@@ -373,7 +373,7 @@ async function submitOnboarding(req, res, next) {
     const name  = String(req.body.name || '').trim().slice(0, 100);
     const phone = String(req.body.phone || '').trim().slice(0, 20);
     if (!name)  throw ApiError.badRequest('আপনার নাম লিখুন।');
-    if (phoneCore(phone).length < 10) throw ApiError.badRequest('সঠিক মোবাইল নম্বর লিখুন।');
+    if (!phoneCore(phone)) throw ApiError.badRequest('সঠিক মোবাইল নম্বর লিখুন।');
 
     // Same sanitiser the landlord's own intake form goes through, so a
     // self-filled profile and a landlord-typed one are the same record.
@@ -938,7 +938,7 @@ async function requestShift(req, res, next) {
     const name  = String(req.body.name  || mine?.name  || from.tenant      || '').trim().slice(0, 100);
     const phone = String(req.body.phone || mine?.phone || from.tenantPhone || '').trim().slice(0, 20);
     if (!name) throw ApiError.badRequest('আপনার নাম লিখুন।');
-    if (phoneCore(phone).length < 10) throw ApiError.badRequest('সঠিক মোবাইল নম্বর লিখুন।');
+    if (!phoneCore(phone)) throw ApiError.badRequest('সঠিক মোবাইল নম্বর লিখুন।');
 
     const onboarding = await TenantOnboarding.create({
       landlordId: building.landlordId,

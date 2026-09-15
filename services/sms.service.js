@@ -85,15 +85,18 @@ async function sendSms(to, msg) {
 }
 
 /**
- * Sends a Tolet Pro OTP code. Single source of truth for the message
- * template so signup + forgot-password stay consistent.
- *
- * @param {string} to  recipient phone
- * @param {string} otp 6-digit code
+ * Legacy OTP delivery for the separate Bangladesh provider app. Rental app
+ * signup, login and password reset use Firebase Phone Authentication instead.
+ * Never fall back to an unverified international gateway or Twilio SMS.
  */
 async function sendOtp(to, otp) {
-  const msg = `Your To-Let Pro OTP Code is ${otp}`;
-  return sendSms(to, msg);
+  const msisdn = normalizeMsisdn(to);
+  if (!/^(?:8801[3-9]\d{8}|01[3-9]\d{8})$/.test(msisdn)) {
+    throw ApiError.badRequest('এই নম্বরের OTP যাচাইয়ের জন্য Firebase ব্যবহার করুন।', {
+      code: 'firebase_phone_auth_required',
+    });
+  }
+  return sendSms(to, `Your To-Let Pro OTP Code is ${otp}`);
 }
 
 /**

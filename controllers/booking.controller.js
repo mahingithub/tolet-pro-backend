@@ -9,7 +9,7 @@
  */
 
 const mongoose      = require('mongoose');
-const { phoneCore } = require('../utils/phone');
+const { phoneCore, samePhone, phoneMatchBranches } = require('../utils/phone');
 const Booking       = require('../models/Booking');
 const Receipt       = require('../models/Receipt');
 const User          = require('../models/User');
@@ -35,43 +35,17 @@ function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
 }
 
-// phoneCore() — reduces any phone format to its comparable 10-digit core — now
-// lives in utils/phone.js, imported above. It used to be copy-pasted into five
-// files; one definition means one place for the matching rule to change.
-
-// Find a registered tenant's user id from a phone number. Used to link manual /
-// legacy bookings to a real account so Profile / Call / Message work. Returns
-// null when no account matches (unregistered tenant → no profile to open).
-//
-// FAST PATH, THEN SELF-HEALING FALLBACK.
-//
-// The indexed `phoneCore` lookup answers this in two key reads. It only misses
-// for a user row written before phoneCore existed and not yet touched by the
-// backfill (migrations/2026-09-06-phone-core.js), so the old suffix-regex scan
-// stays as a second attempt — correctness first, speed where it is available.
-//
-// When the fallback DOES find someone, their phoneCore is written back. That
-// makes the slow path self-extinguishing: every legacy row that anybody
-// actually looks up repairs itself, so the scan gets rarer even if the
-// migration is never run. listHostBookings calls this once per unlinked
-// booking on every dashboard load, which is exactly the traffic that does the
-// repairing.
+// Resolve a full phone identity, including legacy Bangladesh formatting.
+// Refuse ambiguous legacy duplicates instead of attaching the wrong account.
+// Source phone validation makes stale comparison keys harmless.
 async function resolveUserIdByPhone(phone) {
   const core = phoneCore(phone);
   if (!core) return null;
   try {
-    const fast = await User.findOne({ phoneCore: core }).select('_id').lean();
-    if (fast) return fast._id;
-
-    const legacy = await User.findOne({ phone: new RegExp(`${core}$`) })
-      .select('_id').lean();
-    if (!legacy) return null;
-
-    // Backfill this one row. Deliberately not awaited into the response path —
-    // a failed repair must not fail the lookup that already succeeded.
-    User.updateOne({ _id: legacy._id }, { $set: { phoneCore: core } })
-      .catch(() => {});
-    return legacy._id;
+    const matches = await User.find({ $or: phoneMatchBranches('phoneCore', 'phone', core) })
+      .select('_id phone').limit(2).lean();
+    return matches.length === 1 && samePhone(matches[0].phone, phone)
+      ? matches[0]._id : null;
   } catch {
     return null;
   }
@@ -577,13 +551,8 @@ async function listTenantBookings(req, res, next) {
     // before it ever arrived. Matching on the core fixes that and is indexed.
     const conditions = [{ tenantId: req.user._id }, { 'members.userId': req.user._id }];
     const myCore = phoneCore(req.user.phone);
-    if (myCore) {
-      conditions.push({ tenantPhoneCore: myCore });
-      conditions.push({ 'members.phoneCore': myCore });
-      // Legacy rows the backfill has not reached yet.
-      conditions.push({ tenantPhone: req.user.phone });
-      conditions.push({ 'members.phone': req.user.phone });
-    }
+    conditions.push(...phoneMatchBranches('tenantPhoneCore', 'tenantPhone', myCore));
+    conditions.push(...phoneMatchBranches('members.phoneCore', 'members.phone', myCore));
     const bookings = await Booking.find({ $or: conditions, status: { $ne: 'cancelled' } })
       .sort({ createdAt: -1 })
       .lean();

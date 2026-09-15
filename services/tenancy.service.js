@@ -168,9 +168,8 @@ function closeMembership(booking, tenantUserId, tenantPhone, when) {
 async function findLiveTenancies(tenantUserId, tenantPhone) {
   const core = phoneCore(tenantPhone);
   const match = [{ 'members.userId': tenantUserId }, { tenantId: tenantUserId }];
-  // Indexed equality on the normalised core, PLUS the legacy suffix-regex for
-  // rows the backfill has not reached yet. phoneMatchBranches() builds both —
-  // see utils/phone.js for why the regex alone could never use an index.
+  // Complete E.164 identity with anchored legacy-format matching. Source
+  // phones are checked as well, so stale keys cannot select another tenant.
   match.push(...phoneMatchBranches('members.phoneCore', 'members.phone', core));
   match.push(...phoneMatchBranches('tenantPhoneCore', 'tenantPhone', core));
   const rows = await Booking.find({
@@ -204,9 +203,8 @@ async function findLiveTenancies(tenantUserId, tenantPhone) {
 async function closeOtherTenancies({ tenantUserId, tenantPhone, keepBookingId, when }) {
   const core = phoneCore(tenantPhone);
   const match = [{ 'members.userId': tenantUserId }, { tenantId: tenantUserId }];
-  // Indexed equality on the normalised core, PLUS the legacy suffix-regex for
-  // rows the backfill has not reached yet. phoneMatchBranches() builds both —
-  // see utils/phone.js for why the regex alone could never use an index.
+  // Complete E.164 identity with anchored legacy-format matching. Source
+  // phones are checked as well, so stale keys cannot select another tenant.
   match.push(...phoneMatchBranches('members.phoneCore', 'members.phone', core));
   match.push(...phoneMatchBranches('tenantPhoneCore', 'tenantPhone', core));
 

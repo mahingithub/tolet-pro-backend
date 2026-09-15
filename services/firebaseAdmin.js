@@ -1,10 +1,7 @@
 'use strict';
 
-// NOTE: Firebase is NO LONGER used for authentication. Phone OTP (signup +
-// password reset) has been migrated to sms.net.bd (see services/sms.service.js
-// and services/auth.service.js). This module now exists SOLELY to deliver FCM
-// push notifications (sendToUser), used by chat.service.js and
-// notification.service.js. Do not reintroduce ID-token verification here.
+// Shared trusted Firebase project for Phone Authentication and FCM delivery.
+// Phone token validation lives in firebasePhoneAuth.service.js.
 const admin = require('firebase-admin');
 const env = require('../config/env');
 
@@ -15,8 +12,7 @@ function init() {
   if (!env.firebaseServiceAccountBase64) {
     console.warn(
       '[firebase-admin] FIREBASE_SERVICE_ACCOUNT_BASE64 is not set. ' +
-        'FCM push notifications (chat + in-app alerts) will be disabled. ' +
-        'Auth (OTP) is unaffected — it uses sms.net.bd.'
+        'Firebase phone sign-in and FCM push notifications are unavailable.'
     );
     return null;
   }
@@ -28,7 +24,13 @@ function init() {
     console.error('[firebase-admin] FIREBASE_SERVICE_ACCOUNT_BASE64 is not valid base64-JSON:', err.message);
     process.exit(1);
   }
-  app = admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  if (env.firebaseProjectId && serviceAccount.project_id !== env.firebaseProjectId) {
+    throw new Error('Firebase service account project does not match FIREBASE_PROJECT_ID.');
+  }
+  app = admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+    projectId: env.firebaseProjectId || serviceAccount.project_id,
+  });
   return app;
 }
 

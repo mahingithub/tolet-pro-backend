@@ -111,13 +111,14 @@ const env = {
   resetTokenExpiresIn: process.env.RESET_TOKEN_EXPIRES_IN || '15m',
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS || 12),
 
-  // Firebase Admin is NO LONGER used for auth (phone OTP migrated to
-  // sms.net.bd). These are retained ONLY for FCM push notifications
-  // (see services/firebaseAdmin.js -> sendToUser, used by chat/notifications).
+  // The Firebase project verifies phone sign-ins from outside Bangladesh and
+  // sends FCM push. Its project must match the frontend/native Firebase config.
   firebaseServiceAccountBase64: process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || '',
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID || '',
 
-  // sms.net.bd SMS gateway — used to deliver signup + password-reset OTPs.
+  // sms.net.bd SMS gateway — Bangladeshi signup + password-reset OTPs (rental
+  // and provider apps) and transactional reminders. Numbers from the other
+  // supported countries verify through Firebase Phone Authentication instead.
   smsApiKey: process.env.SMS_API_KEY || '',
   smsSenderId: process.env.SMS_SENDER_ID || '',
 

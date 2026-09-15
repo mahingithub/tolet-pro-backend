@@ -1,45 +1,11 @@
 /**
- * 2026-09-06-phone-core.js
- * ─────────────────────────────────────────────────────────────────────────
- * Backfills the normalised phone columns that turn a full index scan into an
- * equality seek.
- *
- * WHY
- * A phone number reaches this app in four different shapes (+8801712345678,
- * 01712345678, 8801712345678, 01712-345678) and they are all one person. With
- * nothing normalised, the only way to compare them was a SUFFIX REGEX:
- *
- *     User.findOne({ phone: new RegExp(`${core}$`) })
- *
- * An index is ordered by prefix, so a suffix pattern has nowhere to start:
- * Mongo reads EVERY key and tests each one. Measured on a 3,000-user seed that
- * is 3,001 keys examined to return 1 row — and it runs once per unlinked
- * booking on every host dashboard load, and on every tenant join.
- *
- * The models now write a `*Core` sibling (last 10 digits) on save, and the
- * queries match on it. This backfills the rows that already exist.
- *
- * WHAT IT WRITES
- *   users.phoneCore                 ← last 10 digits of phone
- *   bookings.tenantPhoneCore        ← last 10 digits of tenantPhone
- *   bookings.members[].phoneCore    ← last 10 digits of that member's phone
- *
- * SAFETY
- *   • ADDITIVE ONLY. No existing field is read destructively or overwritten;
- *     the source phone columns are not touched at all. The worst case of a bad
- *     run is a wrong value in a column nothing else depends on, and re-running
- *     fixes it.
- *   • Idempotent — running it twice changes nothing the second time.
- *   • Safe to run BEFORE or AFTER deploying the code. The queries use a
- *     "fast path, then legacy regex fallback" pattern, so they return correct
- *     results whether or not this has run; the migration only makes them fast.
- *   • Uses an aggregation-pipeline update, so the whole backfill is done by the
- *     server in one pass per collection — no documents cross the wire.
- *
- * Usage:
- *   node migrations/2026-09-06-phone-core.js --dry-run
- *   node migrations/2026-09-06-phone-core.js
- *   MONGO_URI='mongodb+srv://…' node migrations/2026-09-06-phone-core.js
+ * Backfill complete E.164 comparison keys in users and bookings.
+ * Existing *Core names/indexes are retained, but country codes are preserved.
+ * This older entry point updates keys only. For canonical raw phone storage
+ * and a duplicate-account preflight, use 2026-09-14-foreign-phone-core.js.
+ * Neither migration should run while old suffix-matching app versions write.
+ * Usage: node migrations/2026-09-06-phone-core.js --dry-run
+ * Add --apply to write keys. Omitting it is always a dry run.
  */
 
 'use strict';
@@ -54,7 +20,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 
 const argv    = process.argv.slice(2);
-const DRY_RUN = argv.includes('--dry-run');
+const DRY_RUN = !argv.includes('--apply') || argv.includes('--dry-run');
 
 const FALLBACK_URI = 'mongodb://127.0.0.1:27017/tolet';
 const MONGO_URI = process.env.MONGO_URI || FALLBACK_URI;
@@ -67,59 +33,45 @@ function redactUri(u) {
 
 const log = (...a) => console.log(...a);
 
-/**
- * The last-10-digits rule, expressed as a Mongo aggregation expression so the
- * server can apply it to every row without shipping documents to Node.
- *
- * MUST agree with utils/phone.js exactly. The JS side is `replace(/\D/g,'')`,
- * which KEEPS ONLY ASCII 0-9 — so this KEEPS matches of [0-9] rather than
- * stripping a list of known punctuation.
- *
- * That distinction is not academic, and a test caught it: an earlier version
- * here stripped `+ - space ( ) .` and took the last 10 CHARACTERS. Fed the
- * Bengali-numeral form of a number — ০১৭১২৩৪৫৬৭৮, which a landlord can
- * absolutely paste into the intake field, since only User.phone is format-
- * validated — it produced "১৭১২৩৪৫৬৭৮" while JS produced "". A stored core
- * that the application can never generate is a permanent phantom: it matches
- * nothing, and it makes verify() report a mismatch for the life of the row.
- * $regexFindAll over [0-9] removes the whole class of that bug.
- */
+/** Mongo aggregation equivalent of utils/phone.normalizePhone. */
 function coreExpr(field) {
-  const digits = {
+  const str = { $toString: { $ifNull: [field, ''] } };
+  // The explicit whitespace set is ECMAScript \\s, including Unicode spaces.
+  // Preserve letters and + instead of deleting arbitrary non-digits.
+  const formatting = '\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff().-';
+  const compact = {
     $reduce: {
-      input: {
-        $regexFindAll: {
-          input: { $toString: { $ifNull: [field, ''] } },
-          regex: '[0-9]',
-        },
-      },
+      input: { $regexFindAll: { input: str, regex: `[^${formatting}]` } },
       initialValue: '',
       in: { $concat: ['$$value', '$$this.match'] },
     },
   };
-
   return {
     $let: {
-      vars: { s: digits },
+      vars: { s: compact },
       in: {
-        $cond: [
-          { $gte: [{ $strLenCP: '$$s' }, 10] },
-          { $substrCP: ['$$s', { $subtract: [{ $strLenCP: '$$s' }, 10] }, 10] },
-          '',
-        ],
+        $switch: {
+          branches: [
+            { case: { $regexMatch: { input: '$$s', regex: '^\\+[1-9][0-9]{7,14}$' } }, then: '$$s' },
+            { case: { $regexMatch: { input: '$$s', regex: '^8801[3-9][0-9]{8}$' } }, then: { $concat: ['+', '$$s'] } },
+            { case: { $regexMatch: { input: '$$s', regex: '^01[3-9][0-9]{8}$' } }, then: { $concat: ['+880', { $substrCP: ['$$s', 1, 10] }] } },
+            { case: { $regexMatch: { input: '$$s', regex: '^1[3-9][0-9]{8}$' } }, then: { $concat: ['+880', '$$s'] } },
+          ],
+          default: '',
+        },
       },
     },
   };
 }
 
-async function backfillUsers(db) {
+async function backfillUsers(db, { dryRun = DRY_RUN } = {}) {
   const col = db.collection('users');
   const todo = await col.countDocuments({
     phone: { $nin: [null, ''] },
-    $or: [{ phoneCore: { $exists: false } }, { phoneCore: '' }],
+    $expr: { $ne: [{ $ifNull: ['$phoneCore', ''] }, coreExpr('$phone')] },
   });
   log(`users            : ${todo} row(s) need phoneCore`);
-  if (DRY_RUN || todo === 0) return 0;
+  if (dryRun || todo === 0) return 0;
 
   const res = await col.updateMany(
     { phone: { $nin: [null, ''] } },
@@ -129,16 +81,20 @@ async function backfillUsers(db) {
   return res.modifiedCount;
 }
 
-async function backfillBookings(db) {
+async function backfillBookings(db, { dryRun = DRY_RUN } = {}) {
   const col = db.collection('bookings');
   const todo = await col.countDocuments({
-    $or: [
-      { tenantPhone: { $nin: [null, ''] }, tenantPhoneCore: { $in: [null, ''] } },
-      { 'members.phone': { $nin: [null, ''] }, 'members.phoneCore': { $in: [null, ''] } },
-    ],
+    $expr: { $or: [
+      { $ne: [{ $ifNull: ['$tenantPhoneCore', ''] }, coreExpr('$tenantPhone')] },
+      { $anyElementTrue: [{ $map: {
+        input: { $ifNull: ['$members', []] },
+        as: 'm',
+        in: { $ne: [{ $ifNull: ['$$m.phoneCore', ''] }, coreExpr('$$m.phone')] },
+      } }] },
+    ] },
   });
   log(`bookings         : ${todo} row(s) need a phone core`);
-  if (DRY_RUN || todo === 0) return 0;
+  if (dryRun || todo === 0) return 0;
 
   const res = await col.updateMany({}, [
     {
@@ -228,7 +184,7 @@ async function main() {
       const bad = await verify(db);
       if (bad > 0) {
         log('\n⚠️  Mismatches found. The app still works — its queries fall back to');
-        log('   the legacy regex when a core does not match — but report these.');
+        log('   anchored complete-number matching, but report these mismatches.');
         process.exitCode = 1;
       }
     }

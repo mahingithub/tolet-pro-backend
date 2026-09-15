@@ -2,7 +2,7 @@
 
 const mongoose = require('mongoose');
 const { computeTenantTrust, computeLandlordTrust, tierFor } = require('../utils/trustScore');
-const { phoneCore } = require('../utils/phone');
+const { normalizePhone } = require('../utils/phone');
 
 // ─── ROLES ─────────────────────────────────────────────────────────────────
 // Every user can carry multiple roles (e.g. "I rent my flat AND I also
@@ -75,8 +75,9 @@ const TenantProfileSchema = new mongoose.Schema(
       name:  { type: String, default: '', trim: true, maxlength: 80 },
       phone: {
         type: String, default: '', trim: true, maxlength: 20,
+        set: (value) => normalizePhone(value) || value,
         validate: {
-          validator: (v) => v === '' || /^\+\d{8,15}$/.test(v),
+          validator: (v) => v === '' || /^\+[1-9]\d{7,14}$/.test(v),
           message:   'Emergency contact phone must be E.164 format.',
         },
       },
@@ -176,7 +177,7 @@ const LandlordProfileSchema = new mongoose.Schema(
         {
           orgName: { type: String, default: '', trim: true, maxlength: 80 },
           logoUrl: { type: String, default: '', maxlength: 512 },
-          phone:   { type: String, default: '', trim: true, maxlength: 40 },
+          phone:   { type: String, default: '', trim: true, maxlength: 40, set: (value) => normalizePhone(value) || value },
         },
         { _id: false },
       ),
@@ -371,22 +372,16 @@ const UserSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true,
-      match: [/^\+\d{8,15}$/, 'Invalid phone format'],
+      set: (value) => normalizePhone(value) || value,
+      maxlength: 16,
+      match: [/^\+[1-9]\d{7,14}$/, 'Invalid phone format'],
     },
 
-    // The last 10 digits of `phone` — the COMPARISON key, written by the hook
-    // below and never by hand.
-    //
-    // A landlord types "01712345678" into an intake form; the same person
-    // signed up as "+8801712345678". Matching those meant a suffix regex
-    // (`/1712345678$/`), which no index can serve — Mongo scanned every key in
-    // the phone index to find one row. This column turns that into an equality
-    // match. See utils/phone.js for the full reasoning.
-    //
-    // NOT unique, deliberately: `phone` already carries the uniqueness
-    // constraint, and adding a second one here would fail the backfill on any
-    // pre-existing duplicate rather than surfacing it.
-    phoneCore: { type: String, index: true, maxlength: 10, default: '' },
+    // Full E.164 comparison key, including + and country code. The existing
+    // field/index name is retained during migration from digit-only keys.
+    // Raw phone remains unique; ambiguous historical duplicates are reported
+    // by the migration instead of silently merged.
+    phoneCore: { type: String, index: true, maxlength: 16, default: '' },
     // Always hidden from queries by default; explicit `.select('+password')` to load.
     password: { type: String, required: true, select: false },
 
@@ -402,7 +397,8 @@ const UserSchema = new mongoose.Schema(
       type: [String],
       enum: ROLES,
       default: function defaultRoles() {
-        return [this.role || 'tenant'];
+        // `this` is null when Mongoose fills defaults for an upsert.
+        return [(this && this.role) || 'tenant'];
       },
     },
 
@@ -564,7 +560,9 @@ UserSchema.virtual('isLocked').get(function isLocked() {
 // unique check looks at the document, and so a caller that only ever calls
 // .validate() still gets a consistent row.
 UserSchema.pre('validate', function derivePhoneCore(next) {
-  this.phoneCore = phoneCore(this.phone);
+  const canonical = normalizePhone(this.phone);
+  if (canonical) this.phone = canonical;
+  this.phoneCore = canonical;
   next();
 });
 
@@ -574,13 +572,18 @@ UserSchema.pre('validate', function derivePhoneCore(next) {
 // phoneCore pointing at the OLD number — a stale index entry is worse than a
 // missing one, because the lookup silently returns the wrong person.
 function derivePhoneCoreOnUpdate(next) {
-  const u = this.getUpdate() || {};
-  const set = u.$set || u;
-  if (Object.prototype.hasOwnProperty.call(set, 'phone')) {
-    if (u.$set) u.$set.phoneCore = phoneCore(set.phone);
-    else u.phoneCore = phoneCore(set.phone);
-    this.setUpdate(u);
+  const update = this.getUpdate() || {};
+  for (const set of [update, update.$set, update.$setOnInsert]) {
+    if (set && Object.prototype.hasOwnProperty.call(set, 'phone')) {
+      const canonical = normalizePhone(set.phone);
+      if (canonical) set.phone = canonical;
+      set.phoneCore = canonical;
+    }
   }
+  if (update.$unset && Object.prototype.hasOwnProperty.call(update.$unset, 'phone')) {
+    update.$unset.phoneCore = '';
+  }
+  this.setUpdate(update);
   next();
 }
 UserSchema.pre('findOneAndUpdate', derivePhoneCoreOnUpdate);

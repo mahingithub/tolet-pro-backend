@@ -31,6 +31,7 @@
  */
 
 const mongoose = require('mongoose');
+const { normalizePhone } = require('../utils/phone');
 const { TenantProfileSchema } = require('./Booking');
 
 const TenantOnboardingSchema = new mongoose.Schema(
@@ -91,7 +92,7 @@ const TenantOnboardingSchema = new mongoose.Schema(
     // where the rest of the app reads them from on a member, and because the
     // host's pending list needs them without unpacking the profile.
     name:  { type: String, trim: true, default: '', maxlength: 100 },
-    phone: { type: String, trim: true, default: '', maxlength: 20 },
+    phone: { type: String, trim: true, default: '', maxlength: 20, set: (v) => normalizePhone(v) || v },
     tenantProfile: { type: TenantProfileSchema, default: () => ({}) },
     // Their requested move-in. The landlord's approval is what makes it a lease
     // start; until then it is a date on a form.
