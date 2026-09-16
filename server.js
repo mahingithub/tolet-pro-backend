@@ -7,6 +7,8 @@ require('./instrument');
 const env = require('./config/env');
 const express = require('express');
 const cors = require('cors');
+// One allow-list for the HTTP API and for Socket.IO — see config/cors.js.
+const { corsOptions } = require('./config/cors');
 const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
 const hpp = require('hpp');
@@ -147,39 +149,15 @@ app.use((req, res, next) => {
 // the app binary and can't be spoofed by a phishing site the way a web origin
 // can, so they're always allowed. Android (Capacitor 5+) serves from
 // https://localhost; iOS uses capacitor://localhost.
-const NATIVE_APP_ORIGINS = new Set([
-  'capacitor://localhost',
-  'ionic://localhost',
-  'http://localhost',
-  'https://localhost',
-]);
-
-// Allowed browser origins = public site (CORS_ORIGINS) + admin console
-// (ADMIN_CORS_ORIGINS) + provider app (PROVIDER_CORS_ORIGINS). All three are
-// credentialed. Keeping them in separate env vars means each surface is
-// allow-listed explicitly and can be rotated/locked down without touching the
-// others' config.
-const ALLOWED_WEB_ORIGINS = new Set([
-  ...env.corsOrigins,
-  ...env.adminCorsOrigins,
-  ...env.providerCorsOrigins,
-]);
-
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // server-to-server / curl / native fetch
-      if (NATIVE_APP_ORIGINS.has(origin)) return cb(null, true);
-      if (ALLOWED_WEB_ORIGINS.has(origin)) return cb(null, true);
-      // The old `.vercel.app` wildcard was removed — it let ANY site on
-      // *.vercel.app (including an attacker's) make credentialed requests.
-      // Put your exact production URL(s) in CORS_ORIGINS (public site) and
-      // ADMIN_CORS_ORIGINS (admin subdomain) instead.
-      return cb(new Error(`CORS: origin "${origin}" not allowed`));
-    },
-    credentials: true,
-  })
-);
+// Who may call this API from a browser or from the installed app: the public
+// site, the admin console, the provider app (each its own env var, so each can
+// be rotated or locked down on its own) plus the app's fixed WebView origins.
+//
+// The rule lives in config/cors.js because Socket.IO needs the SAME answer —
+// it used to carry its own, website-only list, which is why the app could reach
+// every REST route but never complete a socket.io handshake. Put your exact
+// production URL(s) in CORS_ORIGINS / ADMIN_CORS_ORIGINS.
+app.use(cors(corsOptions));
 
 // ─── Cookie Parser ──────────────────────────────────────────────────────────
 // Parse cookies for httpOnly refresh tokens
@@ -382,6 +360,8 @@ app.use('/api/app',           require('./routes/appClient.routes'));
 // resolve dead-ends for exactly the people a re-engagement blast is aimed at.
 // The frontend route of the same name calls this and navigates in-app.
 app.use('/api/r',             require('./routes/campaignLink.routes'));
+// Live listings as a sitemap, proxied onto www by the frontend's vercel.json.
+app.use('/api/sitemap',       require('./routes/sitemap.routes'));
 // UPLOAD limiter — new. This route mints signed Cloudinary credentials, so an
 // unthrottled caller could burn storage/bandwidth quota; it previously relied
 // on the global limiter alone.

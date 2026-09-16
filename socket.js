@@ -24,6 +24,9 @@
  */
 
 const { Server } = require('socket.io');
+// The same allow-list the HTTP API uses. See the note in config/cors.js: a
+// second, website-only list here is what kept the installed app off the socket.
+const { corsOptions } = require('./config/cors');
 const jwt = require('jsonwebtoken');
 const env = require('./config/env');
 const Call = require('./models/Call');
@@ -266,10 +269,11 @@ async function shutdownSocketRedis() {
  */
 function initSocket(httpServer) {
   const io = new Server(httpServer, {
-    cors: {
-      origin: env.corsOrigins,
-      credentials: true,
-    },
+    // The same rule the HTTP API answers with (config/cors.js). This was
+    // `env.corsOrigins` — the website's origins only — so the installed app
+    // (origin https://localhost) was refused on every handshake and chat,
+    // calls and live Living sync never connected there.
+    cors: corsOptions,
     // Optimize for Bangladesh mobile networks:
     // • Aggressive ping to detect drops quickly on 3G/4G.
     // • Reasonable timeout before declaring a disconnect.

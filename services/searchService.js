@@ -104,6 +104,16 @@ function buildSearchFilter(rawFilters = {}) {
   if (rawFilters.division && rawFilters.division !== 'all') {
     filter.division = String(rawFilters.division).toLowerCase();
   }
+  // One owner's listings — the public landlord profile. That page used to pull
+  // the newest 100 listings site-wide and filter them in the browser, so an
+  // owner whose listings weren't among those 100 showed fewer than they have.
+  // A malformed id matches nothing rather than 500ing, like `ids` above.
+  if (rawFilters.landlordId) {
+    const owner = String(rawFilters.landlordId).trim();
+    filter.ownerUserId = mongoose.Types.ObjectId.isValid(owner)
+      ? new mongoose.Types.ObjectId(owner)
+      : { $in: [] };
+  }
   if (rawFilters.type)      filter.type      = rawFilters.type;
   if (rawFilters.category)  filter.category  = rawFilters.category;
   // Normalise legacy intent spellings to canonical before filtering.

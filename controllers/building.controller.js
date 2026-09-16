@@ -15,6 +15,7 @@ const Building = require('../models/Building');
 const Unit     = require('../models/Unit');
 const Booking  = require('../models/Booking');
 const ApiError = require('../utils/ApiError');
+const { toAsciiDigits } = require('../utils/roomKey');
 
 const { RESIDENTIAL_SUB_CATEGORIES, FLAT_SUB_CATEGORIES } = Building.ENUMS;
 // Seats held, not heads counted — one member can hold a whole room. Shared with
@@ -48,8 +49,8 @@ function isObjectId(v) {
 // 101 · 110 · 102. Compare the leading digits numerically and fall back to a
 // plain locale compare for names like "A" or "Shop-2".
 function compareRoomNumbers(a, b) {
-  const na = parseInt(String(a).replace(/\D/g, ''), 10);
-  const nb = parseInt(String(b).replace(/\D/g, ''), 10);
+  const na = parseInt(toAsciiDigits(a).replace(/\D/g, ''), 10);
+  const nb = parseInt(toAsciiDigits(b).replace(/\D/g, ''), 10);
   if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
 }
@@ -73,8 +74,9 @@ function sortUnits(units) {
 const ROOM_RANGE_MAX = 200;
 
 function expandRoomRange(from, to) {
-  const a = String(from || '').trim();
-  const b = String(to || '').trim();
+  // ১০১ → ১০৯ is the same nine rooms; `\d` below only knows ASCII.
+  const a = toAsciiDigits(from || '').trim();
+  const b = toAsciiDigits(to || '').trim();
   if (!a || !b) throw ApiError.badRequest('রুম নম্বরের শুরু ও শেষ দুটোই দিন।');
 
   const shape = /^(\D*)(\d+)(\D*)$/;
@@ -292,7 +294,9 @@ async function createUnit(req, res, next) {
       buildingId:  building._id,
       landlordId:  req.user._id,
       floor:       Math.round(flr),
-      roomNumber:  String(roomNumber).trim(),
+      // "১০১" and "101" are one door. Stored one way, so the floor's unique
+      // index can see the duplicate and older app builds can't split a room.
+      roomNumber:  toAsciiDigits(roomNumber).trim(),
       seatCapacity: seats,
       // Fall back to the building's defaults so a landlord entering 30 rooms
       // types the rent once, not thirty times.
@@ -445,7 +449,7 @@ async function updateUnit(req, res, next) {
 
     const { floor, roomNumber, seatCapacity, monthlyRent, serviceCharge, rentDueDay, notes, suitableFor } = req.body || {};
     if (floor !== undefined && Number.isFinite(Number(floor))) unit.floor = Math.round(Number(floor));
-    if (roomNumber !== undefined && String(roomNumber).trim()) unit.roomNumber = String(roomNumber).trim();
+    if (roomNumber !== undefined && String(roomNumber).trim()) unit.roomNumber = toAsciiDigits(roomNumber).trim();
     if (monthlyRent   !== undefined) unit.monthlyRent   = Math.max(0, Number(monthlyRent) || 0);
     if (serviceCharge !== undefined) unit.serviceCharge = Math.max(0, Number(serviceCharge) || 0);
     if (rentDueDay    !== undefined) unit.rentDueDay    = Math.min(28, Math.max(1, Number(rentDueDay) || 5));

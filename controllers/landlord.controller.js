@@ -44,12 +44,19 @@ async function getLandlord(req, res, next) {
     const user = await User.findById(id).lean();
     if (!user) return res.status(404).json({ message: 'Landlord not found' });
 
-    // A landlord must actually *be* a landlord. If they only carry the
-    // 'tenant' role we treat this URL as 404 to avoid leaking that the
-    // user exists.
-    const isLandlord = Array.isArray(user.roles)
-      ? user.roles.includes('landlord')
-      : user.role === 'landlord';
+    // A landlord must actually *be* a landlord. A pure tenant stays a 404 so
+    // this URL never leaks that the account exists.
+    //
+    // Three signals, any one enough. `roles` alone was not: an account can
+    // carry the landlord role only in the legacy `role` field, and someone
+    // with live listings is publicly a landlord already — their name is on
+    // every card. Checking `roles` only is why a landlord with two active
+    // listings got 404 on their own profile, and every property page and
+    // homepage card of theirs asked for a landlord and got nothing back.
+    const isLandlord =
+      (Array.isArray(user.roles) && user.roles.includes('landlord'))
+      || user.role === 'landlord'
+      || !!(await Property.exists({ ownerUserId: user._id, status: 'active' }));
     if (!isLandlord) return res.status(404).json({ message: 'Landlord not found' });
 
     // ── Derive cheap aggregates from their property list. We intentionally
