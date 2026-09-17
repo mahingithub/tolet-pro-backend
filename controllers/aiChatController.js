@@ -1,7 +1,7 @@
 const ApiError = require("../utils/ApiError");
 const Property = require("../models/Property");
 const AIGuide = require("../models/AIGuide");
-const searchService = require("../services/searchService");
+const aiPropertySearch = require("../services/aiPropertySearch");
 
 // Which Google backend is live (Vertex AI or AI Studio), the SDK differences
 // between them, and the client itself — all decided in one place, from the
@@ -14,13 +14,17 @@ const {
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
 // ── Property-search tool ────────────────────────────────────────────────────
-// Enum values mirror models/Property.js EXACTLY so Gemini can only emit filters
-// the database understands. Keep these in lockstep with the model if the enums
-// ever change.
-const DIVISIONS  = ['dhaka', 'chittagong', 'sylhet', 'rajshahi', 'khulna', 'barishal', 'rangpur', 'mymensingh'];
-const TYPES      = ['flat', 'apartment', 'sublet', 'hostel', 'single_room', 'independent', 'house', 'duplex', 'studio', 'penthouse', 'land', 'building', 'office', 'shop', 'showroom', 'restaurant'];
-const CATEGORIES = ['family', 'bachelor_male', 'bachelor_female', 'sublet', 'student', 'ready_flat', 'used', 'new_project', 'investment', 'corporate', 'startup', 'retail', 'warehouse'];
-const INTENTS    = ['rent', 'sale', 'commercial'];
+// The enums come STRAIGHT from the model. They used to be hand-copied here with
+// a comment promising they mirrored it exactly, and they had drifted: the copy
+// was missing student_male, student_female, working_professional, co_ed,
+// wholesale, fast_food, brand_outlet and a dozen more. Gemini can only emit a
+// value that is in the declared enum, so every listing filed under one of those
+// categories was unreachable by category — including most of the live hostels
+// and shops. Importing removes the class of bug rather than re-fixing the copy.
+const DIVISIONS  = Property.ENUMS.DIVISIONS;
+const TYPES      = Property.ENUMS.PROPERTY_TYPES.filter((t) => t !== 'apartment'); // legacy alias, normalised to 'flat' on write
+const CATEGORIES = Property.ENUMS.CATEGORIES;
+const INTENTS    = ['rent', 'sale', 'commercial']; // canonical three; the model's enum also carries legacy write-time aliases
 
 const searchPropertiesTool = {
 	functionDeclarations: [
@@ -33,11 +37,13 @@ const searchPropertiesTool = {
 				"Translate Bengali terms to the English enum values (e.g. 'ঢাকা' -> 'dhaka', 'ফ্যামিলি' -> 'family', " +
 				"'ব্যাচেলর' -> 'bachelor_male', 'ভাড়া' -> 'rent', 'বিক্রি' -> 'sale'). " +
 				"Put specific neighbourhood/area/landmark names (e.g. Dhanmondi, Mirpur, Gulshan, Uttara) into 'q'. " +
-				"Omit any field you are unsure about instead of guessing.",
+				"Omit any field you are unsure about instead of guessing — an extra filter can only HIDE listings. " +
+				"The search widens by itself when the exact combination has nothing, and reports in matchQuality/dropped " +
+				"what it had to ignore, so never call it a second time just to retry a looser version of the same question.",
 			parameters: {
 				type: SchemaType.OBJECT,
 				properties: {
-					q:        { type: SchemaType.STRING, description: "Free-text keywords: specific area/neighbourhood/landmark names, or anything the other fields don't cover. Map spelling variants to one canonical area name (e.g. Dhanmondi/ধানমন্ডি/Dhanmondi 27, Mirpur/মিরপুর/Mirpur 10, Uttara/উত্তরা, Mohammadpur/মোহাম্মদপুর, Bashundhara/বসুন্ধরা, Gulshan/গুলশান, Banani/বনানী)." },
+					q:        { type: SchemaType.STRING, description: "ONLY the place: the area / neighbourhood / landmark / road the user named (e.g. 'Dhanmondi', 'Uttara Sector 12', 'Mirpur 10'). NEVER put property words in here — 'flat', 'bachelor', 'family', 'room', 'hostel', 'বাসা', 'ভাড়া' and the like belong in type/category/intent; inside q they only hide listings, because every word in q has to appear literally in the listing's own text. Map spelling variants to one canonical area name (Dhanmondi/ধানমন্ডি/Dhanmondi 27, Mirpur/মিরপুর/Mirpur 10, Uttara/উত্তরা, Mohammadpur/মোহাম্মদপুর, Bashundhara/বসুন্ধরা, Gulshan/গুলশান, Banani/বনানী). Omit entirely if the user named no place." },
 					division: { type: SchemaType.STRING, enum: DIVISIONS, description: "Administrative division (major city region)." },
 					type:     { type: SchemaType.STRING, enum: TYPES, description: "Property type." },
 					category: { type: SchemaType.STRING, enum: CATEGORIES, description: "Who/what the listing is for (family, bachelor, student, corporate, etc.)." },
@@ -113,60 +119,30 @@ const suggestAppActionsDecl = {
 	},
 };
 
-// Execute the search the AI asked for, REUSING the same buildSearchFilter the
-// rest of the app uses. OOM-safe: the aggregation collapses any legacy base64
-// coverPhoto to '' inside Mongo, so it never loads into Node memory (matches the
-// hardening already applied across property/inquiry services).
-async function runPropertySearch(args = {}) {
-	const filterInput = {};
-	if (args.q)        filterInput.q        = String(args.q);
-	if (args.division) filterInput.division = String(args.division).toLowerCase();
-	if (args.type)     filterInput.type     = String(args.type);
-	if (args.category) filterInput.category = String(args.category);
-	if (args.intent)   filterInput.intent   = String(args.intent);
-	if (args.minPrice != null) filterInput.minPrice = args.minPrice;
-	if (args.maxPrice != null) filterInput.maxPrice = args.maxPrice;
+// The search itself — including the relaxation ladder that keeps a slightly
+// over-specified question from coming back as "nothing found" — lives in
+// services/aiPropertySearch.js. See the header there for why.
 
-	const filter = searchService.buildSearchFilter(filterInput);
-	if (!filter.status) filter.status = "active"; // only surface live listings
+// ── Greeting hygiene ────────────────────────────────────────────────────────
+// Told to greet with "আসসালামু আলাইকুম", the model greets with it in EVERY
+// reply, so a five-message conversation opens with salaam five times. The
+// system instruction now says to greet once; this is the guarantee, because a
+// prompt rule about what NOT to say is exactly the kind a model drifts off.
+// A greeting the user themselves opened with still gets answered in kind.
+const LEADING_GREETING_RE =
+	/^[\s"'`]*(?:আসসালামু\s*আলাইকুম(?:\s*ওয়া\s*রাহমাতুল্লাহ\S*)?|ওয়ালাইকুম\s*আসসালাম|আস[\s-]*সালাম|assalamu?\s*'?alaikum|as-?salamu?\s*alaykum|walaikum\s*assalam|নমস্কার|আদাব|হ্যালো|হাই|hello|hey|hi)(?=$|[\s!,.।—–…?])[\s!,.।—–…?]*/iu;
 
-	if (args.beds  != null && Number.isFinite(+args.beds))  filter.beds  = { $gte: +args.beds };
-	if (args.baths != null && Number.isFinite(+args.baths)) filter.baths = { $gte: +args.baths };
+const USER_GREETED_RE =
+	/(আসসালামু\s*আলাইকুম|ওয়ালাইকুম|সালাম|নমস্কার|আদাব|হ্যালো|assalam|salam|\bhello\b|\bhi\b|\bhey\b)/iu;
 
-	const sort = searchService.buildSortOptions("newest");
-
-	const docs = await Property.aggregate([
-		{ $match: filter },
-		{ $sort: sort },
-		{ $limit: 6 },
-		{
-			$project: {
-				title: 1, price: 1, beds: 1, baths: 1, sqft: 1,
-				type: 1, category: 1, intent: 1, division: 1,
-				location: 1, area: 1, district: 1,
-				coverPhoto: {
-					$cond: [
-						{ $regexMatch: { input: { $ifNull: ["$coverPhoto", ""] }, regex: /^https?:\/\//i } },
-						"$coverPhoto",
-						"",
-					],
-				},
-			},
-		},
-	]);
-
-	return docs.map((d) => ({
-		id:         String(d._id),
-		title:      d.title || "Property",
-		price:      d.price ?? null,
-		beds:       d.beds ?? null,
-		baths:      d.baths ?? null,
-		sqft:       d.sqft ?? null,
-		type:       d.type || "",
-		location:   [d.location, d.area, d.district].filter(Boolean)[0] || "",
-		coverPhoto: d.coverPhoto || "",
-	}));
+function stripRepeatGreeting(reply, { isFirstReply, userText }) {
+	if (isFirstReply) return reply;                       // the one reply that may greet
+	if (USER_GREETED_RE.test(String(userText || ""))) return reply; // they greeted us; greet back
+	const stripped = String(reply).replace(LEADING_GREETING_RE, "");
+	// Never strip a reply down to nothing — a bare "হ্যালো!" answer stays as is.
+	return stripped.trim() ? stripped : reply;
 }
+exports.stripRepeatGreeting = stripRepeatGreeting; // exported for tests
 
 const SYSTEM_INSTRUCTION = `You are the TO-LET PRO Assistant — a personal property-search helper for people renting or listing property in Bangladesh through the TO-LET PRO app. Act like a sharp, helpful human assistant, not a generic chatbot.
 
@@ -174,7 +150,9 @@ LANGUAGE & TONE
 
 - ALWAYS reply in natural, conversational Bengali (বাংলা) by DEFAULT — even when the user writes to you in English, Banglish, or any other language. Bengali is the default for every user. A user typing "hello" or "show me flats in Dhanmondi" still gets a Bengali answer.
 
-- When greeting the user, ALWAYS use "আসসালামু আলাইকুম" (Assalamu Alaikum) instead of "নমস্কার" (Namaskar).
+- GREET EXACTLY ONCE PER CONVERSATION. If there is ANY earlier turn of yours in this conversation, you have already greeted: open the reply with the answer itself and nothing else. No "আসসালামু আলাইকুম", no "হ্যালো", no "আবার স্বাগতম" — not even a short one. Greeting someone you are already mid-conversation with is the single most robotic thing you can do, and it is what people complain about most.
+
+- When you DO greet — only in your very first reply, or when the user greets you first — use "আসসালামু আলাইকুম" (Assalamu Alaikum), never "নমস্কার" (Namaskar).
 
 - The ONLY exception: if the user EXPLICITLY asks you to reply in a specific language ("reply in English", "ইংরেজিতে বলো", "answer me in Hindi", "speak English please"), then switch to that language and keep using it for the rest of the conversation until they ask you to switch again. Merely writing to you in English is NOT an explicit request — keep replying in Bengali.
 
@@ -194,23 +172,31 @@ GROUNDING RULES (never break these)
 
 SEARCH FLOW (follow in order)
 
+0. NEVER say you are searching, looking, or checking without calling search_properties in that SAME turn. "দেখছি…" / "খুঁজছি…" as a standalone message that ends your turn is a broken promise — the user waits for results that are never coming. Either call the tool now, or ask your clarifying question. Nothing in between.
+
 1. Extract what you can: area, budget (min/max), property type, tenant category, bedrooms.
 
-2. If area AND budget are both missing or too vague ("cheap", "somewhere nice"), ask ONE short clarifying question before searching — don't guess. Example: "কোন এলাকায় খুঁজছেন, আর বাজেট কত?"
+2. Ask ONE short clarifying question before searching ONLY when you have NOTHING usable at all — no area, no budget, no property type ("কিছু একটা দেখান", "বাসা লাগবে"). Example: "কোন এলাকায় খুঁজছেন, আর বাজেট কত?" If the user named an area, OR a budget, OR a type — search FIRST with what you have. A search with one filter is far more useful than a question, because the search widens by itself and will still come back with something to talk about.
 
 3. If the user skips the clarifying question ("just show me", "jaw ache dekhao"), proceed with a best-effort search on whatever filters you have, and mention the results may be broad.
 
-4. Before calling the tool, confirm your understanding in one line: "Searching: Dhanmondi, ৳15,000–20,000, family flat, 2 bed"
+4. Set only the filters the user actually expressed. Every extra filter you guess at narrows the search. In particular: do not invent a category — if they said "bachelor" and meant nothing more precise, "bachelor_male" is a guess about gender, so prefer to leave category out. Put ONLY the place name in 'q'.
 
-5. Call search_properties with normalized filters (see NORMALIZATION below).
+5. Call search_properties with normalized filters (see NORMALIZATION below). Call it ONCE per question: it descends its own ladder of looser searches internally, so calling it again with fewer filters just repeats work it already did.
 
-6. On results:
+6. On results, read matchQuality and dropped[] from the tool response and be honest about which one you got:
 
-   - Found: one short natural sentence, then let the property cards render. Don't restate fields already visible on the cards.
+   - "exact" — everything they asked for. One short natural sentence, then let the property cards render. Don't restate fields already visible on the cards.
 
-   - Zero results: say so plainly, suggest exactly ONE adjustment (nearby area / wider budget / different type), and ask if they want you to try it.
+   - "relaxed" — the exact combination had nothing, so the listed dropped[] filters were ignored. SAY WHICH ONES in plain language BEFORE the cards: "উত্তরায় ঠিক ব্যাচেলর ফ্ল্যাট এই মুহূর্তে নেই — তবে ব্যাচেলরদের জন্য এই হোস্টেলটি আছে।" Never present these as if they matched the request.
 
-   - matchQuality = "nearby": explicitly tell the user these are close matches, not exact-area matches.
+   - "nearby" — nothing in that exact area; these are from the wider city/division. Say that explicitly: "ঠিক এই এলাকায় পাইনি, কাছাকাছি এগুলো আছে।"
+
+   - "other_areas" — nothing in their area at all; these are from completely different areas. Say so plainly and let them decide: "উত্তরায় এখন কিছু নেই। অন্য এলাকায় যা আছে দেখাচ্ছি — আগ্রহী হলে বলুন।"
+
+   - budgetWidenedTo is a number — nothing inside their budget; you are showing slightly costlier listings. Name the real budget you ended up showing.
+
+   - "none" — the catalogue genuinely has nothing. Only THEN say you found nothing. Offer to set a Smart Alert (smart_alerts) so they hear the moment something is listed, and suggest exactly ONE adjustment.
 
 NORMALIZATION (apply before calling the tool)
 
@@ -376,6 +362,7 @@ Video rules:
 		// Tool-calling loop. Gemini may ask to run search_properties; we execute
 		// it and feed the results back. Bounded to a few rounds for safety.
 		let properties = [];
+		let searchOutcome = null;
 		let suggestedGuideId = null;
 		let suggestedActionIds = [];
 		let rounds = 0;
@@ -388,15 +375,25 @@ Video rules:
 			const toolResponses = [];
 			for (const call of calls) {
 				if (call.name === "search_properties") {
-					const found = await runPropertySearch(call.args || {});
-					properties = found; // remember the latest search's cards for the client
+					const hit = await aiPropertySearch.searchListings(call.args || {});
+					properties = hit.properties; // remember the latest search's cards for the client
+					searchOutcome = hit;
 					toolResponses.push({
 						functionResponse: {
 							name: call.name,
 							response: {
-								count: found.length,
-								results: found.map((p) => ({
-									title: p.title, price: p.price, beds: p.beds, baths: p.baths, location: p.location, type: p.type,
+								count: hit.properties.length,
+								// How close this is to what was actually asked for. The
+								// model is instructed to SAY which of these it got —
+								// showing a hostel as if it were the requested bachelor
+								// flat is worse than showing nothing.
+								matchQuality:    hit.matchQuality,
+								dropped:         hit.dropped,
+								budgetWidenedTo: hit.budgetWidenedTo,
+								searched:        hit.searched,
+								results: hit.properties.map((p) => ({
+									title: p.title, price: p.price, beds: p.beds, baths: p.baths,
+									location: p.location, type: p.type, category: p.category,
 								})),
 							},
 						},
@@ -430,7 +427,12 @@ Video rules:
 			rounds += 1;
 		}
 
-		const replyText = answerText.trim() || "দুঃখিত, এই মুহূর্তে উত্তরটি দিতে পারছি না।";
+		// Drop the salaam the model opens every single turn with (see
+		// stripRepeatGreeting) before anything else looks at the text.
+		const isFirstReply = !formattedHistory.some((m) => m.role === "model");
+		const replyText =
+			stripRepeatGreeting(answerText, { isFirstReply, userText: text }).trim() ||
+			"দুঃখিত, এই মুহূর্তে উত্তরটি দিতে পারছি না।";
 
 		// Deterministic fallback: if Gemini did NOT attach a guide, match the
 		// admin-set keywords against the user's question ourselves. This is the
@@ -460,6 +462,14 @@ Video rules:
 			}
 		}
 
+		// A search that found nothing even at the bottom of the relaxation ladder
+		// is the one dead end the assistant can't talk its way out of — so give
+		// the user somewhere to go rather than an apology on its own. Deterministic
+		// so it doesn't depend on the model remembering to attach the buttons.
+		if (searchOutcome && !searchOutcome.properties.length && !suggestedActionIds.length) {
+			suggestedActionIds = ["smart_alerts", "browse_properties"];
+		}
+
 		// Resolve action ids → { label, route } buttons, labelled in the user's
 		// current UI language.
 		const actions = suggestedActionIds.map((id) => ({
@@ -467,7 +477,24 @@ Video rules:
 			route: APP_ACTIONS[id].route,
 		}));
 
-		return res.status(200).json({ text: replyText, properties, videoGuide, actions });
+		return res.status(200).json({
+			text: replyText,
+			properties,
+			videoGuide,
+			actions,
+			// How close the cards are to what was asked for ('exact' | 'relaxed' |
+			// 'nearby' | 'other_areas' | 'none'). The reply text already says it;
+			// this is the machine-readable copy for the widget and for debugging a
+			// "why did it show me that?" report.
+			search: searchOutcome
+				? {
+					matchQuality:    searchOutcome.matchQuality,
+					dropped:         searchOutcome.dropped,
+					budgetWidenedTo: searchOutcome.budgetWidenedTo,
+					searched:        searchOutcome.searched,
+				}
+				: undefined,
+		});
 	} catch (error) {
 		// Name the backend: the reply below is the same friendly "we're busy"
 		// either way, so the log line is the only place that says whether it was
