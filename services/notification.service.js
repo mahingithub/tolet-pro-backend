@@ -60,7 +60,7 @@ function clamp(text, max) {
   return `${out}…`;
 }
 
-async function emit({ userId, type, title, body, data, skipPush }) {
+async function emit({ userId, type, title, body, data, skipPush, collapseKey }) {
   if (!userId) return null;
 
   let doc;
@@ -132,9 +132,26 @@ async function emit({ userId, type, title, body, data, skipPush }) {
   // the dead ones, so it is the single fan-out path. An earlier version also
   // looped the tokens and sent to each android/ios one individually before
   // calling this, which delivered every notification TWICE on native devices.
+  //
+  // `type` is passed on so the push can be routed to the right Android channel
+  // and checked against the user's per-topic switches and quiet hours — see
+  // services/notifyPolicy.js. Note what is NOT conditional on that policy: the
+  // Notification row above and the socket broadcast both already happened. A
+  // muted user still gets the badge, the bell entry and the live in-app toast;
+  // muting governs whether their phone is allowed to INTERRUPT them, not
+  // whether they are told.
+  //
+  // `notificationId` rides along in data so a tapped push can mark exactly that
+  // row read instead of guessing.
   if (!skipPush) {
     firebaseAdmin
-      .sendToUser(userId, { title: doc.title, body: doc.body, data })
+      .sendToUser(userId, {
+        title: doc.title,
+        body: doc.body,
+        data: { ...(data || {}), notificationId: String(doc._id) },
+        type,
+        collapseKey: collapseKey || '',
+      })
       .catch(() => {});
   }
 

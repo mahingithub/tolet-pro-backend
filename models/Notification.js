@@ -15,6 +15,7 @@
  *   - 'rent_invoice'     → tenant receives a new rent invoice
  *   - 'rent_overdue'     → tenant receives a notification about an overdue rent payment
  *   - 'rent_updated'     → landlord changed the tenant's rent/lease terms
+ *   - 'rent_due_summary' → LANDLORD receives a digest of unpaid tenants
  *   - 'marketing'        → admin-composed promotional blast (Subscriptions console)
  *   - 'tenant_onboarding'→ a tenant self-onboarded through an invite QR / link
  *
@@ -39,6 +40,11 @@ const NotificationSchema = new mongoose.Schema(
       enum: [
         'inquiry_new', 'inquiry_status', 'message_new', 'system', 'rent_receipt', 'rent_invoice', 'rent_overdue',
         'rent_updated',
+        // LANDLORD side, and the only rent notification that points at them:
+        // one weekly digest of every occupant who hasn't paid this month.
+        // See services/hostRentDigest.service.js for why it is a digest and not
+        // one notification per unpaid tenant.
+        'rent_due_summary',
         'message', 'inquiry', 'booking', 'payment', 'receipt', 'property', 'review',
         'support_ticket', 'support_message', 'kyc_tenant', 'kyc_landlord',
         'marketing',

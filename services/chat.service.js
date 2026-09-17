@@ -57,6 +57,13 @@ function deliverMessage({ io, senderUser, peerId, convoId, msg, preview, payload
       title: senderUser.name || 'New message',
       body: pushBody,
       data: { url: '/messages', type: 'message', conversationId: String(convoId) },
+      // Top-level `type` is what selects the channel and checks the recipient's
+      // `messages` switch — the copy inside `data` is only read by the client.
+      type: 'message',
+      // One conversation, one notification. Ten messages from the same person
+      // while the phone is in a pocket should be one entry that says the latest
+      // thing, not ten stacked entries that have to be swiped away one by one.
+      collapseKey: `chat-${convoId}`,
     })
     .catch(() => {});
   pushService

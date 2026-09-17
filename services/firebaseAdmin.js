@@ -49,12 +49,25 @@ function init() {
  * delivery to a human (the admin marketing console) need that distinction;
  * without it an unconfigured gateway is indistinguishable from a successful send.
  *
+ * `type` is the Notification type. It is what selects the Android channel and
+ * what the user's per-topic switches are checked against (services/notifyPolicy
+ * .js). Omitting it still delivers, on the default channel with only the push
+ * master switch applied — the safe direction to fail in, but pass it.
+ *
+ * `bypassPolicy` exists for the ONE case that must not consult preferences: a
+ * ringing call, which the user governs through `preferences.callNotifications`
+ * on its own path and which is worthless if it arrives silently.
+ *
  * @param {string|ObjectId} userId
- * @param {{ title?: string, body?: string, data?: object }} payload
+ * @param {{ title?: string, body?: string, data?: object, type?: string,
+ *           collapseKey?: string, bypassPolicy?: boolean }} payload
  * @returns {Promise<{ sent: number, failed: number, pruned: number, tokens: number,
- *                     skipped?: boolean, reason?: 'not_configured'|'no_token'|'error' }>}
+ *                     skipped?: boolean, reason?: 'not_configured'|'no_token'|'error'|string }>}
  */
-async function sendToUser(userId, { title = '', body = '', data = {} } = {}) {
+async function sendToUser(
+  userId,
+  { title = '', body = '', data = {}, type = '', collapseKey = '', bypassPolicy = false } = {},
+) {
   const base = { sent: 0, failed: 0, pruned: 0, tokens: 0 };
   try {
     const a = init();
@@ -63,10 +76,24 @@ async function sendToUser(userId, { title = '', body = '', data = {} } = {}) {
 
     // Lazy require avoids any model/boot-order coupling.
     const User = require('../models/User');
-    const user = await User.findById(userId).select('deviceTokens').lean();
+    // `preferences` rides along on the lookup this function already performs.
+    // Deciding policy here rather than in the caller is what keeps honouring
+    // the user's settings free: emit() would otherwise need its own round trip
+    // to Atlas for every single notification.
+    const user = await User.findById(userId).select('deviceTokens preferences').lean();
     const tokens = (user?.deviceTokens || []).map((d) => d && d.token).filter(Boolean);
     if (tokens.length === 0) return { ...base, skipped: true, reason: 'no_token' };
     base.tokens = tokens.length;
+
+    const policy = bypassPolicy
+      ? { push: true, channelId: 'toletpro_calls', silent: false }
+      : require('./notifyPolicy').decide(user, type);
+
+    // The user asked not to be pushed for this. The in-app row was already
+    // written by emit(), so nothing is lost — it is waiting in the bell.
+    if (!policy.push) {
+      return { ...base, skipped: true, reason: policy.reason || 'muted' };
+    }
 
     // FCM `data` must be a flat map of string → string.
     const stringData = {};
@@ -77,12 +104,41 @@ async function sendToUser(userId, { title = '', body = '', data = {} } = {}) {
         : (typeof v === 'object' ? JSON.stringify(v) : String(v));
     }
 
+    // `type` travels in the data dict as well as governing the channel: it is
+    // what the client's tap handler routes on (services/nativePush.js), and FCM
+    // forwards only `data` to the app — the notification envelope above is
+    // consumed by the OS.
+    if (type && !stringData.type) stringData.type = String(type);
+
     const message = {
       tokens,
       notification: { title: title || '', body: body || '' },
       data: stringData,
-      android: { priority: 'high' },
-      webpush: { headers: { Urgency: 'high' } },
+      android: {
+        // Kept for pre-Oreo devices, where priority still decides heads-up. On
+        // Android 8+ it is the channel below that decides, which is why a
+        // channelId the app has actually created is not optional.
+        priority: policy.silent ? 'normal' : 'high',
+        notification: {
+          channelId: policy.channelId,
+          // Replaces the previous notification about the same subject instead
+          // of stacking a second one beside it. Twelve separate "rent is due"
+          // entries for the same month is how a useful alert becomes noise the
+          // user swipes away without reading.
+          ...(collapseKey ? { tag: collapseKey } : {}),
+        },
+        ...(collapseKey ? { collapseKey } : {}),
+      },
+      webpush: {
+        headers: {
+          Urgency: policy.silent ? 'low' : 'high',
+          // Web Push's own collapse mechanism. The spec constrains Topic to at
+          // most 32 URL-safe-base64 characters, and a push service REJECTS the
+          // whole request for a malformed one — so a key that doesn't qualify
+          // is dropped rather than risking the delivery it was meant to tidy.
+          ...(/^[A-Za-z0-9\-_]{1,32}$/.test(collapseKey) ? { Topic: collapseKey } : {}),
+        },
+      },
     };
 
     const resp = await admin.messaging().sendEachForMulticast(message);

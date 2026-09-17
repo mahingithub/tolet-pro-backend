@@ -28,6 +28,7 @@ const { runRentReminders } = require('./rentReminder.service');
 const { runLeaseExpiryReminders } = require('./leaseExpiryReminder.service');
 const { runSoloDueReminders } = require('./soloDueReminder.service');
 const { runKhataReminders } = require('./khataReminder.service');
+const { runHostRentDigest } = require('./hostRentDigest.service');
 const { resetMonthlyBoostCredits } = require('./boost.service');
 const {
   runProviderLifecycle, expireStaleRequests, nudgeStalePrices,
@@ -309,6 +310,13 @@ function startCronJobs() {
   // daily run simply catches each one on the day it becomes due rather than
   // making everybody wait for Monday.
   const khataReminderSchedule = TEST ? '* * * * *' : '30 10 * * *';
+  // Every day, 09:15 — the LANDLORD's digest of who hasn't paid. Runs AFTER the
+  // 09:00 tenant nudges on purpose: a tenant who pays the moment they are
+  // reminded should ideally not still be on their landlord's list, and the
+  // fifteen minutes is the cheapest way to give them that chance. The sweep
+  // itself sends at most one per landlord per week, so a daily cadence is just
+  // how it finds the right day, not how often anyone hears from it.
+  const hostDigestSchedule = TEST ? '* * * * *' : '15 9 * * *';
 
   cron.schedule(invoiceSchedule, () => {
     generateMonthlyInvoices().catch((e) => console.error('[cron] invoice error:', e.message));
@@ -354,13 +362,17 @@ function startCronJobs() {
     runKhataReminders().catch((e) => console.error('[cron] khata-reminder error:', e.message));
   }, { timezone: TZ });
 
+  cron.schedule(hostDigestSchedule, () => {
+    runHostRentDigest().catch((e) => console.error('[cron] host-rent-digest error:', e.message));
+  }, { timezone: TZ });
+
   console.log(
     `[cron] started — invoices: "${invoiceSchedule}", late-fees: "${lateFeeSchedule}", ` +
     `reminders: "${reminderSchedule}", lease-expiry: "${leaseSchedule}", ` +
     `solo-due: "${soloDueSchedule}", boost-reset: "${boostResetSchedule}", ` +
     `request-expiry: "${requestExpirySchedule}", provider-lifecycle: "${lifecycleSchedule}", ` +
     `price-nudge: "${priceNudgeSchedule}", price-cap: "${priceCapSchedule}", ` +
-    `khata-reminder: "${khataReminderSchedule}", TZ: ${TZ}` +
+    `khata-reminder: "${khataReminderSchedule}", host-rent-digest: "${hostDigestSchedule}", TZ: ${TZ}` +
     (TEST ? '  (TEST MODE: every minute)' : ''),
   );
 }
@@ -377,4 +389,5 @@ module.exports = {
   expireStaleRequests,
   nudgeStalePrices,
   runPriceCompliance,
+  runHostRentDigest,
 };
