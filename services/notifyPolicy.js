@@ -41,7 +41,13 @@ const CHANNEL = {
   MESSAGES: 'toletpro_messages',
   ACTIVITY: 'toletpro_activity',
   QUIET:    'toletpro_quiet',
-  PROMOS:   'toletpro_promos',
+  // '_v2' is load-bearing, not a version stamp. Android channel importance is
+  // immutable once created, so raising promos from LOW (no banner, no sound, no
+  // lock-screen wake) to HIGH was impossible under the old id on any device
+  // that had already run the app. The new id is the migration. It MUST stay in
+  // lockstep with NotificationChannels.java — an id the app never created falls
+  // back to the manifest default and quietly loses its banner again.
+  PROMOS:   'toletpro_promos_v2',
 };
 
 /**
@@ -94,7 +100,9 @@ const POLICY = {
   kyc_landlord:    { topic: null, channel: CHANNEL.ACTIVITY },
 
   // The only promotional type, and the only one on a channel the user can mute
-  // in system settings without losing anything they need.
+  // in system settings without losing anything they need. That mutability is
+  // what earns it a HIGH-importance channel: the user has a one-tap way out
+  // that costs them no rent alert, no message and no call.
   marketing: { topic: 'marketingPush', channel: CHANNEL.PROMOS },
 };
 
@@ -165,11 +173,17 @@ function decide(user, type, now = new Date()) {
     return { push: false, channelId: entry.channel, silent: true, reason: `topic_off:${entry.topic}` };
   }
 
-  // Marketing never gets to wake anyone. Even with the window closed it stays
-  // on the low-importance promos channel, so this only adds the silent flag.
-  if (type === 'marketing') {
-    return { push: true, channelId: CHANNEL.PROMOS, silent: true, reason: 'promo' };
-  }
+  // NOTE: marketing used to return early right here, pinned to silent:true, so
+  // an offer could never buzz. That is no longer the policy — promos now ride
+  // the normal path below and arrive with a banner on the HIGH-importance
+  // promos_v2 channel.
+  //
+  // The early return is gone rather than merely flipped, and that matters: it
+  // sat ABOVE the quiet-hours check, so marketing was the ONE type that never
+  // consulted DND. Harmless while it was silent anyway; a loud promo at 02:00
+  // is the single worst notification this app could send, and it would have
+  // been the only one the quiet window did not catch. Falling through means
+  // marketing is subject to the same DND downgrade as everything else.
 
   // The landlord's own quiet hours are scoped to inquiry pings by the schema
   // ("Suppress inquiry pings during these hours"), so they apply there and

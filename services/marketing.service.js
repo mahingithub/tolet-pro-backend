@@ -116,7 +116,7 @@ function consentOf(user) {
  * 'free' filter become `$nin` — which correctly includes the majority of users
  * who have no Subscription row at all.
  */
-function buildAudienceFilter({ tier, installed, whatsapp, search }, { tierIds, paidIds }) {
+function buildAudienceFilter({ tier, installed, whatsapp, search, role }, { tierIds, paidIds }) {
   const filter = {};
   // Both the install test and the search are $or clauses, and a Mongo query
   // document has only ONE top-level $or — assigning them both would silently
@@ -133,6 +133,20 @@ function buildAudienceFilter({ tier, installed, whatsapp, search }, { tierIds, p
 
   if (whatsapp === 'true') filter['preferences.notifications.whatsappOptIn'] = true;
   else if (whatsapp === 'false') filter['preferences.notifications.whatsappOptIn'] = { $ne: true };
+
+  // Matched against `roles[]`, NOT the single-valued `role`. `role` is whichever
+  // mode the user last switched the UI into, so filtering on it would drop a
+  // landlord who happens to be browsing as a tenant today — and that is the same
+  // person with the same properties, who should still hear about a landlord
+  // offer. `roles[]` is the canonical list of what the account has unlocked, and
+  // it is what every auth gate in the app checks.
+  //
+  // A user who is BOTH matches both filters, deliberately: they genuinely are
+  // both, and a campaign about rent collection is as relevant to them as one
+  // about finding a room. Pair this with the destination's `access` warning in
+  // the console — a landlord-only page sent to a tenant audience is the exact
+  // mismatch this filter exists to prevent.
+  if (role === 'landlord' || role === 'tenant') filter.roles = role;
 
   if (search && String(search).trim()) {
     // Escape regex metacharacters — an admin typing "+880" must not blow up
