@@ -61,7 +61,13 @@ function init() {
  * @param {string|ObjectId} userId
  * @param {{ title?: string, body?: string, data?: object, type?: string,
  *           collapseKey?: string, bypassPolicy?: boolean }} payload
+ * `silent` on the result means the push WAS delivered but on the low-importance
+ * quiet channel (the user's DND window) — no sound, no banner, shade only. It is
+ * a successful send that the recipient will not notice until they look, which is
+ * a distinction any caller reporting delivery to a human has to make.
+ *
  * @returns {Promise<{ sent: number, failed: number, pruned: number, tokens: number,
+ *                     silent?: boolean, policyReason?: string,
  *                     skipped?: boolean, reason?: 'not_configured'|'no_token'|'error'|string }>}
  */
 async function sendToUser(
@@ -171,6 +177,19 @@ async function sendToUser(
       sent: resp.successCount,
       failed: resp.failureCount,
       pruned,
+      // DELIVERED, BUT ON THE SILENT CHANNEL. Inside a Do-Not-Disturb window
+      // notifyPolicy routes the push to toletpro_quiet (IMPORTANCE_LOW), which
+      // on Android means no sound, no vibration and no heads-up banner — it
+      // appears in the shade and nowhere else, so the user sees it only if they
+      // pull the shade down on their own.
+      //
+      // That is the correct behaviour and it is NOT a failure, but reporting it
+      // as an ordinary `sent` is how "I sent 10 pushes and nobody heard
+      // anything" becomes an unexplainable bug report. Callers that show
+      // delivery to a human (the admin marketing console) render this
+      // separately; everyone else can ignore it.
+      silent: !!policy.silent,
+      ...(policy.reason ? { policyReason: policy.reason } : {}),
     };
   } catch (err) {
     console.warn('[firebase-admin] sendToUser failed:', err.message);

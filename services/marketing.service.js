@@ -29,6 +29,7 @@
 
 const User = require('../models/User');
 const Subscription = require('../models/Subscription');
+const PushSubscription = require('../models/PushSubscription');
 const env = require('../config/env');
 const { tierOf } = require('../utils/subscriptionTier');
 const { publicAppBaseUrl } = require('../utils/inviteToken');
@@ -160,6 +161,91 @@ function buildAudienceFilter({ tier, installed, whatsapp, search, role }, { tier
 }
 
 /**
+ * Add one more condition to an audience filter without disturbing what is
+ * already there.
+ *
+ * Everything in this file composes into `$and` rather than assigning top-level
+ * keys, for the same reason buildAudienceFilter does: a Mongo query document
+ * holds ONE `$or` and ONE `$and`, so a second assignment silently replaces the
+ * first instead of narrowing it. A reach count that quietly dropped the install
+ * filter would over-report the audience, which is precisely the kind of lie
+ * these numbers exist to stop.
+ */
+function withClause(filter, clause) {
+  return { ...filter, $and: [...(filter.$and || []), clause] };
+}
+
+/**
+ * How many of THIS audience each channel can actually reach.
+ *
+ * WHY THIS EXISTS. The console promised one number — "Send to 32" — for every
+ * channel, then delivered to 1 on WhatsApp because 31 of those 32 have never
+ * opted in. Nothing was broken; the consent gates were working exactly as
+ * designed. But the only place that truth appeared was the result screen AFTER
+ * the send, phrased as "31 skipped", which reads as a failure rather than as
+ * the arithmetic it is. An admin cannot plan a campaign around a number they
+ * are only shown once it is too late to change it.
+ *
+ * Each count applies the SAME gate deliverToUser applies, so these are
+ * predictions of that function's behaviour, not an independent estimate:
+ *   • inapp    — everybody. A Notification row needs no consent and no device.
+ *   • push     — marketing push not turned off, AND somewhere to send it: an
+ *                FCM device token or a web-push subscription. Both, because
+ *                deliverToUser tries both transports and a PWA user has only
+ *                the second.
+ *   • sms      — SMS alerts not turned off, and a phone number on file.
+ *   • whatsapp — explicitly opted in, and a phone number on file.
+ *
+ * Banned accounts are excluded from every count, because sendOffer excludes
+ * them from the send.
+ */
+async function channelReach(baseFilter) {
+  const filter = { ...baseFilter, isBanned: { $ne: true } };
+
+  // Which users have a browser push subscription. A separate collection (see
+  // models/PushSubscription.js), so it cannot be expressed as a clause on User
+  // — but it is small (one row per subscribed browser), so resolving it to an
+  // id list is cheap and keeps the push count honest for PWA users, who have no
+  // deviceTokens entry at all.
+  let webPushUserIds = [];
+  try {
+    webPushUserIds = await PushSubscription.distinct('userId');
+  } catch {
+    // Degrade to device tokens only rather than failing the whole table load:
+    // an undercount in an advisory number beats a broken Subscriptions page.
+    webPushUserIds = [];
+  }
+
+  const [inapp, push, sms, whatsapp] = await Promise.all([
+    User.countDocuments(filter),
+    User.countDocuments(
+      withClause(withClause(filter, {
+        'preferences.notifications.marketingPush': { $ne: false },
+      }), {
+        $or: [
+          { deviceTokens: { $elemMatch: { token: { $exists: true, $ne: '' } } } },
+          { _id: { $in: webPushUserIds } },
+        ],
+      }),
+    ),
+    User.countDocuments(
+      withClause(withClause(filter, { 'preferences.smsAlerts': { $ne: false } }), {
+        phone: { $exists: true, $nin: ['', null] },
+      }),
+    ),
+    User.countDocuments(
+      withClause(withClause(filter, {
+        'preferences.notifications.whatsappOptIn': true,
+      }), {
+        phone: { $exists: true, $nin: ['', null] },
+      }),
+    ),
+  ]);
+
+  return { inapp, push, sms, whatsapp };
+}
+
+/**
  * Resolve every subscription into a userId → tier map, plus the id sets the
  * tier filter needs. One query: subscriptions are one-per-host, so this stays
  * small relative to the user collection.
@@ -265,16 +351,24 @@ async function listAudience(q = {}) {
   // Headline totals for the whole user base, independent of the current page
   // and filters — the admin wants "how many Pro users exist", not "how many
   // are on screen".
-  const [allUsers, installedTotal, whatsappTotal] = await Promise.all([
+  const [allUsers, installedTotal, whatsappTotal, reach] = await Promise.all([
     User.countDocuments({}),
     User.countDocuments({ $or: INSTALLED_CLAUSES }),
     User.countDocuments({ 'preferences.notifications.whatsappOptIn': true }),
+    // Scoped to the CURRENT filter, unlike the three above: this is what the
+    // composer promises per channel, so it has to describe the audience the
+    // admin is looking at rather than the whole user base.
+    channelReach(filter),
   ]);
 
   return {
     rows,
     total,
     reachable,
+    // Per-channel reachability for THIS filter — see channelReach(). `reachable`
+    // above is the in-app number and the ceiling for every other channel; this
+    // is how far each one actually gets.
+    reach,
     page,
     limit,
     counts: {
@@ -497,7 +591,18 @@ async function deliverToUser(user, { channels, title, body, smsText, whatsapp, d
       const errored = reasons.includes('error');
 
       if (delivered > 0) {
-        result.channels.push = { ok: true, devices: delivered };
+        // A push that landed inside the recipient's quiet hours was delivered
+        // to the LOW-importance channel: it is sitting in their shade with no
+        // sound and no banner. Counted as sent (it was), flagged as silent so
+        // the console can say so — "10 sent" against an audience that heard
+        // nothing is otherwise indistinguishable from a broken gateway, and it
+        // is the single most common reason an admin reports that push "does not
+        // work". Only FCM reports this; web-push has no channel concept.
+        result.channels.push = {
+          ok: true,
+          devices: delivered,
+          ...(fcmRes?.silent && !(webRes?.sent > 0) ? { silent: true } : {}),
+        };
       } else {
         // Nothing reached this user. Classify by what the admin can act on
         // first: a broken transport outranks a rejection, which outranks
@@ -747,13 +852,20 @@ async function sendOffer(opts = {}) {
   // cause is consent or a missing API key.
   const sent = {};
   for (const ch of channels) {
-    sent[ch] = { ok: 0, skipped: 0, failed: 0, configError: false, reasons: {} };
+    sent[ch] = { ok: 0, silent: 0, skipped: 0, failed: 0, configError: false, reasons: {} };
     for (const r of results) {
       const c = r.channels?.[ch];
       if (!c) continue;
       if (c.ok) sent[ch].ok += 1;
       else if (c.skipped) sent[ch].skipped += 1;
       else sent[ch].failed += 1;
+
+      // A SUBSET of `ok`, never added to it: these people were successfully
+      // pushed, inside their own quiet hours, so it arrived without a sound or
+      // a banner. Reported so the admin can tell "delivered and unnoticed"
+      // apart from "delivered and seen" — the two look identical in every
+      // other number on this screen.
+      if (c.ok && c.silent) sent[ch].silent += 1;
 
       if (c.configError) sent[ch].configError = true;
       // Keyed on `reason` ONLY — a stable, closed set of codes the console maps
@@ -786,6 +898,7 @@ module.exports = {
   isInstalled,
   consentOf,
   buildAudienceFilter,
+  channelReach,
   loadTierIndex,
   listAudience,
   channelCapabilities,
