@@ -29,6 +29,8 @@ const { runLeaseExpiryReminders } = require('./leaseExpiryReminder.service');
 const { runSoloDueReminders } = require('./soloDueReminder.service');
 const { runKhataReminders } = require('./khataReminder.service');
 const { runHostRentDigest } = require('./hostRentDigest.service');
+const { runFeatureTour } = require('./featureTour.service');
+const { runGuestTour } = require('./guestTour.service');
 const { resetMonthlyBoostCredits } = require('./boost.service');
 const {
   runProviderLifecycle, expireStaleRequests, nudgeStalePrices,
@@ -317,6 +319,24 @@ function startCronJobs() {
   // itself sends at most one per landlord per week, so a daily cadence is just
   // how it finds the right day, not how often anyone hears from it.
   const hostDigestSchedule = TEST ? '* * * * *' : '15 9 * * *';
+  // Every day, 19:30 — the new-account feature tour (days 1, 3, 7, 14).
+  //
+  // EVENING ON PURPOSE. Every other job here fires in the morning, when the
+  // recipient is being told about money with a deadline. This one is the
+  // opposite: it is a "here is something the app can do for you" nudge, and it
+  // is worth nothing to somebody halfway through their working day. Half past
+  // seven is after work, before the quiet window, and far enough from the 09:00
+  // rent nudges that a new landlord does not get two of our notifications in
+  // the same hour.
+  //
+  // The sweep sends at most one tip per person per run, so a daily cadence is
+  // how it finds each account's day, not how often anyone hears from us — four
+  // notifications in a fortnight, then nothing.
+  const featureTourSchedule = TEST ? '* * * * *' : '30 19 * * *';
+  // Every day, 19:40 — the same tour for installs with no account behind them
+  // (services/guestTour.service.js). Push only; devices that never granted
+  // notification permission are served in-app on their next launch instead.
+  const guestTourSchedule = TEST ? '* * * * *' : '40 19 * * *';
 
   cron.schedule(invoiceSchedule, () => {
     generateMonthlyInvoices().catch((e) => console.error('[cron] invoice error:', e.message));
@@ -366,13 +386,25 @@ function startCronJobs() {
     runHostRentDigest().catch((e) => console.error('[cron] host-rent-digest error:', e.message));
   }, { timezone: TZ });
 
+  cron.schedule(featureTourSchedule, () => {
+    runFeatureTour().catch((e) => console.error('[cron] feature-tour error:', e.message));
+  }, { timezone: TZ });
+
+  // Ten minutes after the account tour, not alongside it. The two sweeps touch
+  // different collections but share the FCM quota, and staggering them keeps a
+  // launch-day spike in one from delaying the other.
+  cron.schedule(guestTourSchedule, () => {
+    runGuestTour().catch((e) => console.error('[cron] guest-tour error:', e.message));
+  }, { timezone: TZ });
+
   console.log(
     `[cron] started — invoices: "${invoiceSchedule}", late-fees: "${lateFeeSchedule}", ` +
     `reminders: "${reminderSchedule}", lease-expiry: "${leaseSchedule}", ` +
     `solo-due: "${soloDueSchedule}", boost-reset: "${boostResetSchedule}", ` +
     `request-expiry: "${requestExpirySchedule}", provider-lifecycle: "${lifecycleSchedule}", ` +
     `price-nudge: "${priceNudgeSchedule}", price-cap: "${priceCapSchedule}", ` +
-    `khata-reminder: "${khataReminderSchedule}", host-rent-digest: "${hostDigestSchedule}", TZ: ${TZ}` +
+    `khata-reminder: "${khataReminderSchedule}", host-rent-digest: "${hostDigestSchedule}", ` +
+    `feature-tour: "${featureTourSchedule}", guest-tour: "${guestTourSchedule}", TZ: ${TZ}` +
     (TEST ? '  (TEST MODE: every minute)' : ''),
   );
 }
@@ -390,4 +422,6 @@ module.exports = {
   nudgeStalePrices,
   runPriceCompliance,
   runHostRentDigest,
+  runFeatureTour,
+  runGuestTour,
 };

@@ -497,6 +497,21 @@ const UserSchema = new mongoose.Schema(
         createdAt:  { type: Date, default: Date.now },
       }
     ],
+    // ─── New-account feature tour ─────────────────────────────────────────
+    // Which steps of the four-notification onboarding tour this account has
+    // already been sent. See utils/featureTips.js for the content and
+    // services/featureTour.service.js for the sweep.
+    //
+    // STORED AS THE STEP IDS, not a counter. A counter would silently re-send
+    // everything the day a tip is inserted in the middle of the list, or skip a
+    // step if one is removed. Ids are stable, so editing the tour never
+    // re-notifies anyone about a tip they already saw — which matters because
+    // this is the one campaign a user cannot unsubscribe from step by step.
+    //
+    // Append-only and small (four entries, forever). Indexed nowhere: the sweep
+    // finds candidates by createdAt and consults this field per user.
+    featureTourSent: { type: [String], default: [] },
+
     // ─── Phase Call-6: FCM device tokens for push notifications ──────────
     // One entry per browser/device the user has granted notification
     // permission on. POST /api/notifications/register-device upserts here;

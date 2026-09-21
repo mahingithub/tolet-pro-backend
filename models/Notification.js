@@ -56,6 +56,13 @@ const NotificationSchema = new mongoose.Schema(
         // this collection — he is not a User and never will be — so his half of
         // the loop goes out over WhatsApp/SMS from serviceRequestNotify.
         'service_request',
+        // The new-account feature tour — four notifications over two weeks,
+        // each about one feature, then never again. See utils/featureTips.js.
+        // Kept as its OWN type rather than reusing 'marketing' so the two can be
+        // told apart everywhere it matters: a user can be shown the tour without
+        // ever having been sent a campaign, and an admin reading someone's
+        // notification history should see which is which.
+        'feature_tip',
       ],
       required: true,
     },

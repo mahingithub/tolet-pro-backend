@@ -17,6 +17,8 @@
  */
 
 const User = require('../models/User');
+const AnonDevice = require('../models/AnonDevice');
+const guestTour = require('../services/guestTour.service');
 
 // Kinds that mean "the app is installed on this device". A plain browser tab is
 // recorded too — it is what tells us a user is reachable on the web at all —
@@ -92,6 +94,11 @@ exports.appOpened = async (req, res) => {
         },
       );
     }
+    // This install has an account now. Hand any guest tour progress over to it
+    // so somebody who saw two tips before signing up continues at three rather
+    // than being toured all over again. Non-throwing by contract and awaited
+    // only so the next launch sees a settled state.
+    await guestTour.claimDevice(deviceId, req.user._id);
   } catch (err) {
     // A heartbeat is not worth an error screen. Log and answer OK — the client
     // does not read the response, and failing it would only surface as a
@@ -100,4 +107,84 @@ exports.appOpened = async (req, res) => {
   }
 
   return res.json({ ok: true });
+};
+
+// ─── POST /api/app/device ───────────────────────────────────────────────────
+// UNAUTHENTICATED, deliberately. This is the pre-signup twin of /opened: it
+// records an install we cannot attribute to anybody, so the guest feature tour
+// has something to address. See models/AnonDevice.js.
+//
+// Body: { deviceId, token?, platform?, kind?, language?, appVersion? }
+//
+// `token` is OPTIONAL and usually absent — a device is registered whether or not
+// notification permission was granted, because a device we cannot push is still
+// a device we can show an in-app card to on its next launch. Refusing rows
+// without a token would throw away exactly the people this endpoint exists to
+// stop losing.
+exports.registerAnonDevice = async (req, res) => {
+  const body = req.body || {};
+  const deviceId = clean(body.deviceId, 64);
+
+  if (!deviceId) {
+    return res.status(400).json({ message: 'deviceId is required', code: 'device_id_required' });
+  }
+
+  const platformRaw = clean(body.platform, 20).toLowerCase();
+  const kindRaw = clean(body.kind, 20).toLowerCase();
+  const langRaw = clean(body.language, 5).toLowerCase();
+
+  const now = new Date();
+  const set = {
+    platform: PLATFORMS.includes(platformRaw) ? platformRaw : 'web',
+    kind: KINDS.includes(kindRaw) ? kindRaw : 'browser',
+    language: langRaw === 'bn' ? 'bn' : 'en',
+    lastSeenAt: now,
+  };
+
+  const appVersion = clean(body.appVersion, 32);
+  if (appVersion) set.appVersion = appVersion;
+
+  // Only written when supplied. An app that registers on launch (no token yet)
+  // and again after the permission prompt (with one) must not have the second
+  // call wipe... nor the FIRST call of a later launch clear a token we already
+  // hold, which is what an unconditional $set would do.
+  const token = clean(body.token, 4096);
+  if (token) set.token = token;
+
+  try {
+    await AnonDevice.updateOne(
+      { deviceId },
+      { $set: set, $setOnInsert: { deviceId, firstSeenAt: now, tourSent: [] } },
+      { upsert: true },
+    );
+  } catch (err) {
+    // A duplicate key here means two launches raced the upsert; the row exists,
+    // which is the outcome we wanted. Anything else is logged and swallowed —
+    // the client does not read this response and must not be blocked by it.
+    if (err?.code !== 11000) console.error('[appClient] registerAnonDevice failed:', err?.message);
+  }
+
+  return res.json({ ok: true });
+};
+
+// ─── GET /api/app/tips/pending?deviceId=… ───────────────────────────────────
+// UNAUTHENTICATED. The in-app half of the guest tour: a tip for a device that
+// cannot be pushed, handed over on app open so the app can show it as a card.
+//
+// Returns { tip: null } far more often than not — it is called on every launch
+// and most launches are not a tour day.
+//
+// The tip is marked delivered as it is handed over, because the caller displays
+// what it receives; a separate acknowledge step would only add a round trip in
+// which the app can be closed and the tip lost.
+exports.pendingTip = async (req, res) => {
+  const deviceId = clean(req.query?.deviceId, 64);
+  if (!deviceId) return res.json({ tip: null });
+
+  const tip = await guestTour.pendingGuestTip(deviceId).catch((err) => {
+    console.error('[appClient] pendingTip failed:', err?.message);
+    return null;
+  });
+
+  return res.json({ tip: tip || null });
 };

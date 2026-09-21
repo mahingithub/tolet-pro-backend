@@ -72,7 +72,7 @@ function init() {
  */
 async function sendToUser(
   userId,
-  { title = '', body = '', data = {}, type = '', collapseKey = '', bypassPolicy = false } = {},
+  { title = '', body = '', data = {}, type = '', collapseKey = '', image = '', bypassPolicy = false } = {},
 ) {
   const base = { sent: 0, failed: 0, pruned: 0, tokens: 0 };
   try {
@@ -116,9 +116,24 @@ async function sendToUser(
     // consumed by the OS.
     if (type && !stringData.type) stringData.type = String(type);
 
+    // A poster on the notification, for the feature tour and any campaign that
+    // wants one. HTTPS ONLY, and silently dropped otherwise: the image is
+    // fetched by GOOGLE'S servers, not by the phone, so a plain-http or
+    // unreachable URL fails somewhere we never see — the push still arrives,
+    // just mysteriously without its picture. Refusing to attach a URL that
+    // cannot work is the difference between "no image" and "no image, and no
+    // idea why".
+    const picture = /^https:\/\/\S+$/i.test(String(image || '')) ? String(image) : '';
+
     const message = {
       tokens,
-      notification: { title: title || '', body: body || '' },
+      notification: {
+        title: title || '',
+        body: body || '',
+        // Top level covers iOS and is the documented cross-platform field;
+        // android.notification.imageUrl below is what Android actually reads.
+        ...(picture ? { imageUrl: picture } : {}),
+      },
       data: stringData,
       android: {
         // Kept for pre-Oreo devices, where priority still decides heads-up. On
@@ -132,6 +147,10 @@ async function sendToUser(
           // entries for the same month is how a useful alert becomes noise the
           // user swipes away without reading.
           ...(collapseKey ? { tag: collapseKey } : {}),
+          // The big picture Android shows when the notification is expanded.
+          // Collapsed, it stays a normal one-line row — so a poster costs the
+          // user nothing until they choose to look at it.
+          ...(picture ? { imageUrl: picture } : {}),
         },
         ...(collapseKey ? { collapseKey } : {}),
       },
@@ -197,4 +216,73 @@ async function sendToUser(
   }
 }
 
-module.exports = { init, sendToUser };
+/**
+ * Push to ONE raw FCM token, with no user behind it.
+ *
+ * WHY THIS BYPASSES sendToUser
+ * Everything else here starts from a userId: it loads the user to find their
+ * tokens AND to read the preferences notifyPolicy decides on. A guest device
+ * has neither. There is no account to look up, no marketingPush switch to
+ * honour, and no quiet-hours window on file — so the caller has to supply the
+ * channel itself and take responsibility for when it fires.
+ *
+ * That makes this function narrower than it looks, and it should stay that way:
+ * the ONLY caller is the guest feature tour, which sends four notifications to
+ * a device that has not signed up. Anything addressed to a real account must go
+ * through sendToUser(), or it will silently ignore settings that user has set.
+ *
+ * Never throws, same contract as sendToUser. `dead: true` means FCM reported
+ * the token as permanently invalid — the caller should stop using it (an
+ * uninstall, or cleared app data).
+ *
+ * @returns {Promise<{sent:number, dead?:boolean, skipped?:boolean, reason?:string}>}
+ */
+async function sendToToken(token, { title = '', body = '', data = {}, channelId = '', image = '' } = {}) {
+  try {
+    const a = init();
+    if (!a) return { sent: 0, skipped: true, reason: 'not_configured' };
+    if (!token || typeof token !== 'string') return { sent: 0, skipped: true, reason: 'no_token' };
+
+    const stringData = {};
+    for (const [k, v] of Object.entries(data || {})) {
+      if (v === undefined || v === null) continue;
+      stringData[k] = typeof v === 'string'
+        ? v
+        : (typeof v === 'object' ? JSON.stringify(v) : String(v));
+    }
+
+    const picture = /^https:\/\/\S+$/i.test(String(image || '')) ? String(image) : '';
+
+    await admin.messaging().send({
+      token,
+      notification: {
+        title: title || '',
+        body: body || '',
+        ...(picture ? { imageUrl: picture } : {}),
+      },
+      data: stringData,
+      android: {
+        priority: 'high',
+        notification: {
+          ...(channelId ? { channelId } : {}),
+          ...(picture ? { imageUrl: picture } : {}),
+        },
+      },
+      webpush: { headers: { Urgency: 'high' } },
+    });
+
+    return { sent: 1 };
+  } catch (err) {
+    const code = err?.code || err?.errorInfo?.code || '';
+    const dead =
+      code === 'messaging/registration-token-not-registered' ||
+      code === 'messaging/invalid-registration-token' ||
+      code === 'messaging/invalid-argument';
+    // Not warned for a dead token: an uninstall is routine churn, and logging
+    // one line per departed device turns a normal sweep into a wall of noise.
+    if (!dead) console.warn('[firebase-admin] sendToToken failed:', err?.message);
+    return { sent: 0, dead, reason: dead ? 'dead_token' : 'error' };
+  }
+}
+
+module.exports = { init, sendToUser, sendToToken };

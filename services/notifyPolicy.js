@@ -104,6 +104,14 @@ const POLICY = {
   // what earns it a HIGH-importance channel: the user has a one-tap way out
   // that costs them no rent alert, no message and no call.
   marketing: { topic: 'marketingPush', channel: CHANNEL.PROMOS },
+
+  // The new-account feature tour (utils/featureTips.js). Governed by the SAME
+  // switch as marketing and routed to the same mutable channel, deliberately:
+  // however useful the tour is, it is us advertising our own product to someone
+  // who did not ask, and a user who turned promotional push off has already
+  // answered the question. Giving it its own ungoverned topic would be a way of
+  // not taking no for an answer.
+  feature_tip: { topic: 'marketingPush', channel: CHANNEL.PROMOS },
 };
 
 const TZ = process.env.CRON_TZ || 'Asia/Dhaka';

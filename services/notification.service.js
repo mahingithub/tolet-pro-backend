@@ -60,7 +60,7 @@ function clamp(text, max) {
   return `${out}…`;
 }
 
-async function emit({ userId, type, title, body, data, skipPush, collapseKey }) {
+async function emit({ userId, type, title, body, data, skipPush, collapseKey, image }) {
   if (!userId) return null;
 
   let doc;
@@ -151,6 +151,11 @@ async function emit({ userId, type, title, body, data, skipPush, collapseKey }) 
         data: { ...(data || {}), notificationId: String(doc._id) },
         type,
         collapseKey: collapseKey || '',
+        // Optional poster. Only the PUSH carries it — the Notification row
+        // above is text, because the in-app bell renders a list and an image
+        // per row would change that screen's whole design for the handful of
+        // notification types that have one.
+        image: image || '',
       })
       .catch(() => {});
   }
