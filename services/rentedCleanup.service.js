@@ -9,9 +9,12 @@
  * We deliberately DO NOT delete it right away — the host should still see the
  * listing, badged "rented" with a countdown, so they can review it / create the
  * lease. After RENTED_RETENTION_DAYS have passed since it was rented, this sweep
- * permanently removes the listing AND every child document that hangs off it
- * (inquiries, bookings, receipts, conversations, messages, notifications) via
- * the shared property.service cascade.
+ * permanently removes the LISTING — the ad — via the shared property.service
+ * cascade: the listing, its inquiries, and chats with people who never rented.
+ *
+ * The TENANCY IS NOT PART OF THE AD. Bookings, their rent ledgers, receipts and
+ * the chat with the tenant are kept and unlinked from the listing. Until
+ * 2026-09-26 this sweep deleted them too, five days after the tenant moved in.
  *
  * Driven by a setInterval in server.js (hourly). Same always-on caveat as the
  * visit-reminder sweep: on a sleeping free-tier instance the timer doesn't fire

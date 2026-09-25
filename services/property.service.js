@@ -585,50 +585,75 @@ async function updateProperty({ idOrSlug, body, user }) {
   return doc;
 }
 
-// Cascade-delete a property document and EVERY child doc that hangs off it
-// (inquiries, bookings, receipts, conversations, messages, and any bell
-// notification that deep-links to any of them). Ownership authorization is
-// the CALLER's responsibility: the host DELETE route enforces it in
-// deleteProperty() below, while the rented-cleanup cron intentionally runs
-// this with no user context. `doc` must be an already-loaded Property doc.
+// Delete a LISTING — the advert — and what exists only because of it. Ownership
+// authorization is the CALLER's responsibility: the host DELETE route enforces
+// it in deleteProperty() below, while the rented-cleanup cron intentionally
+// runs this with no user context. `doc` must be an already-loaded Property doc.
+//
+// A LISTING IS AN AD, NOT A TENANCY. This used to delete every booking with
+// this propertyId, their receipts, and every chat on the listing. The rented
+// cleanup runs it five days after a listing is rented — i.e. five days after
+// a tenant moves in — so each tenancy created from a listing was erased with
+// its whole rent ledger, its receipts (the tenant's proof of payment) and the
+// landlord↔tenant chat. Now:
+//
+//   deleted   the listing; its inquiries (they exist only to ask about the
+//             ad); chats with people who never became a tenant; notifications
+//             that only point at those.
+//   kept      bookings and their ledgers, receipts, and any chat with someone
+//             who rents here — UNLINKED from the listing (propertyId → null),
+//             which is exactly what a booking created without a listing looks
+//             like, so every screen already handles it.
 async function purgePropertyCascade(doc) {
   const propertyId = doc._id;
 
-  // ── Collect every related id BEFORE deleting anything ──────────────────
-  // We gather inquiry / booking / conversation (and then receipt) ids up front
-  // so we can delete their child docs (messages, receipts) AND sweep every
-  // notification that deep-links to any of them. Ordering is deliberate:
-  // gather → delete children & parents → delete the Property LAST (below). If
-  // anything throws midway, the Property still exists, so the whole delete can
-  // simply be retried rather than leaving a half-deleted listing with no anchor.
+  // ── Collect every related id BEFORE changing anything ──────────────────
+  // Ordering is deliberate: gather → delete / unlink children → delete the
+  // Property LAST (below). If anything throws midway, the Property still
+  // exists, so the whole operation can simply be retried.
   const [relatedInquiries, relatedBookings, relatedConversations] = await Promise.all([
     Inquiry.find({ propertyId }).select('_id'),
-    Booking.find({ propertyId }).select('_id'),
-    Conversation.find({ propertyId }).select('_id'),
+    Booking.find({ propertyId }).select('_id tenantId members.userId'),
+    Conversation.find({ propertyId }).select('_id participants'),
   ]);
 
-  const inquiryIds      = relatedInquiries.map((d) => d._id);
-  const bookingIds      = relatedBookings.map((d) => d._id);
-  const conversationIds = relatedConversations.map((d) => d._id);
+  const inquiryIds = relatedInquiries.map((d) => d._id);
+  const bookingIds = relatedBookings.map((d) => d._id);
 
-  // Receipts hang off bookings.
-  const relatedReceipts = bookingIds.length
-    ? await Receipt.find({ bookingId: { $in: bookingIds } }).select('_id')
+  // Everyone who RENTS here, not just the booking's primary tenant — a shared
+  // flat has members. The landlord is a participant in every chat on the
+  // listing, so they are deliberately not in this set.
+  const tenantUserIds = new Set();
+  for (const b of relatedBookings) {
+    if (b.tenantId) tenantUserIds.add(String(b.tenantId));
+    for (const m of b.members || []) if (m.userId) tenantUserIds.add(String(m.userId));
+  }
+  const isTenancyChat = (c) => (c.participants || []).some((u) => tenantUserIds.has(String(u)));
+  const keptConversationIds    = relatedConversations.filter(isTenancyChat).map((d) => d._id);
+  const deletedConversationIds = relatedConversations.filter((c) => !isTenancyChat(c)).map((d) => d._id);
+
+  // Receipts are kept; their ids are only needed to spare their notifications.
+  const receiptIds = bookingIds.length
+    ? (await Receipt.find({ bookingId: { $in: bookingIds } }).select('_id')).map((d) => d._id)
     : [];
-  const receiptIds = relatedReceipts.map((d) => d._id);
 
   // ── Build the notification sweep ───────────────────────────────────────
-  // Notification.data is a free-form Mixed bag; depending on the event it
-  // carries one of propertyId / inquiryId / bookingId / conversationId /
-  // receiptId. We OR across every key + id-set we just gathered so NO orphaned
-  // bell item survives, regardless of which deep-link key a given notification
-  // used. Clauses for empty id-sets are skipped so we never build a `$in: []`
-  // that matches nothing-but-costs-a-scan.
-  const notifClauses = [{ 'data.propertyId': propertyId }];
-  if (inquiryIds.length)      notifClauses.push({ 'data.inquiryId':      { $in: inquiryIds } });
-  if (bookingIds.length)      notifClauses.push({ 'data.bookingId':      { $in: bookingIds } });
-  if (conversationIds.length) notifClauses.push({ 'data.conversationId': { $in: conversationIds } });
-  if (receiptIds.length)      notifClauses.push({ 'data.receiptId':      { $in: receiptIds } });
+  // Notification.data is a free-form Mixed bag carrying one or more of
+  // propertyId / inquiryId / bookingId / conversationId / receiptId. Sweep
+  // what points at something being DELETED, and spare anything that also
+  // points at a tenancy that survives — "rent received for <listing>" carries
+  // both a propertyId and a bookingId, and the tenancy is what it is about.
+  // `$nin` also matches a missing key, which is what we want.
+  const sparesTenancy = {
+    'data.bookingId':      { $nin: bookingIds },
+    'data.receiptId':      { $nin: receiptIds },
+    'data.conversationId': { $nin: keptConversationIds },
+  };
+  const notifClauses = [{ 'data.propertyId': propertyId, ...sparesTenancy }];
+  if (inquiryIds.length) notifClauses.push({ 'data.inquiryId': { $in: inquiryIds }, ...sparesTenancy });
+  if (deletedConversationIds.length) {
+    notifClauses.push({ 'data.conversationId': { $in: deletedConversationIds } });
+  }
 
   // Who is about to lose notifications? Their cached unread badge has to be
   // cleared, and this is the ONLY moment we can find out — once the deleteMany
@@ -642,27 +667,32 @@ async function purgePropertyCascade(doc) {
     console.warn('[property] could not collect notified users for cache invalidation:', err.message);
   }
 
-  // ── Delete children + parents (Property removed last, below) ───────────
+  // ── Delete what belonged to the ad; unlink what belongs to a tenancy ───
   const [
     delMessages,
-    delReceipts,
     delInquiries,
-    delBookings,
     delConversations,
     delNotifications,
+    keptBookings,
+    keptReceipts,
+    keptConversations,
   ] = await Promise.all([
-    conversationIds.length
-      ? Message.deleteMany({ conversationId: { $in: conversationIds } })
-      : Promise.resolve({ deletedCount: 0 }),
-    receiptIds.length
-      ? Receipt.deleteMany({ _id: { $in: receiptIds } })
+    deletedConversationIds.length
+      ? Message.deleteMany({ conversationId: { $in: deletedConversationIds } })
       : Promise.resolve({ deletedCount: 0 }),
     Inquiry.deleteMany({ propertyId }),
-    Booking.deleteMany({ propertyId }),
-    conversationIds.length
-      ? Conversation.deleteMany({ _id: { $in: conversationIds } })
+    deletedConversationIds.length
+      ? Conversation.deleteMany({ _id: { $in: deletedConversationIds } })
       : Promise.resolve({ deletedCount: 0 }),
     Notification.deleteMany({ $or: notifClauses }),
+    // inquiryId too: the inquiry it came from is deleted just above.
+    bookingIds.length
+      ? Booking.updateMany({ _id: { $in: bookingIds } }, { $set: { propertyId: null, inquiryId: null } })
+      : Promise.resolve({ modifiedCount: 0 }),
+    Receipt.updateMany({ propertyId }, { $set: { propertyId: null } }),
+    keptConversationIds.length
+      ? Conversation.updateMany({ _id: { $in: keptConversationIds } }, { $set: { propertyId: null, inquiryId: null } })
+      : Promise.resolve({ modifiedCount: 0 }),
   ]);
 
   await doc.deleteOne();
@@ -680,11 +710,15 @@ async function purgePropertyCascade(doc) {
   return {
     id: String(propertyId),
     deletedInquiries:     delInquiries.deletedCount,
-    deletedBookings:      delBookings.deletedCount,
-    deletedReceipts:      delReceipts.deletedCount,
     deletedConversations: delConversations.deletedCount,
     deletedMessages:      delMessages.deletedCount,
     deletedNotifications: delNotifications.deletedCount,
+    // Never deleted any more — reported so a caller can say what was kept.
+    deletedBookings:      0,
+    deletedReceipts:      0,
+    keptBookings:         keptBookings.modifiedCount,
+    keptReceipts:         keptReceipts.modifiedCount,
+    keptConversations:    keptConversations.modifiedCount,
   };
 }
 
