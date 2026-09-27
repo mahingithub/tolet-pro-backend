@@ -44,6 +44,7 @@
 const Booking       = require('../models/Booking');
 const Notification  = require('../models/Notification');
 const notifications = require('./notification.service');
+const { memberRentShare } = require('../utils/memberRent');
 
 const UNPAID_STATUSES = ['due', 'pending', 'scheduled', 'overdue', 'partial'];
 
@@ -121,7 +122,7 @@ function collectUnpaid(bookings, today = new Date(), monthKey = currentMonthKey(
     if (hasMembers) {
       for (const m of booking.members) {
         if (m.status === 'moved-out') continue;
-        const rent = Number(m.monthlyRent) || Number(booking.monthlyRent) || 0;
+        const rent = memberRentShare(booking, m);
         const owed = outstandingFor(m.ledger, rent, monthKey);
         if (owed <= 0) continue;
         count += 1;

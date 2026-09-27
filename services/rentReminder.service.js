@@ -34,6 +34,12 @@
  * milestone fires exactly once per month — 3 messages maximum, never two on the
  * same day, and the count resets naturally with the next month's rent.
  *
+ * GATEWAY OUTAGES: the milestone is claimed before sending, so a WhatsApp that
+ * fails because the gateway session is down (see whatsapp.service isRetryable)
+ * arms `whatsappRetryKey`, and each later sweep re-sends that WhatsApp — alone,
+ * no second in-app copy — until it goes out or the milestone moves on. Still at
+ * most one WhatsApp per milestone reaches the tenant.
+ *
  * LATE FEE: mentioned ONLY when the landlord actually set one on the lease
  * (`lateFeeAmount > 0`). No fee configured ⇒ no fee wording anywhere, because
  * threatening a charge the landlord never agreed to is worse than saying nothing.
@@ -49,6 +55,7 @@ const notifications = require('./notification.service');
 const whatsapp      = require('./whatsapp.service');
 const env           = require('../config/env');
 const { tiersForUsers } = require('./subscription.service');
+const { memberRentShare } = require('../utils/memberRent');
 
 let sms = null;
 try { sms = require('./sms.service'); } catch { sms = null; }
@@ -116,10 +123,17 @@ async function resolveTenantPhone(booking) {
   return '';
 }
 
-// The earliest unpaid month whose reminder window has opened (today is within
+// The LATEST unpaid month whose reminder window has opened (today is within
 // leadDays of its due date, or past it). Returns { key, due } or null. Months
-// are chronological, so the first unpaid one that is NOT yet in-window ends the
-// search — we never remind about a future month before its window opens.
+// are chronological, so the first one NOT yet in-window ends the search — we
+// never remind about a future month before its window opens.
+//
+// Latest, not earliest. This used to return the OLDEST unpaid month, so one
+// month nobody marked paid — often from before the landlord started using the
+// app — pinned the sweep to it for good: its 'overdue' milestone went out once,
+// the dedupe key matched on every run after that, and the tenant never heard
+// about another month's rent again. In production that was every tenant with
+// one unmarked month. Each month now gets its own three milestones.
 //
 // `movedIn` (defaults to the lease start) is the date the tenant actually took
 // the unit. Months whose due date fell BEFORE that are skipped: a lease starting
@@ -130,17 +144,17 @@ function nextDueForReminder(ledger, booking, today, leadDays, movedIn = null) {
   const months = enumerateMonths(booking.leaseStart, booking.leaseEnd);
   const from = new Date(movedIn || booking.leaseStart);
   const hasFrom = !Number.isNaN(from.getTime());
+  let latest = null;
   for (const key of months) {
-    if (isPaid(ledger, key)) continue;
     const due = dueDate(key, booking.rentDueDay);
     if (!due) continue;
     if (hasFrom && due < from) continue; // due before move-in — not this tenant's
     const windowStart = new Date(due);
     windowStart.setDate(windowStart.getDate() - (Number(leadDays) || 3));
-    if (today >= windowStart) return { key, due };
-    return null;
+    if (today < windowStart) break;
+    if (!isPaid(ledger, key)) latest = { key, due };
   }
-  return null;
+  return latest;
 }
 
 const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -219,6 +233,8 @@ async function deliverReminder({ userId, phone, title, body, data, allowSms = tr
       .sendWhatsAppMessage(phone, { body: `${title}\n\n${body}` })
       .catch(() => ({ success: false }));
     out.whatsapp = waRes.success ? 'sent' : 'failed';
+    // Not a channel — tells the sweep this send may be repeated tomorrow.
+    out.whatsappRetryable = !waRes.success && waRes.retryable === true;
 
     // SMS only when WhatsApp could not deliver — it costs money per message,
     // which is why the manual button passes allowSms:false: the landlord-
@@ -319,7 +335,7 @@ async function resolveManualReminder({ booking, memberId = null, monthKey = null
   const milestone = milestoneFor(target.due, today, leadDays, booking.gracePeriodDays) || 'lead';
 
   const amountDue = member
-    ? (Number(member.monthlyRent) || Number(booking.monthlyRent) || 0) + (Number(member.serviceCharge) || 0)
+    ? memberRentShare(booking, member) + (Number(member.serviceCharge) || 0)
     : (Number(booking.monthlyRent) || 0) + (Number(booking.serviceCharge) || 0);
 
   const { title, body } = reminderMessage({
@@ -401,7 +417,7 @@ async function sendManualReminder({
   if (custom.length > MAX_CUSTOM_MESSAGE_LEN) return { ok: false, reason: 'message_too_long' };
   const body = custom || r.body;
 
-  const channels = await deliverReminder({
+  const { inApp, whatsapp: wa, sms: viaSms } = await deliverReminder({
     userId: r.userId,
     phone:  r.phone,
     title:  r.title,
@@ -417,6 +433,7 @@ async function sendManualReminder({
     // Never SMS from the button — see deliverReminder.
     allowSms: false,
   });
+  const channels = { inApp, whatsapp: wa, sms: viaSms };
 
   // Burn the month's single press even if WhatsApp failed. Retrying a failed
   // send is exactly the loop that looks like a bot to WhatsApp, and the landlord
@@ -438,9 +455,42 @@ async function sendManualReminder({
   };
 }
 
+// Record (or clear) a pending WhatsApp retry on the reminder's holder — the
+// member row for a shared room, the booking for a single tenancy. Matched on
+// lastReminderKey so a late answer can't arm a milestone the sweep has since
+// moved past.
+function markWhatsAppRetry(bookingId, memberId, dedupeKey, pending) {
+  const value = pending ? dedupeKey : '';
+  const write = memberId
+    ? Booking.updateOne(
+      { _id: bookingId, members: { $elemMatch: { _id: memberId, lastReminderKey: dedupeKey } } },
+      { $set: { 'members.$.whatsappRetryKey': value } },
+    )
+    : Booking.updateOne(
+      { _id: bookingId, lastReminderKey: dedupeKey },
+      { $set: { whatsappRetryKey: value } },
+    );
+  return write.catch(() => {});
+}
+
+// Second attempt at a milestone whose WhatsApp did not go out. WhatsApp ONLY:
+// the in-app copy was delivered the first time, and SMS, where configured,
+// already ran as that attempt's fallback. The marker stays armed only while the
+// failure is still ours to fix — a send that went out, or a recipient WhatsApp
+// will never reach, ends the retries.
+async function retryWhatsApp(bookingId, { memberId, dedupeKey, phone, title, body }) {
+  const res = phone
+    ? await whatsapp.sendWhatsAppMessage(phone, { body: `${title}\n\n${body}` }).catch(() => ({ success: false }))
+    : { success: false };
+  if (!res.success && res.retryable === true) return false;
+  await markWhatsAppRetry(bookingId, memberId, dedupeKey, false);
+  return res.success;
+}
+
 async function runRentReminders(today = new Date()) {
   const bookings = await Booking.find({ status: 'active', autoReminder: true });
   let sent = 0;
+  let retried = 0;
   let skippedTier = 0;
 
   // One batched query for every landlord in the sweep — Smart Alerts is Pro
@@ -453,105 +503,109 @@ async function runRentReminders(today = new Date()) {
       continue;
     }
     const leadDays = Number(booking.reminderLeadDays) || 3;
-    let dirty = false;
 
-    // ── SINGLE-TENANT booking (flat / single room / commercial) ─────────────
-    // No members[], so the obligation lives on the booking itself. The tenant
-    // may have no account at all — the phone number on the lease is the channel.
-    if (!Array.isArray(booking.members) || !booking.members.length) {
-      const next = nextDueForReminder(booking.ledger, booking, today, leadDays);
+    // Who owes rent here, and where each one's obligation lives:
+    //   • MULTI-MEMBER (hostel / mess) — every active member, off that member's
+    //     own ledger and phone.
+    //   • SINGLE-TENANT (flat / single room / commercial) — no members[], so the
+    //     booking itself holds the ledger. The tenant may have no account at
+    //     all; the phone number on the lease is the channel.
+    const shared = Array.isArray(booking.members) && booking.members.length > 0;
+    const occupants = shared
+      ? booking.members.filter((m) => m.status !== 'moved-out').map((m) => ({
+        holder:     m,
+        memberId:   m._id,
+        ledger:     m.ledger,
+        // A seat added later isn't chased for the months before they joined.
+        movedIn:    (m.joinDate && new Date(m.joinDate) > new Date(booking.leaseStart))
+          ? m.joinDate
+          : booking.leaseStart,
+        tenantName: m.name,
+        userId:     m.userId,
+        phone:      async () => m.phone,
+        amountDue:  memberRentShare(booking, m) + (Number(m.serviceCharge) || 0),
+      }))
+      : [{
+        holder:     booking,
+        memberId:   null,
+        ledger:     booking.ledger,
+        movedIn:    null,
+        tenantName: booking.tenant,
+        userId:     booking.tenantId,
+        phone:      () => resolveTenantPhone(booking),
+        amountDue:  (Number(booking.monthlyRent) || 0) + (Number(booking.serviceCharge) || 0),
+      }];
+
+    const fresh = [];
+    const retries = [];
+    for (const o of occupants) {
+      const next = nextDueForReminder(o.ledger, booking, today, leadDays, o.movedIn);
       if (!next) continue;
 
       const milestone = milestoneFor(next.due, today, leadDays, booking.gracePeriodDays);
       if (!milestone) continue;
 
       // One reminder per milestone per month ⇒ 3 maximum for this month's rent.
+      // A milestone already sent is revisited only to retry its WhatsApp.
       const dedupeKey = `${next.key}@${milestone}`;
-      if (booking.lastReminderKey === dedupeKey) continue;
-      booking.lastReminderKey = dedupeKey;
-      booking.lastReminderAt  = today;
+      const isRetry = o.holder.lastReminderKey === dedupeKey;
+      if (isRetry && o.holder.whatsappRetryKey !== dedupeKey) continue;
 
-      const rent  = Number(booking.monthlyRent) || 0;
-      const service = Number(booking.serviceCharge) || 0;
       const { title, body } = reminderMessage({
         milestone,
-        tenantName: booking.tenant,
+        tenantName: o.tenantName,
         property:   booking.property || 'বাসা',
         monthKey:   next.key,
-        amountDue:  rent + service,
-        // Only the landlord's own setting can put a late fee in the message.
+        amountDue:  o.amountDue,
+        // Late-fee terms are set per LEASE — only the landlord's own setting can
+        // put a fee in the message, and every seat in a room shares it.
         lateFee:    Number(booking.lateFeeAmount) || 0,
         dueOn:      next.due,
         graceDays:  Number(booking.gracePeriodDays) || 0,
       });
+      const job = { memberId: o.memberId, dedupeKey, phone: await o.phone(), title, body };
 
-      // Works with no app install and no landlord connection: WhatsApp to the
-      // number on the lease, SMS if WhatsApp is unavailable. Deliberately NOT
-      // awaited — one slow gateway must not stall the rest of the sweep.
-      const phone = await resolveTenantPhone(booking);
-      deliverReminder({
-        userId: booking.tenantId,
-        phone,
-        title,
-        body,
-        data: { bookingId: String(booking._id), monthKey: next.key, kind: 'rent_reminder', milestone },
-      }).catch(() => {});
-
-      sent += 1;
-      await booking.save();
-      continue;
-    }
-
-    for (const m of booking.members) {
-      if (m.status === 'moved-out') continue;
-      // A seat added later isn't chased for the months before they joined.
-      const movedIn = (m.joinDate && new Date(m.joinDate) > new Date(booking.leaseStart))
-        ? m.joinDate
-        : booking.leaseStart;
-      const next = nextDueForReminder(m.ledger, booking, today, leadDays, movedIn);
-      if (!next) continue;
-
-      const milestone = milestoneFor(next.due, today, leadDays, booking.gracePeriodDays);
-      if (!milestone) continue;
-
-      // One reminder per milestone per month ⇒ 3 maximum per seat-holder.
-      const dedupeKey = `${next.key}@${milestone}`;
-      if (m.lastReminderKey === dedupeKey) continue;
-      m.lastReminderKey = dedupeKey;
-      m.lastReminderAt  = today;
-      dirty = true;
-
-      const rent  = Number(m.monthlyRent) || Number(booking.monthlyRent) || 0;
-      const { title, body } = reminderMessage({
-        milestone,
-        tenantName: m.name,
-        property:   booking.property || 'বাসা',
-        monthKey:   next.key,
-        amountDue:  rent + (Number(m.serviceCharge) || 0),
-        // Late-fee terms are set per LEASE, so every seat in the room shares them.
-        lateFee:    Number(booking.lateFeeAmount) || 0,
-        dueOn:      next.due,
-        graceDays:  Number(booking.gracePeriodDays) || 0,
+      if (isRetry) {
+        retries.push(job);
+        continue;
+      }
+      o.holder.lastReminderKey = dedupeKey;
+      o.holder.lastReminderAt  = today;
+      fresh.push({
+        ...job,
+        userId: o.userId,
+        data: {
+          bookingId: String(booking._id),
+          ...(o.memberId ? { memberId: String(o.memberId) } : {}),
+          monthKey: next.key,
+          kind: 'rent_reminder',
+          milestone,
+        },
       });
-
-      // Not awaited, for the same reason as the single-tenant branch above.
-      deliverReminder({
-        userId: m.userId,
-        phone:  m.phone,
-        title,
-        body,
-        data: { bookingId: String(booking._id), memberId: String(m._id), monthKey: next.key, kind: 'rent_reminder', milestone },
-      }).catch(() => {});
-
-      sent += 1;
     }
 
-    if (dirty) await booking.save();
+    // Dedupe keys are saved BEFORE anything is sent: a crash in between then
+    // loses a reminder rather than sending it twice, and a fast WhatsApp
+    // failure can't beat this save to the retry marker it matches on.
+    if (fresh.length) await booking.save();
+
+    // Not awaited — one slow gateway must not stall the rest of the sweep; the
+    // queue in whatsapp.service spaces the actual sends.
+    for (const job of fresh) {
+      deliverReminder(job)
+        .then((out) => out.whatsappRetryable && markWhatsAppRetry(booking._id, job.memberId, job.dedupeKey, true))
+        .catch(() => {});
+    }
+    for (const job of retries) retryWhatsApp(booking._id, job).catch(() => {});
+
+    sent += fresh.length;
+    retried += retries.length;
   }
 
-  if (sent || skippedTier) {
+  if (sent || retried || skippedTier) {
     console.log(
-      `[rent-reminder] sent ${sent} member reminder(s)` +
+      `[rent-reminder] sent ${sent} reminder(s)` +
+      (retried ? `, retrying ${retried} WhatsApp(s) that did not go out` : '') +
       (skippedTier ? `, skipped ${skippedTier} booking(s) — landlord not on Pro` : ''),
     );
   }

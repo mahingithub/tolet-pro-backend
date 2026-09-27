@@ -1,7 +1,13 @@
 'use strict';
 
 /**
- * Geo routes — backs the property "What's nearby" grid.
+ * Geo routes — places, and the names of places.
+ *
+ * GET /api/geo/thanas
+ *   The thana picker list, bilingual. Served rather than bundled because the
+ *   provider app needs the SAME strings the tenant's LocationBar offers — a
+ *   provider who covers a spelling nobody can search for is invisible — and a
+ *   126 kB dataset copied into a second frontend is a copy that drifts.
  *
  * GET /api/geo/nearby?lat=&lng=      ← preferred
  *   Returns the nearest hospital / school / market / mosque / bus stop / park
@@ -20,9 +26,44 @@
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 
 const nearbyService = require('../services/nearbyPlaces.service');
+const { THANAS } = require('../utils/thanaNames');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/geo/thanas
+//
+// Every thana a provider may name as his coverage area, in the order the
+// tenant's own picker shows them: Dhaka and the other metros first, then the
+// rest. One row per distinct thana NAME — a provider's coverage stores a bare
+// string, so two districts' Kotwali are one key here and offering it twice
+// would only present a choice that does not exist.
+//
+// Serialised ONCE at module load, like the category registry: the list changes
+// on deploy and never per request, so every call after the first is a string
+// write and an ETag compare.
+// ─────────────────────────────────────────────────────────────────────────────
+const THANAS_BODY = JSON.stringify({ thanas: THANAS, count: THANAS.length });
+const THANAS_ETAG = `"thanas-${crypto.createHash('sha1').update(THANAS_BODY).digest('hex').slice(0, 16)}"`;
+
+router.get('/thanas', (req, res) => {
+  // Place names change on the timescale of a government gazette, and the ETag
+  // moves with the deploy that regenerates them, so a long shared cache is
+  // safe and this is a screen a provider opens on a slow connection.
+  res.set('Cache-Control', 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=604800');
+  res.set('ETag', THANAS_ETAG);
+  res.set('Vary', 'Accept-Encoding');
+
+  const ifNoneMatch = req.headers['if-none-match'];
+  if (ifNoneMatch && ifNoneMatch.split(',').some((t) => t.trim() === THANAS_ETAG)) {
+    return res.status(304).end();
+  }
+
+  res.type('application/json');
+  return res.send(THANAS_BODY);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/geo/nearby

@@ -157,6 +157,30 @@ const PAYMENT_MODES = [
 const DEFAULT_NAME_LABEL  = { bn: 'প্রোভাইডারের নাম', en: 'Provider name' };
 const DEFAULT_PHOTO_LABEL = { bn: 'আপনার ছবি',        en: 'Your photo' };
 
+// ─── COVERAGE ────────────────────────────────────────────────────────────────
+// `defaultCoverage` seeds a new provider; `coverageOptions` is what the
+// registration screen offers him to change it to. The default ladder below fits
+// the walking-distance categories that make up most of the launch set — a
+// গৃহকর্মী or a পানির জার supplier does not cross the city — and a category
+// whose trade is travel (শিফটিং) declares its own.
+//
+// OPTIONAL, and absence is a valid state: the provider app falls back to this
+// ladder for any category that does not carry one, so adding the key to one
+// category cannot change what any other category asks.
+//
+// `mode: 'areas'` does not use this ladder at all. The coverage step asks an
+// areas-mode category for a LIST OF THANAS instead of a distance — that is
+// what `coverage.thanas` is matched on, and what the browse query's `$in`
+// needs to be non-empty for the provider to be findable by any tenant whose
+// thana we know. Both ends of that comparison are folded onto one spelling by
+// utils/thanaNames.js, and the provider cannot get past the step (nor past
+// submit) with an empty list.
+const COVERAGE_OPTIONS = [
+  { km: 1.5, bn: 'এই এলাকা (১.৫ কিমি)', en: 'This area (1.5 km)' },
+  { km: 3,   bn: '৩ কিলোমিটার',          en: '3 km' },
+  { km: 5,   bn: '৫ কিলোমিটার',          en: '5 km' },
+];
+
 // ─── CATEGORIES ──────────────────────────────────────────────────────────────
 
 const CATEGORIES = [
@@ -651,6 +675,126 @@ const CATEGORIES = [
   },
 
   // ───────────────────────────────────────────────────────────────────────────
+  // শিফটিং — launched for the move-in moment, which is the single highest-intent
+  // event this product can see: a tenant who has just taken a flat needs a truck
+  // THIS WEEK, and needs it before they need anything else on this page.
+  //
+  // `contact`, per the tier rule above — a move is quoted after somebody asks
+  // how many rooms, which floor and whether there is a lift, and no structured
+  // form gets to that answer faster than the phone call it would precede.
+  // Promote to `request` once the contact logs show the volume to justify it.
+  //
+  // ─── THE PRICES ARE A FLOOR, NOT A QUOTE ────────────────────────────────────
+  // Every other category's price_rows is a real price: a 12kg cylinder costs
+  // what it costs. A move does not — it is distance × volume × floors × labour,
+  // and nobody can publish that as a table. What CAN be published is the
+  // starting rate for a trip inside the city, which is what a tenant is really
+  // asking when they ask "মোটামুটি কত লাগবে?". Hence `শুরুর ভাড়া` in the label
+  // and a hint that says so in plain words: a from-price that reads as a final
+  // price is the fastest way to make both sides feel cheated at the door.
+  //
+  // ─── WHY radius AND NOT areas ───────────────────────────────────────────────
+  // A mover looks like the textbook `areas` case — a truck crosses the whole
+  // city. It launched on radius because `areas` matching was unreachable from
+  // the provider app at the time; that constraint is gone (the coverage step
+  // picks thanas now), so this is a live product choice rather than a
+  // limitation, and it stays radius on its merits: a mover's answer to "how
+  // far will you go" really is a distance, 20 km is most of Dhaka, and every
+  // শিফটিং provider already registered answered that question. Moving a live
+  // category between modes is a migration of their coverage, not an edit here.
+  // ───────────────────────────────────────────────────────────────────────────
+  {
+    id: 'movers',                   // legacy id — SellInterest `service_movers`
+    status: 'live',
+    icon: 'Truck',
+    label: { bn: 'শিফটিং', en: 'Movers' },
+    blurb: { bn: 'বাসা বদল, ট্রাক ও প্যাকিং', en: 'Shifting, trucks & packing' },
+    // A trip rate is sticky — it moves with diesel, not with the week. Six
+    // months is long enough not to nag, short enough that a rate set before a
+    // fuel-price change gets flagged rather than quietly believed.
+    price: { maxAgeDays: 180, regulated: null },
+    interaction: 'contact',
+    kyc: { toList: 'basic', toVerify: 'full' },   // strangers carrying everything you own
+    defaultCoverage: { mode: 'radius', radiusKm: 10 },
+    // A shifting service that only travels 5 km is not a shifting service. The
+    // provider app falls back to its own 1.5/3/5 ladder when a category does
+    // not declare one — see COVERAGE_OPTIONS below.
+    coverageOptions: [
+      { km: 5,  bn: 'কাছাকাছি (৫ কিমি)',  en: 'Nearby (5 km)' },
+      { km: 10, bn: '১০ কিলোমিটার',        en: '10 km' },
+      { km: 20, bn: 'পুরো শহর (২০ কিমি)', en: 'Whole city (20 km)' },
+    ],
+    nameLabel: DEFAULT_NAME_LABEL,
+    // NOT "আপনার ছবি". The tenant is deciding whether to put their almirah in
+    // this vehicle, and a photo of the truck answers that question; a headshot
+    // does not.
+    photoLabel: { bn: 'গাড়ির ছবি', en: 'Photo of your vehicle' },
+    providerFields: [
+      {
+        key: 'vehicles', type: 'multi', required: true,
+        label: { bn: 'কী কী গাড়ি আছে', en: 'Vehicles available' },
+        options: [
+          { id: 'van',         bn: 'ভ্যান / পিকআপ',   en: 'Van / pickup' },
+          { id: 'truck_small', bn: 'ছোট ট্রাক',        en: 'Small truck' },
+          { id: 'truck_big',   bn: 'বড় ট্রাক',         en: 'Large truck' },
+          { id: 'covered',     bn: 'কাভার্ড ভ্যান',    en: 'Covered van' },
+        ],
+      },
+      {
+        key: 'startingRates', type: 'price_rows', required: true,
+        label: { bn: 'শুরুর ভাড়া', en: 'Starting rates' },
+        hint: {
+          bn: 'শহরের ভেতর একবারের শুরুর দাম — দূরত্ব, তলা আর মালামাল বুঝে বাড়তে পারে',
+          en: 'From-price for one trip inside the city; distance, floors and load add to it',
+        },
+        rows: [
+          { key: 'van',         bn: 'ভ্যান / পিকআপ',  en: 'Van / pickup',  unit: { bn: 'ট্রিপ', en: 'trip' } },
+          { key: 'truck_small', bn: 'ছোট ট্রাক',       en: 'Small truck',   unit: { bn: 'ট্রিপ', en: 'trip' } },
+          { key: 'truck_big',   bn: 'বড় ট্রাক',        en: 'Large truck',   unit: { bn: 'ট্রিপ', en: 'trip' } },
+          { key: 'flat_1room',  bn: '১ রুমের বাসা',    en: '1-room flat',   unit: { bn: 'প্যাকেজ', en: 'package' } },
+          { key: 'flat_2room',  bn: '২ রুমের বাসা',    en: '2-room flat',   unit: { bn: 'প্যাকেজ', en: 'package' } },
+          { key: 'flat_3room',  bn: '৩ রুমের বাসা',    en: '3-room flat',   unit: { bn: 'প্যাকেজ', en: 'package' } },
+        ],
+      },
+      {
+        key: 'services', type: 'multi', required: true,
+        label: { bn: 'কী কী কাজ করেন', en: 'Work offered' },
+        options: [
+          { id: 'labour',    bn: 'মালামাল ওঠানো-নামানো', en: 'Loading & unloading' },
+          { id: 'packing',   bn: 'প্যাকিং',               en: 'Packing' },
+          { id: 'furniture', bn: 'আসবাব খোলা ও লাগানো',  en: 'Furniture dismantle & assemble' },
+          { id: 'ac',        bn: 'এসি খোলা ও লাগানো',     en: 'AC uninstall & install' },
+          { id: 'stairs',    bn: 'লিফট ছাড়া সিঁড়ি দিয়ে', en: 'Stairs, without a lift' },
+        ],
+      },
+      {
+        key: 'labourIncluded', type: 'bool', required: false,
+        label: { bn: 'ভাড়ার সাথে লেবার আছে?', en: 'Is labour included in the rate?' },
+        // The commonest doorstep argument in a Dhaka move: the truck was quoted,
+        // the four men carrying the almirah were not. Asking here settles it
+        // before anybody's furniture is on the stairs.
+        hint: { bn: 'না হলে তেনি আলাদা — কার্ডে সেটাই লেখা থাকবে', en: 'If not, the card says labour is charged separately' },
+      },
+      {
+        key: 'notice', type: 'choice', required: true,
+        label: { bn: 'কত আগে বলতে হয়', en: 'Notice needed' },
+        options: [
+          { id: 'same_day', bn: 'একই দিনে পারি', en: 'Same day' },
+          { id: 'd1',       bn: '১ দিন আগে',      en: '1 day ahead' },
+          { id: 'd2_3',     bn: '২-৩ দিন আগে',    en: '2-3 days ahead' },
+        ],
+      },
+      {
+        key: 'nightMove', type: 'bool', required: false,
+        // Half of Dhaka moves after 10pm to get around the daytime traffic ban
+        // on trucks. A mover who does nights and cannot say so loses those jobs.
+        label: { bn: 'রাতে শিফটিং করেন?', en: 'Do you move at night?' },
+      },
+    ],
+    tenantCard: ['vehicles', 'startingRates', 'services'],
+  },
+
+  // ───────────────────────────────────────────────────────────────────────────
   // ─── PLANNED ───────────────────────────────────────────────────────────────
   // Not live. Present so the legacy SellInterest sources still resolve to a
   // real category, and so turning one on is `status: 'live'` plus filling in
@@ -678,18 +822,6 @@ const CATEGORIES = [
     interaction: 'contact',
     kyc: { toList: 'basic', toVerify: 'full' },
     defaultCoverage: { mode: 'radius', radiusKm: 4 },
-    nameLabel: DEFAULT_NAME_LABEL, photoLabel: DEFAULT_PHOTO_LABEL,
-    providerFields: [], tenantCard: [],
-  },
-  {
-    id: 'movers',                   // legacy — SellInterest `service_movers`
-    status: 'planned',
-    icon: 'Truck',
-    label: { bn: 'শিফটিং', en: 'Movers' },
-    blurb: { bn: 'বাসা বদল ও প্যাকিং', en: 'Shifting & packing' },
-    interaction: 'contact',
-    kyc: { toList: 'basic', toVerify: 'full' },
-    defaultCoverage: { mode: 'areas' },
     nameLabel: DEFAULT_NAME_LABEL, photoLabel: DEFAULT_PHOTO_LABEL,
     providerFields: [], tenantCard: [],
   },
@@ -775,6 +907,18 @@ function getCategory(id) {
 /** Only the categories a provider may currently register under. */
 function liveCategories() {
   return CATEGORIES.filter((c) => c.status === 'live');
+}
+
+/**
+ * The coverage ladder the registration screen should offer for a category.
+ *
+ * Always returns a non-empty array, so a caller can render it without a
+ * fallback of its own — a coverage step with no buttons is a step nobody can
+ * get past.
+ */
+function coverageOptionsFor(categoryId) {
+  const cat = getCategory(categoryId);
+  return (cat && cat.coverageOptions) || COVERAGE_OPTIONS;
 }
 
 /** One field definition inside a category, or null. */
@@ -993,9 +1137,11 @@ module.exports = {
   INTERACTIONS,
   KYC_TIERS,
   PRICE_AUTHORITIES,
+  COVERAGE_OPTIONS,
   LEGACY_SOURCE_MAP,
   getCategory,
   getField,
+  coverageOptionsFor,
   liveCategories,
   regulatedCategories,
   freshnessState,

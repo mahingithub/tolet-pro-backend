@@ -125,10 +125,19 @@ async function runLeaseExpiryReminders(today = new Date()) {
       }).catch(() => {});
     }
 
-    // Phone fallback for a tenant with no linked account (WhatsApp → SMS),
-    // same chain the rent reminder uses.
-    const tenantPhone = booking.tenantPhone || await resolveUserPhone(booking.tenantId);
-    if (!booking.tenantId && tenantPhone) {
+    // WhatsApp to every occupant's number, ALONGSIDE the in-app copy — the same
+    // rule as the rent reminder, because a linked account is no proof the app
+    // is installed. This used to fire only for a single tenant with no account,
+    // so a mess member without one got nothing at all, not even in-app.
+    // (WhatsApp → SMS, the same chain the rent reminder uses.)
+    const phones = (booking.members || []).length
+      ? booking.members.filter((m) => m.status !== 'moved-out').map((m) => m.phone)
+      : [booking.tenantPhone || await resolveUserPhone(booking.tenantId)];
+    const seen = new Set();
+    for (const tenantPhone of phones) {
+      const key = whatsapp.normalizeMsisdn(tenantPhone);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
       whatsapp.sendWhatsAppMessage(tenantPhone, { body: `${tenantTitle}\n\n${tenantBody}` })
         .then((waRes) => {
           if (!waRes.success && env.smsApiKey && sms) {

@@ -152,6 +152,12 @@ const MemberSchema = new mongoose.Schema(
     // daily cron never double-sends for the same due month.
     lastReminderKey: { type: String, default: '' },
     lastReminderAt:  { type: Date, default: null },
+    // Set to lastReminderKey when that milestone's WhatsApp did not go out for
+    // a reason on our side (gateway session down, throttled). The next sweep
+    // sends the WhatsApp again — WhatsApp only, the in-app copy already went —
+    // and clears it. Without this a gateway outage silently cost every tenant
+    // whose milestone fell inside it their reminder, with no second attempt.
+    whatsappRetryKey: { type: String, default: '' },
 
     // MANUAL "Remind" button only — one press per rent month, per occupant,
     // forever. Keyed by the rent month ('2026-09' → when it was pressed) rather
@@ -326,6 +332,8 @@ const BookingSchema = new mongoose.Schema(
     // day, repeating on later days until the rent is paid.
     lastReminderKey: { type: String, default: '' },
     lastReminderAt:  { type: Date, default: null },
+    // Pending WhatsApp retry — same meaning as MemberSchema.whatsappRetryKey.
+    whatsappRetryKey: { type: String, default: '' },
 
     // Manual "Remind" button, single-tenant bookings. Same one-press-per-rent-
     // month rule as MemberSchema.manualReminders above.

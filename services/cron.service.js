@@ -20,10 +20,7 @@
 
 const cron          = require('node-cron');
 const Booking       = require('../models/Booking');
-const User          = require('../models/User');
 const notifications = require('./notification.service');
-const whatsapp      = require('./whatsapp.service');
-const env           = require('../config/env');
 const { runRentReminders } = require('./rentReminder.service');
 const { runLeaseExpiryReminders } = require('./leaseExpiryReminder.service');
 const { runSoloDueReminders } = require('./soloDueReminder.service');
@@ -36,10 +33,7 @@ const {
   runProviderLifecycle, expireStaleRequests, nudgeStalePrices,
 } = require('./providerLifecycle.service');
 const { runPriceCompliance } = require('./priceCompliance.service');
-
-// Optional SMS fallback — absent in installs that don't ship the provider.
-let sms = null;
-try { sms = require('./sms.service'); } catch { sms = null; }
+const { memberRentShare } = require('../utils/memberRent');
 
 const TZ   = process.env.CRON_TZ || 'Asia/Dhaka';
 const TEST = process.env.CRON_TEST === '1';
@@ -67,44 +61,13 @@ function overdueBody(monthKey, rent, lateFee) {
     : `${monthLabel(monthKey)} এর ভাড়া ৳${due} বকেয়া। দ্রুত পরিশোধ করুন।`;
 }
 
-// Resolve a tenant's WhatsApp number for a booking: prefer the denormalized
-// `tenantPhone`, else look it up from the linked User account.
-async function resolveTenantPhone(booking) {
-  if (booking.tenantPhone && String(booking.tenantPhone).trim().length >= 8) {
-    return String(booking.tenantPhone).trim();
-  }
-  if (booking.tenantId) {
-    const u = await User.findById(booking.tenantId).select('phone').lean().catch(() => null);
-    if (u && u.phone) return u.phone;
-  }
-  return '';
-}
-
-// Fire-and-forget reminder to a booking's tenant over their PHONE — WhatsApp
-// first, SMS if WhatsApp fails or isn't configured. This is the only channel a
-// tenant who never installed the app (and never connected to the landlord) has,
-// so it must not depend on WhatsApp credentials being present: without the SMS
-// fallback these invoice + overdue notices silently went nowhere.
-//
-// NEVER blocks or throws — mirrors how notifications.emit is called (best-effort
-// side channel), so a delivery failure can't disrupt the billing/late-fee run.
-function notifyTenantWhatsApp(booking, message) {
-  resolveTenantPhone(booking)
-    .then((phone) => {
-      if (!phone) {
-        console.warn(`[cron] no tenant phone for booking ${booking._id} — phone notify skipped`);
-        return null;
-      }
-      return whatsapp.sendWhatsAppMessage(phone, { body: message })
-        .then((waRes) => {
-          if (waRes && !waRes.success && env.smsApiKey && sms) {
-            return sms.sendSms(phone, message).catch(() => null);
-          }
-          return waRes;
-        });
-    })
-    .catch((e) => console.warn('[cron] tenant phone notify failed:', e.message));
-}
+// NO WHATSAPP FROM EITHER JOB BELOW. Both run at 00:00, and both used to text
+// the tenant's phone — but only for single-tenant bookings (a mess member never
+// got one), with no Pro check, and the overdue one landed nine hours before the
+// 09:00 rent sweep sent its own 'overdue' milestone for the same month. The
+// sweep in rentReminder.service is the one path that phones a tenant about
+// rent: every occupant alike, Pro only, at a civil hour, three per month, and
+// it already names the late fee. These jobs keep the ledger and the in-app bell.
 
 // ─── 1) Monthly invoice generator ────────────────────────────────────────────
 async function generateMonthlyInvoices() {
@@ -121,7 +84,7 @@ async function generateMonthlyInvoices() {
       for (const m of booking.members) {
         if (m.status === 'moved-out') continue;
         if (m.ledger.get(monthKey)) continue; // idempotent
-        const rent = Number(m.monthlyRent) || Number(booking.monthlyRent) || 0;
+        const rent = memberRentShare(booking, m);
         m.ledger.set(monthKey, {
           paid: false, status: 'due', amount: 0, balance: rent, lateFee: 0, paymentSource: 'manual',
         });
@@ -163,12 +126,6 @@ async function generateMonthlyInvoices() {
         data:   { targetId: String(booking._id), bookingId: String(booking._id), monthKey },
       });
     }
-
-    // WhatsApp reminder — new invoice ready (best-effort, non-blocking).
-    notifyTenantWhatsApp(
-      booking,
-      `📢 ${booking.property || 'আপনার বাসা'} — ${monthLabel(monthKey)} এর নতুন ভাড়ার বিল প্রস্তুত। ভাড়া ৳${Number(booking.monthlyRent) || 0}।`,
-    );
   }
 
   console.log(`[cron] invoices: ${created} created for ${monthKey} (of ${bookings.length} active bookings)`);
@@ -194,7 +151,7 @@ async function enforceLateFees() {
         if (m.status === 'moved-out') continue;
         const e = m.ledger.get(monthKey);
         if (!e || e.paid || e.status === 'overdue' || !UNPAID_STATUSES.includes(e.status)) continue;
-        const rent    = Number(m.monthlyRent) || Number(booking.monthlyRent) || 0;
+        const rent    = memberRentShare(booking, m);
         // Opt-in: no fee configured on the lease ⇒ the month is still flagged
         // overdue (that's a rent status, useful either way) but nothing is added
         // to the balance and the notice says nothing about a fee.
@@ -261,12 +218,6 @@ async function enforceLateFees() {
         data:   { targetId: String(booking._id), bookingId: String(booking._id), monthKey },
       });
     }
-
-    // WhatsApp reminder — rent overdue + late fee applied (best-effort).
-    notifyTenantWhatsApp(
-      booking,
-      `⚠️ ${booking.property || 'আপনার বাসা'} — ${overdueBody(monthKey, rent, lateFee)}`,
-    );
   }
 
   console.log(`[cron] late-fees: ${flagged} bookings marked overdue for ${monthKey}`);

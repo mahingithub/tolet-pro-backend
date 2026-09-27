@@ -29,6 +29,7 @@ const cloud         = require('../services/cloudinary.service');
 const { getIo, emitToUser } = require('../socket');
 const { invalidateInsightsCache } = require('../services/insights.service');
 const { idempotent } = require('../utils/idempotency');
+const { memberRentShare } = require('../utils/memberRent');
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 function isObjectId(v) {
@@ -592,7 +593,7 @@ async function listTenantBookings(req, res, next) {
         floor:         String((mineRow && mineRow.floor)     || b.floorNumber || '').trim(),
         roomLabel:     String((mineRow && mineRow.roomLabel) || b.roomNumber  || '').trim(),
         seatLabel:     String((mineRow && mineRow.seatLabel) || '').trim(),
-        monthlyRent:   mineRow ? (Number(mineRow.monthlyRent) || Number(b.monthlyRent) || 0) : (Number(b.monthlyRent) || 0),
+        monthlyRent:   mineRow ? memberRentShare(b, mineRow) : (Number(b.monthlyRent) || 0),
         serviceCharge: mineRow
           ? (mineRow.serviceCharge != null && mineRow.serviceCharge !== 0 ? Number(mineRow.serviceCharge) || 0 : Number(b.serviceCharge) || 0)
           : (Number(b.serviceCharge) || 0),

@@ -33,6 +33,7 @@
 
 const Provider = require('../models/Provider');
 const Property = require('../models/Property');
+const { thanaSpellings } = require('../utils/thanaNames');
 
 // Below this many points the median is not measuring a neighbourhood, it is
 // measuring whoever happened to sign up first. A thana under the floor returns
@@ -80,7 +81,15 @@ function median(values) {
  */
 async function collectPoints(thana) {
   const [providers, properties] = await Promise.all([
-    Provider.find({ thana, status: { $in: ['active', 'expired', 'suspended'] } })
+    // Both spellings. A provider's thana is canonicalised to its English label
+    // on save, but rows predating that hold whatever the caller sent, and the
+    // tenant asking is as likely to be reading Bangla as English. Matching one
+    // spelling would put a thana under the MIN_POINTS floor for no reason and
+    // return an honest-looking null.
+    Provider.find({
+      thana: { $in: thanaSpellings(thana) },
+      status: { $in: ['active', 'expired', 'suspended'] },
+    })
       .select('geo')
       .limit(500)
       .lean(),

@@ -35,6 +35,7 @@
 const Provider = require('../models/Provider');
 const ApiError = require('../utils/ApiError');
 const origins = require('../services/thanaCentroid.service');
+const { canonicalThana, thanaSpellings } = require('../utils/thanaNames');
 const { getCategory, freshnessState } = require('../config/serviceCategories');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -56,6 +57,13 @@ const BAND_M = 500;
  * by covered thana, not by how far a van drives) are matched on the tenant's
  * thana — and when we don't know it, fall back to distance so they are not
  * silently dropped from every result.
+ *
+ * ⚠ THE THANA MUST ARRIVE CANONICALISED. `$in` is an exact string comparison,
+ * and the tenant's LocationBar sends the Bengali label to a Bangla reader and
+ * the English one to an English reader. Comparing the raw query value against
+ * a stored list is how an areas-mode provider ends up matching nobody: the
+ * caller canonicalises once (utils/thanaNames.js) and both sides of this
+ * comparison then speak one language.
  */
 function coverageMatch(thana) {
   const radiusRule = {
@@ -75,6 +83,22 @@ function coverageMatch(thana) {
     : { $eq: ['$coverage.mode', 'areas'] };
 
   return { $match: { $expr: { $or: [radiusRule, areasRule] } } };
+}
+
+/**
+ * The thana filter for the no-coordinates path: providers whose shop is in the
+ * thana, plus providers who named it in their coverage list.
+ *
+ * The two halves are matched differently on purpose. `coverage.thanas` is
+ * written through canonicalThanaList(), so one exact value is right and is
+ * indexable. `Provider.thana` predates that and may still hold either
+ * language, so it is matched against both spellings rather than assuming.
+ */
+function thanaFilter(thana) {
+  return { $or: [
+    { thana: { $in: thanaSpellings(thana) } },
+    { 'coverage.thanas': canonicalThana(thana) },
+  ] };
 }
 
 /** Verified + open + well-rated, as a number the sort can use. */
@@ -227,11 +251,15 @@ exports.nearby = asyncH(async (req, res) => {
   // services/thanaCentroid.service.js.
   const origin = await origins.resolveUserOrigin({ point, thana });
 
+  // What the coverage lists are stored as. Derived once so the two branches
+  // below cannot disagree about which spelling they are matching.
+  const coverageThana = canonicalThana(thana);
+
   // ── Still no point: rank order, and say so rather than pretending ─────────
   if (!origin.lat) {
     const rows = await Provider.find({
       ...baseQuery,
-      $or: [{ thana }, { 'coverage.thanas': thana }],
+      ...thanaFilter(thana),
     })
       .sort({ 'verification.tier': -1, openNow: -1, ratingAvg: -1 })
       .limit(limit)
@@ -264,7 +292,7 @@ exports.nearby = asyncH(async (req, res) => {
       },
     },
     SCORE_STAGE,
-    coverageMatch(thana),
+    coverageMatch(coverageThana),
     RANK_STAGE,
     // Nearest band first; quality decides only between near-equals.
     { $sort: { distanceBand: 1, score: -1, distanceM: 1 } },
@@ -317,12 +345,12 @@ exports.nearbyCategories = asyncH(async (req, res) => {
         },
       },
       SCORE_STAGE,
-      coverageMatch(thana),
+      coverageMatch(canonicalThana(thana)),
       { $group: { _id: '$category', count: { $sum: 1 }, nearestM: { $min: '$distanceM' } } },
     ]);
   } else {
     rows = await Provider.aggregate([
-      { $match: { status: 'active', $or: [{ thana }, { 'coverage.thanas': thana }] } },
+      { $match: { status: 'active', ...thanaFilter(thana) } },
       { $group: { _id: '$category', count: { $sum: 1 }, nearestM: { $min: null } } },
     ]);
   }

@@ -27,6 +27,7 @@ const { applyPayment } = require('../services/bookingPayment.service');
 const { labelForType } = require('./paymentMethod.controller');
 const ApiError = require('../utils/ApiError');
 const { getIo, emitToUser } = require('../socket');
+const { memberRentShare } = require('../utils/memberRent');
 
 function isObjectId(v) {
   return mongoose.Types.ObjectId.isValid(String(v));
@@ -366,7 +367,7 @@ async function approveSubmission(req, res, next) {
     // marked the month 'partial' with ৳39,600 still owing — money the occupant
     // never agreed to. The member the claim was filed against decides.
     const member   = memberForSubmission(booking, submission);
-    const rent     = member ? (Number(member.monthlyRent) || Number(booking.monthlyRent) || 0) : (Number(booking.monthlyRent) || 0);
+    const rent     = member ? memberRentShare(booking, member) : (Number(booking.monthlyRent) || 0);
     const service  = member
       ? (member.serviceCharge != null && member.serviceCharge !== 0 ? Number(member.serviceCharge) || 0 : Number(booking.serviceCharge) || 0)
       : (Number(booking.serviceCharge) || 0);

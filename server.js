@@ -241,7 +241,16 @@ app.get('/healthz', async (_req, res) => {
     // from being banned. Worth seeing BEFORE reminders start silently coming
     // back `rate_limited` — a throttled send looks identical to a quiet day
     // from the outside. Counts are per instance and reset on restart.
-    whatsapp: require('./services/whatsapp.service').throttleStatus(),
+    //
+    // `session` is whether the OpenWA session can send at all — an unlinked
+    // (`qr_ready`) or stale-id session failed every reminder for nine days in
+    // September without a trace. Informational only: it never touches `ok`,
+    // since the app serves fine without WhatsApp, and it is cached and
+    // time-boxed so an unreachable gateway cannot slow this check.
+    whatsapp: {
+      ...require('./services/whatsapp.service').throttleStatus(),
+      session: await require('./services/whatsappSession.service').sessionStatus({ maxWaitMs: 1500 }),
+    },
     uptime: process.uptime(),
   });
 });
@@ -511,6 +520,13 @@ async function start() {
   // was doing the same sweep twice a day for no reason).
   const { startCronJobs } = require('./services/cron.service');
   startCronJobs();
+
+  // ─── WhatsApp session monitor ────────────────────────────────────────────
+  // Probes the OpenWA session every minute: feeds /healthz, resolves a stale
+  // OPENWA_SESSION_ID by session name, and alerts admins in-app once when the
+  // session has been down 15 minutes and once when it recovers. No-op unless
+  // WHATSAPP_PROVIDER=openwa. After the Mongo connect — it reads the last alert.
+  require('./services/whatsappSession.service').startSessionMonitor();
 
   // ─── Rented-listing cleanup ──────────────────────────────────────────────
   // A listing flips to 'rented' when its booking is created. We keep it visible

@@ -26,6 +26,7 @@
 
 const Provider = require('../models/Provider');
 const ApiError = require('../utils/ApiError');
+const { canonicalThana, canonicalThanaList } = require('../utils/thanaNames');
 const {
   getCategory,
   validateProviderFields,
@@ -193,12 +194,21 @@ exports.update = asyncH(async (req, res) => {
   for (const key of ['division', 'district', 'thana', 'area', 'addressText']) {
     if (typeof body[key] === 'string') provider[key] = body[key];
   }
+  // Same folding as the coverage list, for the same reason: `thana` is the
+  // level tenants search by, and two spellings of one neighbourhood are two
+  // neighbourhoods to an exact match.
+  if (typeof body.thana === 'string') provider.thana = canonicalThana(body.thana);
 
   if (body.coverage && typeof body.coverage === 'object') {
     const { mode, radiusKm, thanas, areas } = body.coverage;
     if (mode === 'radius' || mode === 'areas') provider.coverage.mode = mode;
     if (Number.isFinite(Number(radiusKm))) provider.coverage.radiusKm = Number(radiusKm);
-    if (Array.isArray(thanas)) provider.coverage.thanas = thanas.map(String).slice(0, 50);
+    // Canonicalised, not stored raw. The coverage picker shows whichever
+    // language the provider is reading, and the tenant searches in whichever
+    // language THEY are reading — so "ধানমন্ডি" and "Dhanmondi" must land on
+    // one stored spelling or the browse query's exact `$in` misses half the
+    // country. See utils/thanaNames.js; the cap lives there too.
+    if (Array.isArray(thanas)) provider.coverage.thanas = canonicalThanaList(thanas);
     if (Array.isArray(areas)) provider.coverage.areas = areas.map(String).slice(0, 100);
   }
 
@@ -268,6 +278,18 @@ exports.submit = asyncH(async (req, res) => {
   if (!provider.name) missing.push('name');
   if (!provider.geo?.coordinates?.length) missing.push('location');
   if (!provider.phone) missing.push('phone');
+  // An areas-mode provider with an empty thana list is the worst outcome this
+  // whole flow can produce: approved, fee paid, and matched by
+  // `$in: [thana, []]` — false for every tenant whose thana we know, which is
+  // every tenant who used the picker. He would be live and unfindable, and
+  // nothing downstream would report it as a fault.
+  //
+  // The provider app also disables its own Next on this, but a guard in a
+  // browser protects the experience, never the data: an older build, or a
+  // resumed draft created before that screen existed, still arrives here.
+  if (provider.coverage?.mode === 'areas' && !(provider.coverage.thanas || []).length) {
+    missing.push('coverage');
+  }
   // `basic` KYC — one photo — is all that is asked for here. NID belongs to
   // the VERIFIED badge, earned later; demanding it at the door is the wall
   // that stops a গৃহকর্মী from ever registering.

@@ -157,6 +157,12 @@ const env = {
     openwaApiUrl:    (process.env.OPENWA_API_URL || 'http://localhost:2785').replace(/\/+$/, ''),
     openwaApiKey:    process.env.OPENWA_API_KEY || '',
     openwaSessionId: process.env.OPENWA_SESSION_ID || '',
+    // The session's NAME on the gateway (unique there). A QR relink often
+    // creates a new session under the same name and the pinned id above then
+    // 404s — services/whatsappSession.service.js looks the name up and sends
+    // through that session until the env var is corrected. Set it empty to
+    // turn the fallback off.
+    openwaSessionName: process.env.OPENWA_SESSION_NAME ?? 'tolet-pro',
 
     // ── Send throttle (see services/whatsapp.service.js) ─────────────────
     // OpenWA drives a real consumer WhatsApp account, which gets banned for

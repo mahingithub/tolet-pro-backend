@@ -96,7 +96,7 @@ exports.revokeAllOtherSessions = asyncH(async (req, res) => {
 //     theme, language, marketingEmails, smsAlerts, callNotifications, aiLearningOptIn,
 //     notifications: { push, email, sound, frequency, dnd:{…}, messages, … },
 //     app:      { currency, autoplayVideos, reduceMotion, defaultLandingRole,
-//                 defaultHome, livingMode },
+//                 defaultHome, livingMode, dismissedNotices:[…] },
 //     tenant:   { profileVisibility, savedSearchAlerts, defaultCity, … },
 //     landlord: { inquiryNotifications, autoReplyEnabled, quietHours:{…}, … },
 //   }
@@ -118,6 +118,19 @@ function assignAllowed(target, patch, keys) {
     if (patch[k] !== undefined) target[k] = patch[k];
   }
 }
+
+// app.dismissedNotices is a free-form list, so it can't go through
+// assignAllowed + schema enums like the scalars above. Keep short string ids
+// only, de-duplicated, oldest first, and never more than NOTICE_CAP of them.
+const NOTICE_CAP = 50;
+const sanitizeNoticeIds = (list) => {
+  if (!Array.isArray(list)) return null;
+  const ids = list
+    .filter((s) => typeof s === 'string')
+    .map((s) => s.trim().slice(0, 64))
+    .filter(Boolean);
+  return [...new Set(ids)].slice(-NOTICE_CAP);
+};
 
 exports.getPreferences = asyncH(async (req, res) => {
   const prefs = req.user.preferences ? req.user.preferences.toObject() : {};
@@ -159,7 +172,18 @@ exports.setPreferences = asyncH(async (req, res) => {
   }
 
   // ── App / display group ───────────────────────────────────────────────
-  if (patch.app) assignAllowed(prefs.app, patch.app, APP_KEYS);
+  if (patch.app) {
+    assignAllowed(prefs.app, patch.app, APP_KEYS);
+    // Merged, never replaced: nothing un-dismisses a notice, so a second
+    // device sending its own (older) list must not wipe out the first's.
+    const incoming = sanitizeNoticeIds(patch.app.dismissedNotices);
+    if (incoming) {
+      prefs.app.dismissedNotices = sanitizeNoticeIds([
+        ...(prefs.app.dismissedNotices || []),
+        ...incoming,
+      ]);
+    }
+  }
 
   // ── Tenant scope ──────────────────────────────────────────────────────
   if (patch.tenant) {

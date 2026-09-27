@@ -287,6 +287,13 @@ const AppPrefsSchema = new mongoose.Schema(
     // person ("I live alone") rather than about the device — reinstalling the
     // app should not ask again. '' = never answered; Living shows the picker.
     livingMode: { type: String, enum: ['', 'solo', 'joint'], default: '' },
+
+    // Dashboard notices the user pressed "Dismiss" on (e.g.
+    // 'tenant.verification.verified'). On the account for the same reason as
+    // livingMode: a dismissal kept only in one browser's storage came back on
+    // the phone, after a reinstall, and — for the old 7-day snooze — every
+    // week. Sanitised and capped in privacy.controller (sanitizeNoticeIds).
+    dismissedNotices: { type: [String], default: [] },
   },
   { _id: false },
 );

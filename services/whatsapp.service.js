@@ -42,6 +42,9 @@
 
 const axios = require('axios');
 const env = require('../config/env');
+const { normalizePhone } = require('../utils/phone');
+const { toAsciiDigits } = require('../utils/roomKey');
+const { activeSessionId } = require('./whatsappSession.service');
 
 const cfg = env.whatsapp || {};
 
@@ -50,22 +53,33 @@ const cfg = env.whatsapp || {};
  * (Meta's Cloud API wants "8801712345678"). Twilio wants the '+' back, which
  * we re-add at the Twilio call site.
  *
- * Handles the common Bangladesh formats so real-world stored numbers work
- * regardless of how they were entered:
+ * Validation is utils/phone's — the same rules that decide account identity —
+ * so a number the rest of the app considers invalid is never messaged:
  *   "+8801712345678" → "8801712345678"   (E.164 — the app's canonical form)
  *   "8801712345678"  → "8801712345678"   (already international)
  *   "01712345678"    → "8801712345678"   (BD local → prepend 880, drop 0)
+ *   "1712345678"     → "8801712345678"   (BD local, leading 0 dropped)
  *   "008801712345678"→ "8801712345678"   ("00" international prefix)
+ *   "+880 01712…"    → "8801712345678"   (trunk 0 kept after the country code)
+ *   "০১৭১২৩৪৫৬৭৮"   → "8801712345678"   (typed on a Bangla keyboard)
+ *   "12344636cg"     → ""                (typo — refused, not guessed at)
+ *
+ * The old digits-only version accepted anything 8+ digits long, so a typo or a
+ * BD number missing its 0 went to whichever country its first digits spelled.
  */
 function normalizeMsisdn(phone) {
-  // Strip everything that isn't a digit ('+', spaces, dashes, parens, ...).
-  let s = String(phone || '').replace(/\D/g, '');
+  let s = toAsciiDigits(phone).replace(/[\s().-]/g, '');
   if (!s) return '';
-  // "00" international dialling prefix → drop it.
-  if (s.startsWith('00')) s = s.slice(2);
-  // Bangladesh local "01XXXXXXXXX" (11 digits) → "880" + number w/o leading 0.
-  if (s.startsWith('0') && s.length === 11) s = `880${s.slice(1)}`;
-  return s;
+  if (s.startsWith('00')) s = `+${s.slice(2)}`;
+  s = s.replace(/^\+?8800(1[3-9]\d{8})$/, '+880$1');
+
+  const e164 = normalizePhone(s);
+  if (e164) return e164.slice(1);
+
+  // A foreign number stored without its '+'. Only a full-length international
+  // number passes; a malformed BD number (a digit short or extra) does not.
+  const digits = s.replace(/^\+/, '');
+  return /^[1-9]\d{10,14}$/.test(digits) && !digits.startsWith('880') ? digits : '';
 }
 
 /**
@@ -88,7 +102,9 @@ function isConfigured() {
   if (cfg.provider === 'openwa') {
     // Credentials only — whether the session is actually QR-linked and `ready`
     // is a runtime state the gateway answers with (409), not something we can
-    // know here without a network call on every isConfigured() caller.
+    // know here without a network call on every isConfigured() caller. That
+    // state is probed on its own clock by whatsappSession.service (/healthz +
+    // an admin alert when it stays down).
     return Boolean(cfg.openwaApiUrl && cfg.openwaApiKey && cfg.openwaSessionId);
   }
   // default: meta
@@ -179,7 +195,9 @@ async function sendViaOpenWA(msisdn, tpl) {
   // OpenWA addresses an individual chat by its WhatsApp id: "<msisdn>@c.us"
   // (groups use "@g.us", which reminders never target).
   const chatId = `${msisdn}@c.us`;
-  const url = `${cfg.openwaApiUrl}/api/sessions/${cfg.openwaSessionId}/messages/send-text`;
+  // Normally OPENWA_SESSION_ID; the named session instead while that id 404s
+  // (see whatsappSession.service — a QR relink can mint a new session id).
+  const url = `${cfg.openwaApiUrl}/api/sessions/${activeSessionId()}/messages/send-text`;
 
   const resp = await axios.post(
     url,
@@ -291,20 +309,42 @@ function schedule(fn) {
 }
 
 /**
+ * Did this failed send definitely NOT reach WhatsApp, so trying again later
+ * cannot produce a duplicate?
+ *
+ * True only when the gateway said so or was never reached: the session is
+ * down (409), the session id or key is wrong (404/401/403), it is shedding load
+ * (429), or the proxy in front of it could not reach it (502/503). A 400 means
+ * the recipient itself is unreachable — not on WhatsApp — and will not get
+ * better. A timeout, a reset or a 500 is ambiguous: WhatsApp Web can throw
+ * after the message is already on the wire, so those are not retried either.
+ */
+function isRetryable(err) {
+  const status = err.response?.status;
+  if (status) return [401, 403, 404, 409, 429, 502, 503].includes(status);
+  return ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'].includes(err.code);
+}
+
+/**
  * Send a WhatsApp message. NEVER throws — always resolves to a result object.
+ *
+ * A failure carries `retryable`: true when the message certainly did not go
+ * out and the cause is on our side (session down, throttled), so a caller may
+ * try the same message again on a later run. False for a bad number, a
+ * recipient not on WhatsApp, or an outcome we cannot be sure of.
  *
  * @param {string} phone         recipient phone (E.164 or local)
  * @param {(string|object)} templateData  see module docblock
- * @returns {Promise<{success:boolean, skipped?:boolean, messageId?:string|null, error?:string}>}
+ * @returns {Promise<{success:boolean, skipped?:boolean, retryable?:boolean, messageId?:string|null, error?:string}>}
  */
 async function sendWhatsAppMessage(phone, templateData) {
   const msisdn = normalizeMsisdn(phone);
   const tpl = normalizeTemplateData(templateData);
   const summary = tpl.kind === 'template' ? `template:${tpl.name}` : (tpl.body || '').slice(0, 80);
 
-  if (!msisdn || msisdn.length < 8) {
-    console.warn(`[whatsapp] skip — no valid recipient phone (got "${phone}")`);
-    return { success: false, skipped: true, error: 'invalid_recipient' };
+  if (!msisdn) {
+    console.warn(`[whatsapp] skip — no valid recipient phone (got "${logPhone(phone)}")`);
+    return { success: false, skipped: true, retryable: false, error: 'invalid_recipient' };
   }
 
   if (!isConfigured()) {
@@ -313,7 +353,7 @@ async function sendWhatsAppMessage(phone, templateData) {
       `[whatsapp] not configured (provider=${cfg.provider}) — would send to ` +
       `${logPhone(msisdn)}: "${summary}"`,
     );
-    return { success: false, skipped: true, error: 'not_configured' };
+    return { success: false, skipped: true, retryable: false, error: 'not_configured' };
   }
 
   // A Meta template cannot survive the trip through OpenWA: only its NAME
@@ -326,7 +366,7 @@ async function sendWhatsAppMessage(phone, templateData) {
       `[whatsapp] skip — provider 'openwa' cannot send Meta template ` +
       `"${tpl.name}" (set WHATSAPP_PROVIDER=meta for marketing blasts)`,
     );
-    return { success: false, skipped: true, error: 'template_unsupported' };
+    return { success: false, skipped: true, retryable: false, error: 'template_unsupported' };
   }
 
   // Refused BEFORE queueing: a message over its cap will never be sendable
@@ -339,7 +379,7 @@ async function sendWhatsAppMessage(phone, templateData) {
       `[today ${counters.total}/${throttle.perDay}, this number ` +
       `${counters.byNumber.get(msisdn) || 0}/${throttle.perNumberDay}]`,
     );
-    return { success: false, skipped: true, error: 'rate_limited', reason: breach };
+    return { success: false, skipped: true, retryable: true, error: 'rate_limited', reason: breach };
   }
 
   // Verification-friendly log: shows the function WAS invoked with the right
@@ -363,13 +403,13 @@ async function sendWhatsAppMessage(phone, templateData) {
   } catch (err) {
     if (err.rateLimited) {
       console.warn(`[whatsapp] throttled (queue_full) → ${logPhone(msisdn)}: "${summary}"`);
-      return { success: false, skipped: true, error: 'rate_limited', reason: 'queue_full' };
+      return { success: false, skipped: true, retryable: true, error: 'rate_limited', reason: 'queue_full' };
     }
     // Log the real gateway reason for ops, but swallow it for the caller so
     // background jobs never break on a WhatsApp failure.
     const detail = err.response?.data || err.message;
     console.error(`[whatsapp] send failed → ${logPhone(msisdn)}:`, detail);
-    return { success: false, error: err.message, details: detail };
+    return { success: false, retryable: isRetryable(err), error: err.message, details: detail };
   }
 }
 

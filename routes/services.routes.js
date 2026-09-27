@@ -50,6 +50,7 @@ const {
   FIELD_TYPES,
   KYC_TIERS,
   PRICE_AUTHORITIES,
+  COVERAGE_OPTIONS,
 } = require('../config/serviceCategories');
 
 const browse = require('../controllers/serviceBrowse.controller');
@@ -117,7 +118,16 @@ function buildPayload({ view, status }) {
     categories,
     // The enums the clients branch on, shipped alongside so a form renderer
     // never hardcodes a list that this file owns.
-    meta: { interactions: INTERACTIONS, fieldTypes: FIELD_TYPES, kycTiers: KYC_TIERS, priceAuthorities: PRICE_AUTHORITIES },
+    meta: {
+      interactions: INTERACTIONS,
+      fieldTypes: FIELD_TYPES,
+      kycTiers: KYC_TIERS,
+      priceAuthorities: PRICE_AUTHORITIES,
+      // The DEFAULT coverage ladder. A category may override it with its own
+      // `coverageOptions`; the registration screen reads the category's first
+      // and falls back to this, so neither list is hardcoded in a client.
+      coverageOptions: COVERAGE_OPTIONS,
+    },
     count: categories.length,
     view,
     status,
