@@ -1,5 +1,6 @@
 const AIGuide = require("../models/AIGuide");
 const ApiError = require("../utils/ApiError");
+const { SECTION_PLACEMENTS } = require("../utils/aiGuidePlacements");
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -10,7 +11,7 @@ exports.getAIGuides = asyncH(async (req, res) => {
 	const { deviceCategory } = req.query;
 	const filter = {
 		isActive: true,
-		placement: { $nin: ["welcome", "how_it_works", "support", "subscription", "checkout", "free_trial_mode"] },
+		placement: { $nin: ["welcome", ...SECTION_PLACEMENTS] },
 	};
 	if (deviceCategory === "mobile" || deviceCategory === "desktop" || deviceCategory === "tablet") {
 		if (deviceCategory === "desktop" || deviceCategory === "tablet") {
@@ -31,8 +32,7 @@ exports.getGuidesByPlacement = asyncH(async (req, res) => {
 	const { audience, deviceCategory } = req.query;
 
 	// Only page-section placements are fetchable through this public endpoint.
-	const allowed = ["how_it_works", "support", "subscription", "checkout", "free_trial_mode"];
-	if (!allowed.includes(placement)) {
+	if (!SECTION_PLACEMENTS.includes(placement)) {
 		throw ApiError.badRequest("Unknown guide placement");
 	}
 
@@ -95,11 +95,18 @@ const parseKeywords = (raw) => {
 	return list.map((k) => String(k).trim().toLowerCase()).filter(Boolean);
 };
 
+// Seconds, from a number or the admin form's string. Blank, zero or junk
+// clears it — the card then simply shows no length.
+const parseDuration = (raw) => {
+	const n = Math.round(Number(raw));
+	return Number.isFinite(n) && n > 0 ? n : undefined;
+};
+
 // @desc    Create a new AI Guide
 // @route   POST /api/ai-guides
 // @access  Private/Admin
 exports.createAIGuide = asyncH(async (req, res) => {
-	const { title, suggestionText, videoUrl, isActive, order, placement, audience, deviceCategory, keywords } = req.body;
+	const { title, suggestionText, videoUrl, isActive, order, placement, audience, deviceCategory, keywords, durationSec } = req.body;
 
 	const newGuide = new AIGuide({
 		title,
@@ -111,6 +118,7 @@ exports.createAIGuide = asyncH(async (req, res) => {
 		audience,
 		deviceCategory,
 		keywords: parseKeywords(keywords),
+		durationSec: parseDuration(durationSec),
 	});
 
 	const savedGuide = await newGuide.save();
@@ -121,7 +129,7 @@ exports.createAIGuide = asyncH(async (req, res) => {
 // @route   PUT /api/ai-guides/:id
 // @access  Private/Admin
 exports.updateAIGuide = asyncH(async (req, res) => {
-	const { title, suggestionText, videoUrl, isActive, order, placement, audience, deviceCategory, keywords } = req.body;
+	const { title, suggestionText, videoUrl, isActive, order, placement, audience, deviceCategory, keywords, durationSec } = req.body;
 
 	const guide = await AIGuide.findById(req.params.id);
 	if (!guide) {
@@ -137,6 +145,7 @@ exports.updateAIGuide = asyncH(async (req, res) => {
 	if (audience !== undefined) guide.audience = audience;
 	if (deviceCategory !== undefined) guide.deviceCategory = deviceCategory;
 	if (keywords !== undefined) guide.keywords = parseKeywords(keywords);
+	if (durationSec !== undefined) guide.durationSec = parseDuration(durationSec);
 
 	const updatedGuide = await guide.save();
 	res.status(200).json(updatedGuide);

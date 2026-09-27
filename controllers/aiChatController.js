@@ -1,6 +1,7 @@
 const ApiError = require("../utils/ApiError");
 const Property = require("../models/Property");
 const AIGuide = require("../models/AIGuide");
+const { SECTION_PLACEMENTS } = require("../utils/aiGuidePlacements");
 const aiPropertySearch = require("../services/aiPropertySearch");
 
 // Which Google backend is live (Vertex AI or AI Studio), the SDK differences
@@ -284,7 +285,9 @@ exports.askGemini = asyncH(async (req, res) => {
 	try {
 		guides = await AIGuide.find({
 			isActive: true,
-			placement: { $nin: ["welcome", "how_it_works", "support"] },
+			// Mirrors getAIGuides exactly — this list used to be its own copy and
+			// had drifted (subscription/checkout/trial-page videos leaked in).
+			placement: { $nin: ["welcome", ...SECTION_PLACEMENTS] },
 		})
 			.sort({ order: 1 })
 			.limit(30)

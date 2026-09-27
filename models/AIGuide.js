@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { ALL_PLACEMENTS } = require("../utils/aiGuidePlacements");
 
 const aiGuideSchema = new mongoose.Schema(
 	{
@@ -47,9 +48,14 @@ const aiGuideSchema = new mongoose.Schema(
 		//                   host dashboard). The video explains the share task
 		//                   that unlocks the trial, so admins can swap it
 		//                   without a redeploy.
+		//  'feature_*'    = the explainer video for one feature, shown on every
+		//                   screen that explains it — homepage card, landing
+		//                   page (see utils/aiGuidePlacements.js). Those screens
+		//                   keep text to one line; the video does the explaining.
+		//                   The first active guide by `order` is the one shown.
 		placement: {
 			type: String,
-			enum: ["assistant", "welcome", "how_it_works", "support", "subscription", "checkout", "free_trial_mode"],
+			enum: ALL_PLACEMENTS,
 			default: "assistant",
 		},
 		// Who the guide targets. Used by 'welcome' and 'how_it_works' placements
@@ -58,6 +64,14 @@ const aiGuideSchema = new mongoose.Schema(
 			type: String,
 			enum: ["tenant", "landlord", "all"],
 			default: "all",
+		},
+		// Length in seconds, optional. Shown on the video as "১:২০" — a short,
+		// KNOWN length is what gets a stranger to press play. Admin-entered,
+		// because a YouTube URL does not tell us its duration.
+		durationSec: {
+			type: Number,
+			min: 0,
+			max: 3600,
 		},
 		// Target device category (mobile, desktop, tablet, desktop_tablet, or all)
 		deviceCategory: {
