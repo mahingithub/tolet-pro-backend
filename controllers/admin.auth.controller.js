@@ -21,6 +21,8 @@ const User = require('../models/User');
 const ApiError = require('../utils/ApiError');
 const env = require('../config/env');
 
+const { assertAdminEmailFree } = require('../utils/adminRoles');
+const { normalizePhone } = require('../utils/phone');
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
 // Shape the admin object sent to the client — never leak password/session
@@ -41,10 +43,12 @@ function toAdminDTO(user) {
   };
 }
 
-// POST /api/admin/auth/login  { phone, password }
+// POST /api/admin/auth/login  { phone | email, password }
 exports.login = asyncH(async (req, res) => {
   const result = await authService.adminLogin({
-    phone: req.body.phone,
+    // 01…, 880…, +880… all mean the same account.
+    phone: normalizePhone(req.body.phone) || req.body.phone,
+    email: req.body.email,
     password: req.body.password,
     device: req.headers['user-agent'] || 'Unknown device',
     ipAddress: req.ip || '0.0.0.0',
@@ -181,6 +185,8 @@ exports.updateMe = asyncH(async (req, res) => {
     if (e && !/^.+@.+\..+$/.test(e)) {
       throw ApiError.badRequest('ইমেইল সঠিক নয়।', { code: 'invalid_email' });
     }
+    // The email is a console login too, so it must not belong to another admin.
+    await assertAdminEmailFree(e, user._id);
     user.email = e.slice(0, 254);
   }
 

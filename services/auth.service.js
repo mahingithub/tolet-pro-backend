@@ -328,28 +328,41 @@ async function login({ phone, password, device = 'Unknown device', ipAddress = '
  *      - If 2FA is disabled: mints an ADMIN-SCOPED token immediately.
  * The account is loaded fresh so we never trust client-supplied role claims.
  */
-async function adminLogin({ phone, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
+async function adminLogin({ phone, email, password, device = 'Unknown device', ipAddress = '0.0.0.0' }) {
   const mockReq = { ip: ipAddress, headers: { 'user-agent': device } };
+
+  // An admin signs in with their phone or their email. Email isn't unique
+  // across users, so it only ever matches an ADMIN account (and the team
+  // console keeps admin emails unique — admin.team.controller).
+  const byEmail = !!String(email || '').trim();
+  const query = byEmail
+    ? { email: String(email).trim().toLowerCase(), $or: [{ roles: { $in: [...ADMIN_ROLES] } }, { role: { $in: [...ADMIN_ROLES] } }] }
+    : { phone };
+  const who = byEmail ? String(email).trim().toLowerCase() : phone;
+  if (!who || !password) {
+    throw ApiError.badRequest('ফোন নম্বর বা ইমেইল এবং পাসওয়ার্ড দিন।', { code: 'missing_credentials' });
+  }
 
   // OOM guard mirrors login(): trim any legacy-bloated sessions before load.
   await User.updateOne(
-    { phone },
+    query,
     { $push: { sessions: { $each: [], $slice: -(MAX_SESSIONS - 1) } } }
   );
 
-  const user = await User.findOne({ phone }).select('+password +loginAttempts +lockUntil +googleAuthSecret');
+  const user = await User.findOne(query).select('+password +loginAttempts +lockUntil +googleAuthSecret');
   if (!user || !user.phoneVerified) {
     await bcrypt.compare(password, '$2a$12$abcdefghijklmnopqrstuv'); // bogus hash — constant-ish timing
     await loginHistoryService.safeLog(
       loginHistoryService.recordFailedLogin,
-      mockReq, phone, !user ? 'admin_not_found' : 'admin_not_verified', { loginType: 'password_admin' }
+      mockReq, who, !user ? 'admin_not_found' : 'admin_not_verified', { loginType: 'password_admin' }
     );
-    throw ApiError.unauthorized(!user ? 'এই নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।' : 'অ্যাকাউন্টটি ভেরিফাইড নয়।', { code: !user ? 'admin_not_found' : 'admin_not_verified' });
+    const notFound = byEmail ? 'এই ইমেইলে কোনো অ্যাডমিন অ্যাকাউন্ট পাওয়া যায়নি।' : 'এই নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।';
+    throw ApiError.unauthorized(!user ? notFound : 'অ্যাকাউন্টটি ভেরিফাইড নয়।', { code: !user ? 'admin_not_found' : 'admin_not_verified' });
   }
   if (user.isLocked) {
     await loginHistoryService.safeLog(
       loginHistoryService.recordFailedLogin,
-      mockReq, phone, 'admin_account_locked', { loginType: 'password_admin' }
+      mockReq, who, 'admin_account_locked', { loginType: 'password_admin' }
     );
     throw ApiError.tooMany('অ্যাকাউন্ট সাময়িকভাবে লক করা হয়েছে। কিছুক্ষণ পর চেষ্টা করুন।', {
       code: 'account_locked',
@@ -365,7 +378,7 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
     await user.save();
     await loginHistoryService.safeLog(
       loginHistoryService.recordFailedLogin,
-      mockReq, phone, 'wrong_password', { loginType: 'password_admin' }
+      mockReq, who, 'wrong_password', { loginType: 'password_admin' }
     );
     throw ApiError.unauthorized('পাসওয়ার্ড ভুল হয়েছে।', { code: 'wrong_password' });
   }
@@ -381,7 +394,7 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
     await user.save();
     await loginHistoryService.safeLog(
       loginHistoryService.recordFailedLogin,
-      mockReq, phone, 'admin_rbac_rejected', { loginType: 'password_admin' }
+      mockReq, who, 'admin_rbac_rejected', { loginType: 'password_admin' }
     );
     throw ApiError.forbidden('এই অ্যাকাউন্টের অ্যাডমিন অ্যাক্সেস নেই।', { code: 'admin_required' });
   }
@@ -390,7 +403,7 @@ async function adminLogin({ phone, password, device = 'Unknown device', ipAddres
   if (user.isBanned) {
     await loginHistoryService.safeLog(
       loginHistoryService.recordFailedLogin,
-      mockReq, phone, 'admin_banned', { loginType: 'password_admin' }
+      mockReq, who, 'admin_banned', { loginType: 'password_admin' }
     );
     throw ApiError.forbidden('আপনার অ্যাকাউন্ট স্থগিত।', { code: 'account_banned' });
   }

@@ -23,6 +23,7 @@ const { RESIDENTIAL_SUB_CATEGORIES, FLAT_SUB_CATEGORIES } = Building.ENUMS;
 // write check will actually honour.
 const { seatsTaken } = require('../services/tenancy.service');
 const { idempotent } = require('../utils/idempotency');
+const { sendTenantWelcome } = require('../services/tenantWelcome.service');
 // Who a FLAT is suitable for. Per-unit, never per-building: one building holds
 // family flats, bachelor flats and both-flats side by side.
 const SUITABLE_FOR = ['', 'family', 'bachelor', 'both'];
@@ -728,12 +729,16 @@ async function placeTenantInUnit({ landlordId, unit, building, input }) {
 async function addTenantToUnit(req, res, next) {
   try {
     const { unit, building } = await ownedUnit(req, req.params.unitId);
+    const input = tenantInputFrom(req.body);
     const out = await placeTenantInUnit({
       landlordId: req.user._id,
       unit,
       building,
-      input: tenantInputFrom(req.body),
+      input,
     });
+    if (!out.replayed) {
+      sendTenantWelcome({ landlord: req.user, buildingName: building.name, tenantName: input.name, tenantPhone: input.phone });
+    }
     return res.status(201).json(out);
   } catch (err) {
     return next(err);
@@ -795,6 +800,7 @@ async function replaceTenantInUnit(req, res, next) {
 
     await booking.save();
     const added = booking.members[booking.members.length - 1];
+    sendTenantWelcome({ landlord: req.user, buildingName: building.name, tenantName: input.name, tenantPhone: input.phone });
     return res.json({ booking, memberId: String(added._id), replacedMemberId: String(outgoing._id) });
   } catch (err) {
     return next(err);

@@ -10,6 +10,11 @@
  * handler already sits behind requireAdminAuth):
  *   GET  /api/admin/subscriptions              — audience table + headline counts
  *   POST /api/admin/subscriptions/send-offer   — deliver a composed offer
+ *   GET  /api/admin/subscription-payments      — bKash / Nagad claims to verify
+ *   POST /api/admin/subscription-payments/:id/approve | /reject
+ *   POST|PUT|DELETE /api/admin/subscription-payments/methods[/:id] — payment methods (super admin)
+ *   PUT  /api/admin/subscription-payments/prices         — plan prices (super admin)
+ *   POST|DELETE /api/admin/subscription-payments/sms-key — forwarder key (super admin)
  *
  * The heavy lifting lives in services/marketing.service.js; this layer is
  * request validation, the audit trail, and shaping the response.
@@ -20,6 +25,11 @@ const campaignLinks = require('../services/campaignLink.service');
 const auditLog = require('../services/auditLog.service');
 const { listTargets, normalizeTarget } = require('../utils/campaignTargets');
 const ApiError = require('../utils/ApiError');
+const mongoose = require('mongoose');
+const SubscriptionPayment = require('../models/SubscriptionPayment');
+const PaymentSms = require('../models/PaymentSms');
+const subPayments = require('../services/subscriptionPayment.service');
+const { signedViewUrlFor } = require('../services/cloudinary.service');
 
 // ─── GET /api/admin/subscriptions ───────────────────────────────────────────
 // Query: tier=free|plus|pro, installed=true|false, whatsapp=true|false,
@@ -225,4 +235,194 @@ async function sendOffer(req, res, next) {
   }
 }
 
-module.exports = { listSubscriptions, listCampaignTargets, listCampaignLinks, sendOffer };
+// ─── GET /api/admin/subscription-payments?status=pending|approved|rejected ──
+// Each claim comes with the wallet SMS carrying its TrxID (if one arrived) and
+// the reason the automatic check left it here, so the reviewer can compare
+// without opening the wallet app. Pending is oldest first: that's the queue.
+async function listSubscriptionPayments(req, res, next) {
+  try {
+    const status = ['pending', 'approved', 'rejected'].includes(req.query.status) ? req.query.status : 'pending';
+    const rows = await SubscriptionPayment.find({ status })
+      .sort({ createdAt: status === 'pending' ? 1 : -1 })
+      .limit(200)
+      .lean();
+
+    const smsRows = rows.length
+      ? await PaymentSms.find({ trxId: { $in: [...new Set(rows.map((r) => r.trxId))] } }).lean()
+      : [];
+    const lastSms = await PaymentSms.findOne().sort({ createdAt: -1 }).select('createdAt').lean();
+    const settings = await subPayments.getSettings();
+
+    const payments = rows.map((r) => {
+      const sms = smsRows.find((m) => r.smsId && String(m._id) === String(r.smsId))
+        || smsRows.find((m) => m.trxId === r.trxId && m.method === r.method)
+        || smsRows.find((m) => m.trxId === r.trxId);
+      return {
+        ...r,
+        id: String(r._id),
+        screenshotUrl: r.screenshotPublicId
+          ? signedViewUrlFor({ publicId: r.screenshotPublicId, url: r.screenshotUrl })
+          : '',
+        sms: sms ? {
+          id: String(sms._id),
+          method: sms.method,
+          amount: sms.amount,
+          sender: sms.sender,
+          text: sms.text,
+          receivedAt: sms.createdAt,
+          usedByOther: !!sms.paymentId && String(sms.paymentId) !== String(r._id),
+        } : null,
+      };
+    });
+
+    return res.json({
+      payments,
+      methods: await subPayments.adminMethods(settings),
+      plans: await subPayments.getPlans(settings),
+      smsCheck: {
+        configured: !!settings.smsKeyHash,
+        keyCreatedAt: settings.smsKeyCreatedAt || null,
+        lastSmsAt: lastSms ? lastSms.createdAt : null,
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── POST /api/admin/subscription-payments/:id/approve ──────────────────────
+async function approveSubscriptionPayment(req, res, next) {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) throw ApiError.notFound('পেমেন্ট পাওয়া যায়নি।');
+    const payment = await subPayments.adminApprove(req.params.id, req.user?._id || null);
+    await auditLog.safeLog(auditLog.logAdminAction, req, {
+      action: 'subscription_payment.approve',
+      targetType: 'user',
+      targetId: String(payment.userId),
+      description: `Approved ${payment.planId} ৳${payment.amount} (${payment.method} ${payment.trxId}) for user ${payment.userId}`,
+      metadata: { paymentId: String(payment._id), userId: String(payment.userId), trxId: payment.trxId },
+    });
+    return res.json({ payment });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── POST /api/admin/subscription-payments/:id/reject  { reason } ───────────
+async function rejectSubscriptionPayment(req, res, next) {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) throw ApiError.notFound('পেমেন্ট পাওয়া যায়নি।');
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) throw ApiError.badRequest('কেন গ্রহণ করা হলো না তা লিখুন — ব্যবহারকারী এটি দেখবেন।', { code: 'no_reason' });
+    const payment = await subPayments.adminReject(req.params.id, reason, req.user?._id || null);
+    await auditLog.safeLog(auditLog.logAdminAction, req, {
+      action: 'subscription_payment.reject',
+      targetType: 'user',
+      targetId: String(payment.userId),
+      description: `Rejected ${payment.method} ${payment.trxId} for user ${payment.userId}: ${reason.slice(0, 80)}`,
+      metadata: { paymentId: String(payment._id), userId: String(payment.userId), trxId: payment.trxId },
+    });
+    return res.json({ payment });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── Payment methods ("Add Payment System") — super admins only ────────────
+// POST   /api/admin/subscription-payments/methods      { type, accountNumber, … }
+// PUT    /api/admin/subscription-payments/methods/:id  same body (also on/off)
+// DELETE /api/admin/subscription-payments/methods/:id
+// Each decides where hosts' money goes, so each leaves an audit row.
+function methodHandler(change) {
+  return async (req, res, next) => {
+    try {
+      if (req.params.id && !mongoose.isValidObjectId(req.params.id)) {
+        throw ApiError.notFound('মাধ্যমটি পাওয়া যায়নি।', { code: 'method_not_found' });
+      }
+      const methods = await change(req);
+      await auditLog.safeLog(auditLog.logAdminAction, req, {
+        action: 'subscription_payment.settings',
+        targetType: 'config',
+        targetId: 'billing',
+        description: `${req.method} payment method ${req.params.id || ''} ${req.body?.type || ''} ${req.body?.accountNumber || ''}`.trim(),
+        metadata: { methods: methods.map((m) => `${m.type}:${m.accountNumber}${m.enabled ? '' : ' (off)'}`) },
+      });
+      return res.json({ methods });
+    } catch (err) {
+      return next(err);
+    }
+  };
+}
+const addPaymentMethod = methodHandler((req) => subPayments.addMethod(req.body || {}, req.user?._id || null));
+const updatePaymentMethod = methodHandler((req) => subPayments.updateMethod(req.params.id, req.body || {}, req.user?._id || null));
+const deletePaymentMethod = methodHandler((req) => subPayments.deleteMethod(req.params.id, req.user?._id || null));
+
+// ─── PUT /api/admin/subscription-payments/prices
+//   { prices: { plus_monthly: 19, pro_monthly: 49 }, yearlyDiscount: 20 }
+// What each plan costs; yearly prices follow from the discount. Takes effect
+// for the next claim — one already submitted keeps the amount it was asked for.
+async function updatePlanPrices(req, res, next) {
+  try {
+    const plans = await subPayments.updatePrices(req.body?.prices, req.body?.yearlyDiscount, req.user?._id || null);
+    await auditLog.safeLog(auditLog.logAdminAction, req, {
+      action: 'subscription_payment.prices',
+      targetType: 'config',
+      targetId: 'billing',
+      description: `Set plan prices: ${plans.map((p) => `${p.id} ৳${p.price}`).join(', ')} (yearly ${plans.find((p) => p.discount != null)?.discount}% off)`,
+      metadata: { prices: Object.fromEntries(plans.map((p) => [p.id, p.price])) },
+    });
+    return res.json({ plans });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── POST /api/admin/subscription-payments/sms-key ──────────────────────────
+// A new key for the wallet phone's SMS forwarder, shown ONCE. Any earlier key
+// stops working, so the phone must be given the new one.
+async function createSmsKey(req, res, next) {
+  try {
+    const key = await subPayments.createSmsKey(req.user?._id || null);
+    await auditLog.safeLog(auditLog.logAdminAction, req, {
+      action: 'subscription_payment.sms_key',
+      targetType: 'config',
+      targetId: 'billing',
+      description: 'Made a new SMS forwarder key (automatic payment check on)',
+    });
+    return res.json({ key });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ─── DELETE /api/admin/subscription-payments/sms-key ────────────────────────
+async function removeSmsKey(req, res, next) {
+  try {
+    await subPayments.removeSmsKey(req.user?._id || null);
+    await auditLog.safeLog(auditLog.logAdminAction, req, {
+      action: 'subscription_payment.sms_key',
+      targetType: 'config',
+      targetId: 'billing',
+      description: 'Removed the SMS forwarder key (automatic payment check off)',
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports = {
+  addPaymentMethod,
+  updatePaymentMethod,
+  deletePaymentMethod,
+  updatePlanPrices,
+  createSmsKey,
+  removeSmsKey,
+  listSubscriptions,
+  listCampaignTargets,
+  listCampaignLinks,
+  sendOffer,
+  listSubscriptionPayments,
+  approveSubscriptionPayment,
+  rejectSubscriptionPayment,
+};

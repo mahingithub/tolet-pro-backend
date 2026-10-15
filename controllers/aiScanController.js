@@ -20,6 +20,7 @@
  */
 
 const ApiError = require('../utils/ApiError');
+const { sendTenantWelcome } = require('../services/tenantWelcome.service');
 
 // ── AI backend ────────────────────────────────────────────────────────────────
 // Vertex AI while the Google Cloud credit lasts, Google AI Studio after it runs
@@ -600,6 +601,9 @@ async function batchCreateBookings(req, res, next) {
             monthlyRent: t.monthlyRent || 0,
           }),
         });
+        if (!out.replayed) {
+          sendTenantWelcome({ landlord: req.user, buildingName: building.name, tenantName: name, tenantPhone: phone });
+        }
         created.push({ bookingId: String(out.booking._id), memberId: out.memberId, name, roomNumber, bookAs });
 
       } catch (err) {

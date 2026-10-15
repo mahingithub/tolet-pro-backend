@@ -42,6 +42,7 @@ const User = require('../models/User');
 const whatsapp = require('./whatsapp.service');
 const env = require('../config/env');
 const { publicAppBaseUrl } = require('../utils/inviteToken');
+const { whatsappText, smsText } = require('../utils/messageFrame');
 
 // Optional SMS fallback — absent in installs that don't ship the provider.
 let sms = null;
@@ -129,8 +130,6 @@ function reminderBody({ borrower, lender, amount, outstanding, lentOn, dueOn, du
     '',
     `নিজের ধার-দেনা ও খরচের হিসাব রাখতে TO-LET PRO ব্যবহার করতে পারেন — একদম বিনামূল্যে:`,
     link,
-    '',
-    '— TO-LET PRO (স্বয়ংক্রিয় বার্তা)',
   );
 
   return lines.join('\n');
@@ -166,8 +165,9 @@ async function runSoloDueReminders() {
     // One name lookup per ledger, not per entry — a lender with three loans
     // falling due the same week is one query, not three.
     let lenderName = '';
-    const user = await User.findById(doc.userId).select('name').lean().catch(() => null);
+    const user = await User.findById(doc.userId).select('name phone').lean().catch(() => null);
     if (user && user.name) lenderName = String(user.name).trim();
+    const contact = { label: '', name: lenderName, phone: user && user.phone };
 
     const dueEntries = (doc.entries || []).filter(
       (e) => e.type === 'lend'
@@ -201,7 +201,7 @@ async function runSoloDueReminders() {
       ).catch(() => ({ modifiedCount: 0 }));
       if (!claim.modifiedCount) continue;
 
-      const body = reminderBody({
+      const msg = { title: '💸 ধার ফেরতের রিমাইন্ডার', contact, body: reminderBody({
         borrower: person.name || 'বন্ধু',
         lender: lenderName,
         amount: Math.round(Number(entry.amount) || 0),
@@ -209,15 +209,15 @@ async function runSoloDueReminders() {
         lentOn: entry.date,
         dueOn: entry.dueDate,
         dueToday: new Date(entry.dueDate) < dhakaMidnight(dhakaDay(1)),
-      });
+      }) };
 
-      const waRes = await whatsapp.sendWhatsAppMessage(phone, { body }).catch(() => ({ success: false }));
+      const waRes = await whatsapp.sendWhatsAppMessage(phone, { body: whatsappText(msg) }).catch(() => ({ success: false }));
 
       // SMS costs real money per message and a Bangla body is several segments,
       // so it is strictly a fallback for a WhatsApp that could not deliver —
       // never a second copy alongside it.
       if (!waRes.success && env.smsApiKey && sms) {
-        await sms.sendSms(phone, body).catch((e) =>
+        await sms.sendSms(phone, smsText(msg)).catch((e) =>
           console.warn(`[solo-due] sms fallback failed for entry ${entry.id}:`, e.message));
       }
 

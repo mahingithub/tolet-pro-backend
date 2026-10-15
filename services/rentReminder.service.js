@@ -56,6 +56,7 @@ const whatsapp      = require('./whatsapp.service');
 const env           = require('../config/env');
 const { tiersForUsers } = require('./subscription.service');
 const { memberRentShare } = require('../utils/memberRent');
+const { whatsappText, smsText } = require('../utils/messageFrame');
 
 let sms = null;
 try { sms = require('./sms.service'); } catch { sms = null; }
@@ -216,7 +217,7 @@ function reminderMessage({ milestone, tenantName, property, monthKey, amountDue,
  * one slow gateway can't stall the loop); the manual endpoint awaits it so the
  * landlord is told what actually happened instead of an unconditional "sent".
  */
-async function deliverReminder({ userId, phone, title, body, data, allowSms = true }) {
+async function deliverReminder({ userId, phone, title, body, data, contact, allowSms = true }) {
   const out = { inApp: 'skipped', whatsapp: 'skipped', sms: 'skipped' };
 
   if (userId) {
@@ -230,7 +231,7 @@ async function deliverReminder({ userId, phone, title, body, data, allowSms = tr
   // phone gets WhatsApp too, because most tenants never installed the app.
   if (phone) {
     const waRes = await whatsapp
-      .sendWhatsAppMessage(phone, { body: `${title}\n\n${body}` })
+      .sendWhatsAppMessage(phone, { body: whatsappText({ title, body, contact }) })
       .catch(() => ({ success: false }));
     out.whatsapp = waRes.success ? 'sent' : 'failed';
     // Not a channel — tells the sweep this send may be repeated tomorrow.
@@ -241,7 +242,7 @@ async function deliverReminder({ userId, phone, title, body, data, allowSms = tr
     // triggered path must stay free, and a tenant it could not reach on
     // WhatsApp is reported back rather than quietly billed to us.
     if (allowSms && !waRes.success && env.smsApiKey && sms) {
-      out.sms = await sms.sendSms(phone, `${title} — ${body}`).then(() => 'sent').catch(() => 'failed');
+      out.sms = await sms.sendSms(phone, smsText({ title, body, contact })).then(() => 'sent').catch(() => 'failed');
     }
   }
 
@@ -416,12 +417,14 @@ async function sendManualReminder({
   const custom = typeof customMessage === 'string' ? customMessage.trim() : '';
   if (custom.length > MAX_CUSTOM_MESSAGE_LEN) return { ok: false, reason: 'message_too_long' };
   const body = custom || r.body;
+  const landlord = await User.findById(booking.landlordId).select('name phone').lean().catch(() => null) || {};
 
   const { inApp, whatsapp: wa, sms: viaSms } = await deliverReminder({
     userId: r.userId,
     phone:  r.phone,
     title:  r.title,
     body,
+    contact: { label: 'বাড়িওয়ালা', name: landlord.name, phone: landlord.phone },
     data: {
       bookingId: String(booking._id),
       ...(r.member ? { memberId: String(r.member._id) } : {}),
@@ -478,9 +481,9 @@ function markWhatsAppRetry(bookingId, memberId, dedupeKey, pending) {
 // already ran as that attempt's fallback. The marker stays armed only while the
 // failure is still ours to fix — a send that went out, or a recipient WhatsApp
 // will never reach, ends the retries.
-async function retryWhatsApp(bookingId, { memberId, dedupeKey, phone, title, body }) {
+async function retryWhatsApp(bookingId, { memberId, dedupeKey, phone, title, body, contact }) {
   const res = phone
-    ? await whatsapp.sendWhatsAppMessage(phone, { body: `${title}\n\n${body}` }).catch(() => ({ success: false }))
+    ? await whatsapp.sendWhatsAppMessage(phone, { body: whatsappText({ title, body, contact }) }).catch(() => ({ success: false }))
     : { success: false };
   if (!res.success && res.retryable === true) return false;
   await markWhatsAppRetry(bookingId, memberId, dedupeKey, false);
@@ -496,12 +499,17 @@ async function runRentReminders(today = new Date()) {
   // One batched query for every landlord in the sweep — Smart Alerts is Pro
   // only, so most bookings may be filtered out before any work is done.
   const tierByLandlord = await tiersForUsers(bookings.map((b) => b.landlordId));
+  // The landlord's own number goes in every WhatsApp/SMS — see utils/messageFrame.
+  const landlords = new Map((await User.find({ _id: { $in: bookings.map((b) => b.landlordId) } })
+    .select('name phone').lean()).map((u) => [String(u._id), u]));
 
   for (const booking of bookings) {
     if ((tierByLandlord.get(String(booking.landlordId)) || 'free') !== 'pro') {
       skippedTier += 1;
       continue;
     }
+    const landlord = landlords.get(String(booking.landlordId)) || {};
+    const contact = { label: 'বাড়িওয়ালা', name: landlord.name, phone: landlord.phone };
     const leadDays = Number(booking.reminderLeadDays) || 3;
 
     // Who owes rent here, and where each one's obligation lives:
@@ -563,7 +571,7 @@ async function runRentReminders(today = new Date()) {
         dueOn:      next.due,
         graceDays:  Number(booking.gracePeriodDays) || 0,
       });
-      const job = { memberId: o.memberId, dedupeKey, phone: await o.phone(), title, body };
+      const job = { memberId: o.memberId, dedupeKey, phone: await o.phone(), title, body, contact };
 
       if (isRetry) {
         retries.push(job);

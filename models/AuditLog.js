@@ -104,6 +104,13 @@ const auditLogSchema = new mongoose.Schema(
 
         // Marketing (Subscriptions console → Send Offer)
         'marketing.send_offer',
+
+        // bKash / Nagad plan payments (Subscriptions console → Payments to verify)
+        'subscription_payment.approve',
+        'subscription_payment.reject',
+        'subscription_payment.settings',
+        'subscription_payment.prices',
+        'subscription_payment.sms_key',
       ],
       index: true,
     },

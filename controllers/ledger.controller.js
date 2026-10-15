@@ -32,6 +32,7 @@ const LedgerParty = require('../models/LedgerParty');
 const LedgerEntry = require('../models/LedgerEntry');
 const ApiError = require('../utils/ApiError');
 const whatsapp = require('../services/whatsapp.service');
+const { whatsappText, smsText } = require('../utils/messageFrame');
 const sms = require('../services/sms.service');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
@@ -403,16 +404,19 @@ exports.remind = asyncH(async (req, res) => {
   }
 
   const shopName = req.merchant.name || 'দোকান';
-  const body = `আসসালামু আলাইকুম। ${shopName}-এ আপনার বাকি ৳${party.balance}। `
-    + 'সুবিধামতো পরিশোধ করলে উপকৃত হব। ধন্যবাদ।';
+  const msg = {
+    body: `আসসালামু আলাইকুম। ${shopName}-এ আপনার বাকি ৳${party.balance}। `
+      + 'সুবিধামতো পরিশোধ করলে উপকৃত হব। ধন্যবাদ।',
+    contact: { label: 'দোকান', name: shopName, phone: req.merchant.phone },
+  };
 
   // WhatsApp first, SMS as the fallback. Both no-op safely when the channel is
   // not configured, so an unconfigured environment reports "not sent" rather
   // than throwing.
-  let result = await whatsapp.sendWhatsAppMessage(party.phone, { body });
+  let result = await whatsapp.sendWhatsAppMessage(party.phone, { body: whatsappText(msg) });
   let channel = 'whatsapp';
   if (!result?.success) {
-    result = await sms.sendSms(party.phone, body).then(
+    result = await sms.sendSms(party.phone, smsText(msg)).then(
       (r) => ({ success: r !== false, ...r }),
       () => ({ success: false }),
     );
@@ -843,10 +847,9 @@ exports.sendStatement = asyncH(async (req, res) => {
   const { from, to } = resolveRange(req.body || {});
   const statement = await buildStatement(party, from, to);
 
-  const body = buildStatementMessage({
-    shopName: req.merchant.name || 'দোকান',
-    party,
-    statement,
+  const body = whatsappText({
+    body: buildStatementMessage({ shopName: req.merchant.name || 'দোকান', party, statement }),
+    contact: { label: 'দোকান', name: req.merchant.name, phone: req.merchant.phone },
   });
 
   const result = await whatsapp.sendWhatsAppMessage(party.phone, { body });

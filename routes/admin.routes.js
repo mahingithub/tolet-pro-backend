@@ -141,6 +141,19 @@ router.get ('/subscriptions/links',      subCtl.listCampaignLinks);
 router.get ('/subscriptions',            subCtl.listSubscriptions);
 router.post('/subscriptions/send-offer', requireSuperAdmin, subCtl.sendOffer);
 
+// bKash / Nagad plan payments the automatic SMS check couldn't accept.
+// Open to the whole console, like confirming a provider's fee above.
+router.get ('/subscription-payments',             subCtl.listSubscriptionPayments);
+// Where the money goes and the forwarder's key: super admins only.
+router.post  ('/subscription-payments/methods',     requireSuperAdmin, subCtl.addPaymentMethod);
+router.put   ('/subscription-payments/methods/:id', requireSuperAdmin, subCtl.updatePaymentMethod);
+router.delete('/subscription-payments/methods/:id', requireSuperAdmin, subCtl.deletePaymentMethod);
+router.put   ('/subscription-payments/prices',   requireSuperAdmin, subCtl.updatePlanPrices);
+router.post  ('/subscription-payments/sms-key',  requireSuperAdmin, subCtl.createSmsKey);
+router.delete('/subscription-payments/sms-key',  requireSuperAdmin, subCtl.removeSmsKey);
+router.post('/subscription-payments/:id/approve', subCtl.approveSubscriptionPayment);
+router.post('/subscription-payments/:id/reject',  subCtl.rejectSubscriptionPayment);
+
 // ─── Admin team management (SUPER ADMIN ONLY) ───────────────────────────────
 // Designate other users as admins/sub-admins and revoke that access. The
 // extra requireSuperAdmin gate means a support_agent/moderator can reach the
@@ -148,6 +161,8 @@ router.post('/subscriptions/send-offer', requireSuperAdmin, subCtl.sendOffer);
 router.get ('/team',                        requireSuperAdmin, teamCtl.listTeam);
 router.get ('/team/candidates',             requireSuperAdmin, teamCtl.searchCandidates);
 router.post('/team/grant',                  requireSuperAdmin, teamCtl.grantAdmin);
+router.post('/team/create',                 requireSuperAdmin, teamCtl.createAdmin);
+router.post('/team/:id/password',           requireSuperAdmin, teamCtl.setAdminPassword);
 router.put ('/team/:id/role',               requireSuperAdmin, teamCtl.updateAdminRole);
 router.post('/team/:id/revoke',             requireSuperAdmin, teamCtl.revokeAdmin);
 

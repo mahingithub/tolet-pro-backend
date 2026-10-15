@@ -30,6 +30,7 @@
 const User = require('../models/User');
 const notifications = require('./notification.service');
 const whatsapp = require('./whatsapp.service');
+const { whatsappText } = require('../utils/messageFrame');
 const { publicAppBaseUrl } = require('../utils/inviteToken');
 const { computeLedger, simplifyDebts, paymentBreakdown } = require('../utils/livingLedger');
 
@@ -95,7 +96,7 @@ function paidSummaryLine(cats, limit = 3) {
     .join(' · ');
 }
 
-function reminderCopy({ householdName, creditorName, debtorName, amount, paidTotal, cats, creditorPhone }) {
+function reminderCopy({ householdName, creditorName, debtorName, amount, paidTotal, cats }) {
   const link = `${publicAppBaseUrl()}/living`;
   const title = `💰 ${creditorName} হিসাব মেলানোর অনুরোধ করেছেন`;
 
@@ -115,16 +116,10 @@ function reminderCopy({ householdName, creditorName, debtorName, amount, paidTot
     `ভাগ অনুযায়ী আপনার কাছে ${creditorName} ${bnTaka(amount)} পাবেন। অনুগ্রহ করে সুবিধামতো পরিশোধ করে দেওয়ার অনুরোধ রইলো।`,
   );
 
-  // The whole point of the nudge is that it ends in a payment, so the way to
-  // pay goes IN the message rather than being left as an exercise.
-  if (creditorPhone) lines.push('', `${creditorName}-এর নম্বর: ${creditorPhone}`);
-
   lines.push(
     '',
     `পুরো হিসাব — কে কী দিয়েছে, কার কত বাকি — অ্যাপে দেখুন:`,
     link,
-    '',
-    '— TO-LET PRO (স্বয়ংক্রিয় বার্তা)',
   );
 
   return { title, body: lines.join('\n') };
@@ -182,7 +177,12 @@ async function resolveSettleUpReminder({ household, meMemberId, toMemberId, now 
     amount: debt.amount,
     paidTotal: mine.total,
     cats: mine.cats,
-    creditorPhone,
+  });
+  // The whole point of the nudge is that it ends in a payment, so the creditor's
+  // number goes in the WhatsApp text (utils/messageFrame). This is also what
+  // the dialog shows verbatim.
+  const whatsappMessage = whatsappText({
+    title, body, contact: { label: '', name: creditor.name, phone: creditorPhone },
   });
 
   const last = lastNudge(household, String(creditor._id), String(debtor._id));
@@ -200,6 +200,7 @@ async function resolveSettleUpReminder({ household, meMemberId, toMemberId, now 
     cats: mine.cats,
     title,
     body,
+    whatsappMessage,
     onCooldown,
     lastSentAt: last ? last.at : null,
     channels: { inApp: !!debtorUserId, whatsapp: !!phone },
@@ -217,7 +218,7 @@ async function previewSettleUpReminder(args) {
     paidTotal: r.paidTotal,
     cats: r.cats,
     title: r.title,
-    message: r.body,
+    message: r.whatsappMessage,
     onCooldown: r.onCooldown,
     lastSentAt: r.lastSentAt,
     channels: r.channels,
@@ -261,7 +262,7 @@ async function sendSettleUpReminder({ household, meMemberId, toMemberId, now = n
 
   if (r.phone) {
     const waRes = await whatsapp
-      .sendWhatsAppMessage(r.phone, { body: `${r.title}\n\n${r.body}` })
+      .sendWhatsAppMessage(r.phone, { body: r.whatsappMessage })
       .catch(() => ({ success: false }));
     out.whatsapp = waRes.success ? 'sent' : 'failed';
   }

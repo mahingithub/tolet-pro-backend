@@ -3,24 +3,17 @@
 /**
  * Billing Controller
  * ──────────────────────────────────────────────────────────────────────────
- * Handles subscription state for hosts. We simulate a local payment gateway
- * like bKash or SSLCommerz by immediately activating the subscription upon checkout.
+ * Handles subscription state for hosts. There is no payment gateway: hosts
+ * pay by bKash / Nagad Send Money and submit the TrxID, which is accepted by a
+ * forwarded wallet SMS or an admin — see services/subscriptionPayment.service.js.
  */
 
 const Subscription = require('../models/Subscription');
 const Property = require('../models/Property');
 const ApiError = require('../utils/ApiError');
 const { trialEndFrom, tierOf, TRIAL_MONTHS } = require('../utils/subscriptionTier');
-
-// Simulated plans — MUST mirror the frontend catalogue in
-// tolet-pro-frontend/src/services/subscriptionService.js (ids AND prices),
-// otherwise checkout rejects the plan the UI just offered.
-const PLANS = [
-  { id: 'plus_monthly', name: 'Plus Monthly', price: 19,  currency: 'BDT', interval: 'month', tier: 'plus' },
-  { id: 'plus_yearly',  name: 'Plus Yearly',  price: 229, currency: 'BDT', interval: 'year',  tier: 'plus' },
-  { id: 'pro_monthly',  name: 'Pro Monthly',  price: 49,  currency: 'BDT', interval: 'month', tier: 'pro' },
-  { id: 'pro_yearly',   name: 'Pro Yearly',   price: 599, currency: 'BDT', interval: 'year',  tier: 'pro' },
-];
+const payments = require('../services/subscriptionPayment.service');
+const SubscriptionPayment = require('../models/SubscriptionPayment');
 
 const asyncH = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
@@ -65,9 +58,47 @@ function freeSubscriptionStub(userId) {
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/billing/plans
 // ─────────────────────────────────────────────────────────────────────────────
-exports.getPlans = (req, res) => {
-  res.json({ plans: PLANS });
-};
+exports.getPlans = asyncH(async (req, res) => {
+  const settings = await payments.getSettings();
+  res.json({ plans: await payments.getPlans(settings), methods: await payments.payMethods(settings) });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/billing/payments — multipart: planId, methodId, trxId, sender, file?
+// ─────────────────────────────────────────────────────────────────────────────
+exports.submitPayment = asyncH(async (req, res) => {
+  const payment = await payments.submit(req.user, req.body || {}, req.file);
+  const sub = await ensureSubscription(req.user);
+  res.status(201).json({
+    payment: payments.publicPayment(payment),
+    subscription: sub ? sub.toJSON() : freeSubscriptionStub(req.user._id),
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/billing/payments — the host's recent claims, newest first
+// ─────────────────────────────────────────────────────────────────────────────
+exports.listMyPayments = asyncH(async (req, res) => {
+  const rows = await SubscriptionPayment.find({ userId: req.user._id }).sort({ createdAt: -1 }).limit(5).lean();
+  res.json({ payments: rows.map(payments.publicPayment) });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/billing/payments/sms — the wallet phone's SMS forwarder
+// ─────────────────────────────────────────────────────────────────────────────
+// Body is the forwarder app's default JSON: { from, text, ... }. Authenticated
+// by the key made in the admin console, as `Authorization: Bearer <key>`.
+exports.receivePaymentSms = asyncH(async (req, res) => {
+  const { smsKeyHash } = await payments.getSettings();
+  if (!smsKeyHash) {
+    throw new ApiError(503, 'Automatic payment check is not configured.', { code: 'sms_check_off' });
+  }
+  if (!payments.smsKeyMatches(smsKeyHash, req.get('authorization'))) {
+    throw ApiError.unauthorized('Bad key.', { code: 'bad_sms_key' });
+  }
+  const { from = '', text = '' } = req.body || {};
+  res.json({ result: await payments.receiveSms(String(from), String(text)) });
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/host/me/subscription
@@ -76,63 +107,6 @@ exports.getMySubscription = asyncH(async (req, res) => {
   const sub = await ensureSubscription(req.user);
   res.json({
     subscription: sub ? sub.toJSON() : freeSubscriptionStub(req.user._id),
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/billing/checkout
-// ─────────────────────────────────────────────────────────────────────────────
-exports.checkout = asyncH(async (req, res) => {
-  const { planId, paymentMethod } = req.body;
-  const plan = PLANS.find(p => p.id === planId);
-  
-  if (!plan) {
-    throw ApiError.badRequest('অবাস্তব প্ল্যান আইডি।'); // Invalid plan ID
-  }
-  
-  // Checkout provisions the row if it's missing — with no automatic trial,
-  // most payers reach here having never had one. `status` is overwritten to
-  // 'active' immediately below; `trialEndsAt` stays null because no trial was
-  // ever granted.
-  let sub = await ensureSubscription(req.user);
-  if (!sub) {
-    sub = await Subscription.create({
-      userId: req.user._id,
-      planId: 'free',
-      status: 'canceled',
-      trialTier: 'free',
-      trialEndsAt: null,
-      autoRenew: false,
-    });
-  }
-
-  // Simulate payment success and update subscription
-  const currentPeriodEnd = new Date();
-  if (plan.interval === 'month') {
-    currentPeriodEnd.setMonth(currentPeriodEnd.getMonth() + 1);
-  } else if (plan.interval === 'year') {
-    currentPeriodEnd.setFullYear(currentPeriodEnd.getFullYear() + 1);
-  }
-  
-  sub.planId = planId;
-  sub.status = 'active';
-  sub.currentPeriodEnd = currentPeriodEnd;
-  sub.autoRenew = true;
-  sub.lastPaymentMethod = paymentMethod || 'bKash';
-  sub.lastTransactionId = 'TXN-' + Math.random().toString(36).substring(2, 10).toUpperCase();
-  
-  await sub.save();
-  
-  // Sync tier to all listings owned by this host for immediate badge/sort updates
-  await Property.updateMany(
-    { ownerUserId: req.user._id },
-    { $set: { hostTier: plan.tier || 'free' } }
-  );
-
-  res.json({ 
-    success: true, 
-    message: 'পেমেন্ট সফল হয়েছে!', // Payment successful!
-    subscription: sub.toJSON() 
   });
 });
 

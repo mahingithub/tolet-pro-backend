@@ -24,6 +24,7 @@ const { settleMoveOut, sortByRecency } = require('../services/tenancy.service');
 // drift between the automatic and the manual path.
 const { sendManualReminder, previewManualReminder } = require('../services/rentReminder.service');
 const { tiersForUsers } = require('../services/subscription.service');
+const { sendTenantWelcome } = require('../services/tenantWelcome.service');
 const ApiError      = require('../utils/ApiError');
 const cloud         = require('../services/cloudinary.service');
 const { getIo, emitToUser } = require('../socket');
@@ -481,6 +482,16 @@ async function createBooking(req, res, next) {
     // Invalidate insights cache so the host sees fresh analytics.
     invalidateInsightsCache(req.user._id);
 
+    // The flat's tenant and every occupant typed in; a phone on both is one person.
+    const welcome = new Map();
+    for (const t of [{ name: booking.tenant, phone: booking.tenantPhone }, ...booking.members]) {
+      const key = t.phone && (phoneCore(t.phone) || t.phone);
+      if (key && !welcome.has(key)) welcome.set(key, t);
+    }
+    for (const t of welcome.values()) {
+      sendTenantWelcome({ landlord: req.user, buildingName: booking.property, tenantName: t.name, tenantPhone: t.phone });
+    }
+
     // Hand back a signed photo link so the card the host just created can show
     // the picture without waiting for a reload.
     const out = booking.toJSON();
@@ -910,6 +921,7 @@ async function addMember(req, res, next) {
         data:   { bookingId: String(booking._id), memberId: String(created._id) },
       });
     }
+    sendTenantWelcome({ landlord: req.user, buildingName: booking.property, tenantName: created.name, tenantPhone: created.phone });
 
     invalidateInsightsCache(req.user._id);
     return res.status(201).json({ booking });

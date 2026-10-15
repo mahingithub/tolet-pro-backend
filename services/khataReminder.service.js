@@ -56,6 +56,7 @@
 const LedgerParty = require('../models/LedgerParty');
 const Merchant = require('../models/Merchant');
 const whatsapp = require('./whatsapp.service');
+const { whatsappText } = require('../utils/messageFrame');
 
 const TZ = process.env.CRON_TZ || 'Asia/Dhaka';
 
@@ -108,8 +109,6 @@ function reminderBody({ customer, shopName, amount }) {
     'সুবিধামতো পরিশোধ করলে উপকৃত হব।',
     '',
     'ইতিমধ্যে পরিশোধ করে থাকলে এই বার্তাটি উপেক্ষা করুন।',
-    '',
-    '— TO-LET PRO (স্বয়ংক্রিয় বার্তা)',
   ].join('\n');
 }
 
@@ -151,7 +150,7 @@ async function runKhataReminders() {
   // debtors due is one query, not fifteen.
   const merchantIds = [...new Set(candidates.map((p) => String(p.merchantId)))];
   const merchants = await Merchant.find({ _id: { $in: merchantIds } })
-    .select('name isBanned khataAutoReminders')
+    .select('name phone isBanned khataAutoReminders')
     .lean();
   const byMerchant = new Map(merchants.map((m) => [String(m._id), m]));
 
@@ -189,10 +188,14 @@ async function runKhataReminders() {
     ).catch(() => ({ modifiedCount: 0 }));
     if (!claim.modifiedCount) continue;
 
-    const body = reminderBody({
-      customer: party.name || 'গ্রাহক',
-      shopName: merchant.name || 'দোকান',
-      amount: party.balance,
+    const body = whatsappText({
+      title: `🧾 বাকির রিমাইন্ডার — ${merchant.name || 'দোকান'}`,
+      body: reminderBody({
+        customer: party.name || 'গ্রাহক',
+        shopName: merchant.name || 'দোকান',
+        amount: party.balance,
+      }),
+      contact: { label: 'দোকান', name: merchant.name, phone: merchant.phone },
     });
 
     const res = await whatsapp

@@ -27,6 +27,7 @@ const Inquiry       = require('../models/Inquiry');
 const User          = require('../models/User');
 const notifications = require('./notification.service');
 const whatsapp      = require('./whatsapp.service');
+const { whatsappText } = require('../utils/messageFrame');
 const { tiersForUsers } = require('./subscription.service');
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
@@ -56,7 +57,7 @@ async function runVisitReminders() {
     'visitSchedule.status':       'accepted',
     'visitSchedule.reminderSent': { $ne: true },
   })
-    .select('propTitle propertyId inquirerUserId propertyOwnerId visitSchedule phone')
+    .select('propTitle propertyId inquirerUserId propertyOwnerId visitSchedule phone user')
     .lean();
 
   let sent = 0;
@@ -128,17 +129,30 @@ async function runVisitReminders() {
     // sendWhatsAppMessage never throws, so a WhatsApp failure can't stop the
     // sweep or undo the reminderSent claim above.
     const tenantPhone   = inq.phone || await resolveUserPhone(inq.inquirerUserId);
-    const landlordPhone = landlordHasSmartAlerts(inq.propertyOwnerId)
-      ? await resolveUserPhone(inq.propertyOwnerId)
-      : '';
+    const owner = inq.propertyOwnerId
+      ? await User.findById(inq.propertyOwnerId).select('name phone preferences.landlord.showPhoneOnListings').lean().catch(() => null) || {}
+      : {};
+    const landlordPhone = landlordHasSmartAlerts(inq.propertyOwnerId) ? owner.phone : '';
+    // A landlord who hides their number on listings doesn't have it sent to a visitor either.
+    const ownerContact = owner.preferences?.landlord?.showPhoneOnListings === false
+      ? null
+      : { label: 'বাড়িওয়ালা', name: owner.name, phone: owner.phone };
     if (tenantPhone) {
       whatsapp.sendWhatsAppMessage(tenantPhone, {
-        body: `🗓️ ভিজিট রিমাইন্ডার — ${prop}\n📍 ${inq.propertyId?.address || 'লোকেশন লিংক'}\n${label}-এ আপনার নির্ধারিত ভিজিট আর ২ ঘণ্টা পরে। সময়মতো পৌঁছালে সুবিধা হবে। কোনো কারণে আসতে না পারলে অনুগ্রহ করে জানাবেন।`,
+        body: whatsappText({
+          title: `🗓️ ভিজিট রিমাইন্ডার — ${prop}`,
+          body: `📍 ${inq.propertyId?.address || 'লোকেশন লিংক'}\n${label}-এ আপনার নির্ধারিত ভিজিট আর ২ ঘণ্টা পরে। সময়মতো পৌঁছালে সুবিধা হবে। কোনো কারণে আসতে না পারলে অনুগ্রহ করে জানাবেন।`,
+          contact: ownerContact,
+        }),
       });
     }
     if (landlordPhone) {
       whatsapp.sendWhatsAppMessage(landlordPhone, {
-        body: `🗓️ ভিজিট রিমাইন্ডার — ${prop}\n📍 ${inq.propertyId?.address || 'লোকেশন লিংক'}\n${label}-এ একজন সম্ভাব্য ভাড়াটিয়া আপনার প্রপার্টি দেখতে আসবেন, আর ২ ঘণ্টা বাকি আছে।`,
+        body: whatsappText({
+          title: `🗓️ ভিজিট রিমাইন্ডার — ${prop}`,
+          body: `📍 ${inq.propertyId?.address || 'লোকেশন লিংক'}\n${label}-এ একজন সম্ভাব্য ভাড়াটিয়া আপনার প্রপার্টি দেখতে আসবেন, আর ২ ঘণ্টা বাকি আছে।`,
+          contact: { label: 'ভাড়াটিয়া', name: inq.user, phone: tenantPhone },
+        }),
       });
     }
     sent++;

@@ -78,8 +78,26 @@ async function assertRoleChangeAllowed(actor, target, nextRole) {
   }
 }
 
+/**
+ * Admins can sign in by email, and email isn't unique across users — so no
+ * two ADMIN accounts may share one. `exceptId` is the admin being edited.
+ */
+async function assertAdminEmailFree(email, exceptId = null) {
+  if (!email) return;
+  const User = require('../models/User');
+  const clash = await User.exists({
+    email,
+    _id: { $ne: exceptId },
+    $or: [{ roles: { $in: ADMIN_ROLES } }, { role: { $in: ADMIN_ROLES } }],
+  });
+  if (clash) {
+    throw ApiError.conflict('এই ইমেইল আরেকজন অ্যাডমিন ব্যবহার করছেন।', { code: 'email_taken' });
+  }
+}
+
 module.exports = {
   ADMIN_ROLES,
+  assertAdminEmailFree,
   isAdminRole,
   rolesOf,
   isSuperAdmin,

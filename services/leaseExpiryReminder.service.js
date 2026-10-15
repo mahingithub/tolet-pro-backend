@@ -24,6 +24,7 @@ const Booking       = require('../models/Booking');
 const User          = require('../models/User');
 const notifications = require('./notification.service');
 const whatsapp      = require('./whatsapp.service');
+const { whatsappText, smsText } = require('../utils/messageFrame');
 const env           = require('../config/env');
 const { tiersForUsers } = require('./subscription.service');
 
@@ -64,10 +65,9 @@ function milestoneFor(booking, today = new Date()) {
   return { days: hit, daysLeft: left, key: `${dateKey(booking.leaseEnd)}@${hit}` };
 }
 
-async function resolveUserPhone(userId) {
-  if (!userId) return '';
-  const u = await User.findById(userId).select('phone').lean().catch(() => null);
-  return (u && u.phone) ? u.phone : '';
+async function resolveUser(userId) {
+  if (!userId) return {};
+  return await User.findById(userId).select('name phone').lean().catch(() => null) || {};
 }
 
 async function runLeaseExpiryReminders(today = new Date()) {
@@ -105,6 +105,8 @@ async function runLeaseExpiryReminders(today = new Date()) {
       kind:       'lease_expiry_reminder',
     };
 
+    const landlord = await resolveUser(booking.landlordId);
+
     // ── Tenant — never gated ───────────────────────────────────────────────
     const tenantTitle = `📄 লিজ নবায়নের সময় হয়েছে — ${prop}`;
     const tenantBody  = `প্রিয় ভাড়াটিয়া, আপনার লিজের মেয়াদ ${when} (${dateKey(booking.leaseEnd)}) শেষ হতে চলেছে। থাকার ইচ্ছা থাকলে নবায়নের জন্য বাড়িওয়ালার সাথে যোগাযোগ করুন। ধন্যবাদ।`;
@@ -132,16 +134,20 @@ async function runLeaseExpiryReminders(today = new Date()) {
     // (WhatsApp → SMS, the same chain the rent reminder uses.)
     const phones = (booking.members || []).length
       ? booking.members.filter((m) => m.status !== 'moved-out').map((m) => m.phone)
-      : [booking.tenantPhone || await resolveUserPhone(booking.tenantId)];
+      : [booking.tenantPhone || (await resolveUser(booking.tenantId)).phone];
+    const tenantMsg = {
+      title: tenantTitle, body: tenantBody,
+      contact: { label: 'বাড়িওয়ালা', name: landlord.name, phone: landlord.phone },
+    };
     const seen = new Set();
     for (const tenantPhone of phones) {
       const key = whatsapp.normalizeMsisdn(tenantPhone);
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      whatsapp.sendWhatsAppMessage(tenantPhone, { body: `${tenantTitle}\n\n${tenantBody}` })
+      whatsapp.sendWhatsAppMessage(tenantPhone, { body: whatsappText(tenantMsg) })
         .then((waRes) => {
           if (!waRes.success && env.smsApiKey && sms) {
-            sms.sendSms(tenantPhone, `${tenantTitle} — ${tenantBody}`).catch(() => {});
+            sms.sendSms(tenantPhone, smsText(tenantMsg)).catch(() => {});
           }
         })
         .catch(() => {});
@@ -157,12 +163,17 @@ async function runLeaseExpiryReminders(today = new Date()) {
         title: llTitle, body: llBody, data: meta,
       }).catch(() => {});
 
-      const landlordPhone = await resolveUserPhone(booking.landlordId);
+      const landlordPhone = landlord.phone;
+      // A shared room has no single tenant to name, so no contact block.
+      const llMsg = {
+        title: llTitle, body: llBody,
+        contact: { label: 'ভাড়াটিয়া', name: booking.tenant, phone: booking.tenantPhone },
+      };
       if (landlordPhone) {
-        whatsapp.sendWhatsAppMessage(landlordPhone, { body: `${llTitle}\n\n${llBody}` })
+        whatsapp.sendWhatsAppMessage(landlordPhone, { body: whatsappText(llMsg) })
           .then((waRes) => {
             if (!waRes.success && env.smsApiKey && sms) {
-              sms.sendSms(landlordPhone, `${llTitle} — ${llBody}`).catch(() => {});
+              sms.sendSms(landlordPhone, smsText(llMsg)).catch(() => {});
             }
           })
           .catch(() => {});
